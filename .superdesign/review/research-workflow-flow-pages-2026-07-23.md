@@ -29,7 +29,7 @@
 - draft_id: ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - preview_url: https://p.superdesign.dev/draft/ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
-- version: 4
+- version: 5
 - generated_at: 2026-07-23T09:51:59.450Z
 - link_status: source-verified
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
@@ -39,7 +39,10 @@
 - visual_review_after_compliance_repair: not performed; no visual verification claim is made
 - responsive_repair_2026-07-23: one replace completed; CLI exit code 0; draft ID unchanged
 - post_responsive_source_review: the narrow-rail source now hides the subtitle and the full rail-footer container, centers navigation icons, and keeps `衡策` in a non-wrapping flex row; the research facts, demo watermark, provenance drawer, exact strategy-pool fallback URL, and history handler remain present
-- remaining_responsive_source_gap: the main element still contains Tailwind `md:ml-[208px]` and has no max-1179 CSS override for that margin, so the required 64px main offset at 1100px is not source-verified; no second replace was run because this repair task allowed at most one replace per page
+- v4_responsive_source_gap: the main element still contained Tailwind `md:ml-[208px]` with no max-1179 CSS margin override, so browser review measured `mainLeft=208` and a wrapped two-line brand at 1100px
+- final_review_correction_2026-07-23: one review-driven replace completed; CLI exit code 0; draft ID unchanged
+- post_final_correction_source_review: max-1179 `main` now has `margin-left:64px!important`, `width:auto!important`, `min-width:0!important`, `max-width:calc(100vw - 64px)!important`, and `overflow-x:hidden!important`, which overrides the retained Tailwind `md:ml-[208px]`; the 64px brand container is a centered non-wrapping row and the direct `衡策` span has 18px type, 22px line-height, `white-space:nowrap`, `word-break:keep-all`, and zero letter spacing; subtitle and rail footer remain hidden
+- final_correction_regression_check: v4 and v5 HTML are byte-identical from immediately after `</style>` through the end of the document, so business data, links, back behavior, watermark, provenance drawer, layout markup, and all non-style content are unchanged
 - visual_review_after_responsive_repair: not performed; no visual verification claim is made
 
 ## 官方事件流
