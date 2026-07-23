@@ -91,3 +91,15 @@
 - browser_verification_pending: the main agent will verify quality v5 in the browser; no post-correction source or visual verification claim is made here
 - last_verified_source_baseline: v4 retained the 64px main offset, `min-width:0`, `overflow-x:hidden`, hidden footer, seven data-domain states, six SourcePolicy rows, lineage, run/fallback state, refusal records, and inspector fields
 - visual_review_after_responsive_repair: not performed; no visual verification claim is made
+
+## Controller browser verification — 2026-07-23
+
+- Browser surface: signed-in Chrome session using the public preview URLs recorded above.
+- Viewports checked: 1440x900, 1280x900, and 1100x900.
+- Candidate pool: 1440/1280/1100 screenshots reviewed; `scrollWidth` equals viewport width at all checked sizes; rail is 208px at 1440/1280 and 64px at 1100; the fixed demo watermark is visible.
+- Stock research v5 at 1100: `scrollWidth=1100`, `mainLeft=64`, `railRight=64`; brand rect is `left=14,width=36,height=22`; exact candidate-pool fallback link and fixed demo watermark are present.
+- Official events v5 at 1100: `scrollWidth=1100`, `mainLeft=64`, `railRight=64`; brand rect is `left=14,width=36,height=18`; the idle state reads `当前显示 3 条官方事件`, the old contradictory empty state is absent, and no demo watermark is present.
+- Data quality v5 at 1100: `scrollWidth=1100`, `mainLeft=64`, `railRight=64`; brand rect is `left=14,width=36,height=18`; exactly six `未记录` review cells remain, no quality total score is present, and no demo watermark is present.
+- At 1280 all four Flow pages measured `scrollWidth=1280` with a 208px rail. The later v5 corrections are restricted to max-width 1179px styles, so the reviewed 1440 layouts and business content remain unchanged.
+- Final screenshot evidence is stored under `.superdesign/review/screenshots/`, including `candidates-1440.png`, `candidates-1100.png`, `stock-v5-1100.png`, `events-v5-1100.png`, and `quality-v5-1100.png`.
+- Non-blocking browser telemetry timeouts were observed during capture; page DOM, rendered previews, and measurements loaded successfully.
