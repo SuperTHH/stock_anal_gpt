@@ -112,3 +112,13 @@
 - At 1280 all four Flow pages measured `scrollWidth=1280` with a 208px rail. The later v5 corrections are restricted to max-width 1179px styles, so the reviewed 1440 layouts and business content remain unchanged.
 - Final screenshot evidence is stored under `.superdesign/review/screenshots/`, including `candidates-1440.png`, `candidates-1100.png`, `stock-v5-1100.png`, `events-v5-1100.png`, and `quality-v5-1100.png`.
 - Non-blocking browser telemetry timeouts were observed during capture; page DOM, rendered previews, and measurements loaded successfully.
+
+## Final v6 browser regression — 2026-07-23
+
+- Stock research v6: external stylesheet references are absent; the exact candidate-pool fallback link, fixed demo watermark, and five-year research figures remain present.
+- Stock research v6 responsive measurements: 1440px (`railW=208`, `scrollWidth=1440`), 1280px (`railW=208`, `scrollWidth=1280`), and 1100px (`mainLeft=64`, `railW=64`, `scrollWidth=1100`).
+- Data quality v6 header: `报告日期 2026-07-22`, `采集日期 2026-07-23`, and `部分可用 · 策略输出阻断` are visible.
+- Data quality v6 SourcePolicy: all six approved official roots are present, with four `可用` and two `缺失` connection states; exactly six `未记录` review-date cells remain.
+- Data quality v6 boundary checks: external stylesheet references, quality total score, and demo watermark are absent.
+- Data quality v6 responsive measurements: 1440px (`railW=208`, `scrollWidth=1440`), 1280px (`railW=208`, `scrollWidth=1280`), and 1100px (`mainLeft=64`, `railW=64`, `scrollWidth=1100`).
+- Final screenshots: `stock-v6-1100.png`, `quality-v6-1440.png`, `quality-v6-sourcepolicy-1440.png`, and `quality-v6-sourcepolicy-1100.png`.
