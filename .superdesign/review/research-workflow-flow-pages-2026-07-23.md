@@ -29,7 +29,7 @@
 - draft_id: ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - preview_url: https://p.superdesign.dev/draft/ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
-- version: 3
+- version: 4
 - generated_at: 2026-07-23T09:51:59.450Z
 - link_status: source-verified
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
@@ -37,6 +37,10 @@
 - compliance_repair_2026-07-23: one additional replace completed; CLI exit code 0
 - post_compliance_source_review: the native `nav-back` anchor keeps the exact strategy-pool preview URL as its no-history fallback and uses `window.history.length > 1`, `event.preventDefault()`, and `window.history.back()` when browser history exists; the generated HTML differs from version 2 only by this handler
 - visual_review_after_compliance_repair: not performed; no visual verification claim is made
+- responsive_repair_2026-07-23: one replace completed; CLI exit code 0; draft ID unchanged
+- post_responsive_source_review: the narrow-rail source now hides the subtitle and the full rail-footer container, centers navigation icons, and keeps `衡策` in a non-wrapping flex row; the research facts, demo watermark, provenance drawer, exact strategy-pool fallback URL, and history handler remain present
+- remaining_responsive_source_gap: the main element still contains Tailwind `md:ml-[208px]` and has no max-1179 CSS override for that margin, so the required 64px main offset at 1100px is not source-verified; no second replace was run because this repair task allowed at most one replace per page
+- visual_review_after_responsive_repair: not performed; no visual verification claim is made
 
 ## 官方事件流
 
@@ -45,25 +49,33 @@
 - draft_id: 09aed568-3137-49c5-9bde-6678e9a04dc8
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-09aed568-3137-49c5-9bde-6678e9a04dc8
 - preview_url: https://p.superdesign.dev/draft/09aed568-3137-49c5-9bde-6678e9a04dc8
-- version: 3
+- version: 4
 - generated_at: 2026-07-23T09:52:00.412Z
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
 - repair: one replace repair completed
 - compliance_repair_2026-07-23: one additional replace completed; CLI exit code 0
 - post_compliance_source_review: `effective_at`, `collected_at`, and `version` show 未记录 in both detail surfaces; `license_policy` shows 未核实; `v1.0.final` and `Official Public Disclosure / Open Data` are absent; the generated HTML differs from version 2 only by these metadata replacements
 - visual_review_after_compliance_repair: not performed; no visual verification claim is made
+- responsive_and_idle_state_repair_2026-07-23: one replace completed; CLI exit code 0; draft ID unchanged
+- post_responsive_source_review: max-1179 source uses a 64px rail and a `64px !important` main offset, hides the subtitle and full rail-footer container, and centers the brand row and navigation icons; the three `[官方事实]` rows and their official URLs remain present
+- post_idle_state_source_review: `当前显示 3 条官方事件` occurs once and `暂无符合条件的官方事件` occurs zero times; verified provenance placeholders remain `未记录` / `未核实`
+- responsive_source_note: the generated source does not add explicit `min-width: 0` or `overflow-x: hidden` to `.main-content`; absence of horizontal document overflow therefore still requires rendered-browser verification
+- visual_review_after_responsive_repair: not performed; no visual verification claim is made
 
 ## 数据质量与来源
 
 - requested_title: 数据质量与来源
-- current_title: 数据质量与来源 - 条款复核修正
+- current_title: 数据质量与来源 - 响应式侧边栏修复
 - draft_id: c000e47f-79c0-4343-8e34-49eec2104f22
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-c000e47f-79c0-4343-8e34-49eec2104f22
 - preview_url: https://p.superdesign.dev/draft/c000e47f-79c0-4343-8e34-49eec2104f22
-- version: 3
+- version: 4
 - generated_at: 2026-07-23T09:52:11.185Z
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
 - repair: one replace repair completed
 - compliance_repair_2026-07-23: one additional replace completed; CLI exit code 0
 - post_compliance_source_review: the SourcePolicy table still has exactly six rows and all six 条款复核 cells show 未记录; `2026-01-15`, `2026-03-01`, and `2025-12-10` are absent; no 质量总分, 综合质量, 功能演示数据, or watermark marker is present; the generated HTML differs from version 2 only by the four dated cells becoming muted 未记录 cells
 - visual_review_after_compliance_repair: not performed; no visual verification claim is made
+- responsive_repair_2026-07-23: one replace completed; CLI exit code 0; draft ID unchanged
+- post_responsive_source_review: max-1179 source uses a 64px rail, `margin-left:64px !important`, `min-width:0`, and `overflow-x:hidden`; it hides the subtitle and full rail-footer container and centers navigation icons; the exact seven data-domain states, six SourcePolicy rows, six `未记录` review cells, lineage, run/fallback state, refusal records, and inspector fields remain present
+- visual_review_after_responsive_repair: not performed; no visual verification claim is made
