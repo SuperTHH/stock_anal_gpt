@@ -17,7 +17,7 @@
 - preview_url: https://p.superdesign.dev/draft/f1a6f4ce-0bf7-40cd-a30e-030200612058
 - version: 2
 - generated_at: 2026-07-23T09:52:01.177Z
-- link_status: pending
+- link_status: browser-verified — the candidate action resolves to the exact stock preview `https://p.superdesign.dev/draft/ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1`; stock-to-candidate uses browser history when present and retains the exact no-history fallback `https://p.superdesign.dev/draft/f1a6f4ce-0bf7-40cd-a30e-030200612058`
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
 - repair: one replace repair completed
 - post_repair_source_review: all 18 required fictitious names are present; real-company leakage is absent; the fixed demo watermark, 功能演示数据集 provenance, sessionStorage state, and 32px stock-research action are present
@@ -29,7 +29,7 @@
 - draft_id: ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
 - preview_url: https://p.superdesign.dev/draft/ab9fa125-1d7d-46b4-89ea-2d8a01d8e3b1
-- version: 5
+- version: 6
 - generated_at: 2026-07-23T09:51:59.450Z
 - link_status: source-verified
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
@@ -44,6 +44,10 @@
 - post_final_correction_source_review: max-1179 `main` now has `margin-left:64px!important`, `width:auto!important`, `min-width:0!important`, `max-width:calc(100vw - 64px)!important`, and `overflow-x:hidden!important`, which overrides the retained Tailwind `md:ml-[208px]`; the 64px brand container is a centered non-wrapping row and the direct `衡策` span has 18px type, 22px line-height, `white-space:nowrap`, `word-break:keep-all`, and zero letter spacing; subtitle and rail footer remain hidden
 - final_correction_regression_check: v4 and v5 HTML are byte-identical from immediately after `</style>` through the end of the document, so business data, links, back behavior, watermark, provenance drawer, layout markup, and all non-style content are unchanged
 - visual_review_after_responsive_repair: not performed; no visual verification claim is made
+- final_review_font_repair_2026-07-23: one replace completed; CLI exit code 0; draft ID unchanged; current version 6
+- post_final_review_source_verification: `fontshare`, `fonts.googleapis.com`, and external `@import url(` each occur zero times; the local/system CJK and monospace stacks are present
+- final_review_nonstyle_regression_check: the pre/post SHA-256 of the exact HTML suffix after `</style>` is `d25d6fc4873236d6ec7bc10b3b034db5b944cd0c8152b108601873b1906e535c`, so all non-style stock content, data, links, history/fallback behavior, watermark, drawer, and markup are unchanged
+- visual_review_after_final_review_font_repair: not performed; no visual verification claim is made
 
 ## 官方事件流
 
@@ -72,11 +76,11 @@
 ## 数据质量与来源
 
 - requested_title: 数据质量与来源
-- current_title: 数据质量与来源 - 响应式品牌布局修正
+- current_title: 数据质量与来源 - 衡策 A股长期研究台
 - draft_id: c000e47f-79c0-4343-8e34-49eec2104f22
 - canvas_url: https://superdesign.dev/teams/dd3e76e7-a417-46d9-a7de-4c1447246341/projects/72c80b98-e159-48f9-9ed9-e846aa353ae1?node=draft-variant-c000e47f-79c0-4343-8e34-49eec2104f22
 - preview_url: https://p.superdesign.dev/draft/c000e47f-79c0-4343-8e34-49eec2104f22
-- version: 5
+- version: 6
 - generated_at: 2026-07-23T09:52:11.185Z
 - initial_visual_review: unavailable — the required in-app browser backend was not available, so no visual verification claim is made
 - repair: one replace repair completed
@@ -91,6 +95,11 @@
 - browser_verification_pending: the main agent will verify quality v5 in the browser; no post-correction source or visual verification claim is made here
 - last_verified_source_baseline: v4 retained the 64px main offset, `min-width:0`, `overflow-x:hidden`, hidden footer, seven data-domain states, six SourcePolicy rows, lineage, run/fallback state, refusal records, and inspector fields
 - visual_review_after_responsive_repair: not performed; no visual verification claim is made
+- final_review_compliance_repair_2026-07-23: one successful replace completed after one local CLI argument-validation failure that did not reach generation; CLI exit code 0; draft ID unchanged; current version 6
+- post_final_review_header_verification: the visible header contains exactly one `报告日期 2026-07-22`, one `采集日期 2026-07-23`, and one `部分可用 · 策略输出阻断`; unsupported footer text `最后核验: 2026-07-23 21:30` is absent
+- post_final_review_sourcepolicy_verification: the table retains exactly six sources and six `未记录` review cells, adds `当前连接状态` with four `可用` and two `缺失` source states, and adds the exact approved roots once each: `https://www.sse.com.cn/`, `https://www.szse.cn/`, `https://www.csrc.gov.cn/`, `https://www.stats.gov.cn/`, `https://www.cninfo.com.cn/`, `https://tushare.pro/`
+- post_final_review_font_and_boundary_verification: `fonts.googleapis.com`, `fontshare`, and external `@import url(` each occur zero times; `功能演示数据`, `watermark`, `质量总分`, and `综合质量` each occur zero times
+- visual_review_after_final_review_compliance_repair: not performed; no visual verification claim is made
 
 ## Controller browser verification — 2026-07-23
 
