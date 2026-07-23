@@ -1,0 +1,5 @@
+.worktrees/
+.npm-cache/
+.superdesign/review/
+.superdesign/tmp/
+.superpowers/sdd/
