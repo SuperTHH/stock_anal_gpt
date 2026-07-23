@@ -215,3 +215,15 @@ Acceptance checks: no horizontal overflow at 1440, 1280, or 1100 px; all key act
 - Header provenance action = 来源溯源 → #market-sources
 - Market metric sources = 上交所市场概况, 深交所市场概况, 上证指数行情/趋势
 - SSE close provenance note = 上证指数收盘 3,867.03 由次日昨收推导
+
+## Research workflow four-page supplement
+
+- Base draft: 1721cd00-0df1-404d-a6d4-7b823086f1ff
+- Flow pages: 策略候选池, 个股研究, 官方事件流, 数据质量与来源
+- Demo-only pages: 策略候选池, 个股研究
+- Demo watermark: 功能演示数据 · 虚构标的 · 非实时
+- Real-only pages: 每日总览, 官方事件流, 数据质量与来源
+- Demo facts never change real coverage, event count, data readiness, or strategy-blocked status.
+- Candidate and stock pages are linked after Flow generation using the exact returned preview URLs.
+- Candidate state is restored through sessionStorage plus browser history where the generated preview environment permits it.
+- All pages use one 420–480 px provenance-drawer pattern.
