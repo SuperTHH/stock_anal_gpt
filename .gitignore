@@ -10,5 +10,14 @@ __pycache__/
 .ruff_cache/
 data/
 *.duckdb
+*.db
 *.sqlite
 *.sqlite3
+*.parquet
+cookies*.json
+cookies*.txt
+session*.json
+session*.txt
+**/raw/
+**/attachments/
+**/data-stage/
