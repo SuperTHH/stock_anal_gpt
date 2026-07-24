@@ -45,6 +45,11 @@ class StateRepository:
             ).fetchone()
         return SourcePolicy.model_validate_json(row["payload_json"]) if row else None
 
+    def count_policies(self) -> int:
+        with connect(self.path) as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM source_policies").fetchone()
+        return int(row["count"])
+
     def record_run(self, record: RunRecord) -> None:
         with connect(self.path) as connection:
             connection.execute(
