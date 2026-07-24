@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Event, Thread
 from typing import Protocol
 from uuid import uuid4
 
@@ -53,6 +54,8 @@ class MarketIngestionService:
         clock: Callable[[], datetime] | None = None,
         owner_id_factory: Callable[[], str] | None = None,
         after_artifact_staged: Callable[[], None] | None = None,
+        lease_seconds: float = 300,
+        lease_renewal_interval_seconds: float | None = None,
     ) -> None:
         self.collector = collector
         self.raw_store = raw_store
@@ -61,6 +64,14 @@ class MarketIngestionService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.owner_id_factory = owner_id_factory or (lambda: uuid4().hex)
         self.after_artifact_staged = after_artifact_staged
+        if lease_seconds <= 0:
+            raise ValueError("INGESTION_LEASE_INVALID")
+        self.lease_seconds = lease_seconds
+        self.lease_renewal_interval_seconds = (
+            lease_renewal_interval_seconds or lease_seconds / 2
+        )
+        if self.lease_renewal_interval_seconds <= 0:
+            raise ValueError("INGESTION_LEASE_RENEWAL_INTERVAL_INVALID")
 
     def run(self, trade_date: date) -> MarketIngestionResult:
         started_at = self.clock()
@@ -77,6 +88,8 @@ class MarketIngestionService:
         checkpoint_key = f"market_daily:{trade_date.isoformat()}"
         acquired = False
         terminal = False
+        heartbeat_stop: Event | None = None
+        heartbeat: Thread | None = None
         try:
             existing = self.state.get_checkpoint(checkpoint_key)
             if existing is not None:
@@ -86,7 +99,10 @@ class MarketIngestionService:
                 return result
 
             lease = self.state.acquire_ingestion_lease(
-                trade_date, owner_id=owner_id, now=self.clock(), lease_seconds=300
+                trade_date,
+                owner_id=owner_id,
+                now=self.clock(),
+                lease_seconds=self.lease_seconds,
             )
             if not lease.acquired:
                 self._finish_run(
@@ -98,21 +114,37 @@ class MarketIngestionService:
                 terminal = True
                 raise IngestionInProgressError("MARKET_INGESTION_IN_PROGRESS")
             acquired = True
+            heartbeat_stop = Event()
+            heartbeat = Thread(
+                target=self._renew_lease_until_stopped,
+                args=(trade_date, owner_id, heartbeat_stop),
+                daemon=True,
+            )
+            heartbeat.start()
             if lease.staged_result_json is not None:
-                result = self._restore_staged(lease.staged_result_json, trade_date)
-                self._publish_checkpoint(checkpoint_key, result)
-                self.state.finish_ingestion_lease(
-                    trade_date, owner_id=owner_id, lifecycle_state="SUCCEEDED"
-                )
-                acquired = False
-                self._finish_run(
-                    run,
-                    RunStatus.SUCCEEDED,
-                    {"lease": "SUCCEEDED", "reconcile": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
-                    retry_count=1,
-                )
-                terminal = True
-                return result
+                try:
+                    result = self._restore_staged(lease.staged_result_json, trade_date)
+                except ValueError as error:
+                    is_invalid_stage = str(error) == "MARKET_STAGED_ARTIFACT_INVALID"
+                    discarded = is_invalid_stage and self.state.discard_staged_ingestion_artifact(
+                        trade_date, owner_id=owner_id
+                    )
+                    if not discarded:
+                        raise
+                else:
+                    self._publish_checkpoint(checkpoint_key, result)
+                    self.state.finish_ingestion_lease(
+                        trade_date, owner_id=owner_id, lifecycle_state="SUCCEEDED"
+                    )
+                    acquired = False
+                    self._finish_run(
+                        run,
+                        RunStatus.SUCCEEDED,
+                        {"lease": "SUCCEEDED", "reconcile": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
+                        retry_count=1,
+                    )
+                    terminal = True
+                    return result
 
             fetched = self.collector.fetch(trade_date)
             if not fetched.bars:
@@ -167,6 +199,23 @@ class MarketIngestionService:
                     error_code=self._error_code(error),
                 )
             raise
+        finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat is not None:
+                heartbeat.join()
+
+    def _renew_lease_until_stopped(
+        self, trade_date: date, owner_id: str, stop: Event
+    ) -> None:
+        while not stop.wait(self.lease_renewal_interval_seconds):
+            if not self.state.renew_ingestion_lease(
+                trade_date,
+                owner_id=owner_id,
+                now=self.clock(),
+                lease_seconds=self.lease_seconds,
+            ):
+                return
 
     def _finish_run(
         self,

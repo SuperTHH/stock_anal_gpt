@@ -261,6 +261,33 @@ class StateRepository:
             )
         return cursor.rowcount == 1
 
+    def renew_ingestion_lease(
+        self,
+        trade_date: date,
+        *,
+        owner_id: str,
+        now: datetime,
+        lease_seconds: float,
+    ) -> bool:
+        """Extend an owned lease before expiry without changing its staged state."""
+        if lease_seconds <= 0:
+            raise ValueError("INGESTION_LEASE_INVALID")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ingestion_leases
+                SET lease_expires_at=?, updated_at=?
+                WHERE trade_date=? AND owner_id=?
+                """,
+                (
+                    now.timestamp() + lease_seconds,
+                    datetime.now(UTC).isoformat(),
+                    trade_date.isoformat(),
+                    owner_id,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def stage_ingestion_artifact(
         self, trade_date: date, *, owner_id: str, staged_result_json: str
     ) -> bool:
@@ -295,6 +322,19 @@ class StateRepository:
             lifecycle_state=str(row["lifecycle_state"]),
             staged_result_json=row["staged_result_json"],
         )
+
+    def discard_staged_ingestion_artifact(self, trade_date: date, *, owner_id: str) -> bool:
+        """Discard an invalid staged artifact while retaining the caller's lease for refetch."""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ingestion_leases
+                SET staged_result_json=NULL, lifecycle_state='RUNNING', updated_at=?
+                WHERE trade_date=? AND owner_id=?
+                """,
+                (datetime.now(UTC).isoformat(), trade_date.isoformat(), owner_id),
+            )
+        return cursor.rowcount == 1
 
     def finish_ingestion_lease(
         self, trade_date: date, *, owner_id: str, lifecycle_state: str

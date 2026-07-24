@@ -260,3 +260,32 @@ def test_only_current_lease_owner_can_stage_or_read_artifact(tmp_path: Path) -> 
     assert stored is not None
     assert stored.staged_result_json == '{"ready":true}'
     assert stored.lifecycle_state == "STAGED"
+
+
+def test_lease_renewal_prevents_expiry_takeover_until_renewed_expiry(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    assert repository.acquire_ingestion_lease(
+        trade_date, owner_id="owner", now=started, lease_seconds=60
+    ).acquired
+
+    assert repository.renew_ingestion_lease(
+        trade_date,
+        owner_id="owner",
+        now=started.replace(second=50),
+        lease_seconds=60,
+    )
+    assert repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="other",
+        now=started.replace(minute=1, second=1),
+        lease_seconds=60,
+    ).acquired is False
+    assert repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="other",
+        now=started.replace(minute=1, second=51),
+        lease_seconds=60,
+    ).acquired

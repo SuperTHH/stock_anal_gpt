@@ -276,3 +276,25 @@ def test_retry_recovers_staged_parquet_after_checkpoint_crash_without_refetch(
     assert collector.calls == 1
     assert warehouse.calls == 1
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None
+
+
+def test_retry_discards_missing_staged_artifact_then_refetches(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, _ = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+    service.after_artifact_staged = lambda: (_ for _ in ()).throw(RuntimeError("crash"))
+
+    with pytest.raises(RuntimeError, match="crash"):
+        service.run(TRADE_DATE)
+    parquet_file = next((tmp_path / "normalized").rglob("*.parquet"))
+    parquet_file.unlink()
+    service.after_artifact_staged = None
+
+    result = service.run(TRADE_DATE)
+
+    assert result.bar_count == 1
+    assert collector.calls == 2
+    assert warehouse.calls == 2
