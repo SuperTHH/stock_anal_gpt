@@ -68,6 +68,13 @@ class StateRepository:
                 (record.refusal_id, record.model_dump_json(), record.refused_at.isoformat()),
             )
 
+    def count_refusals(self) -> int:
+        with connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM refusal_records"
+            ).fetchone()
+        return int(row["count"])
+
     def save_checkpoint(self, key: str, value: str) -> None:
         with connect(self.path) as connection:
             connection.execute(
