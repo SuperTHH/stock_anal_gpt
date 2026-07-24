@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -85,6 +86,40 @@ def test_fetch_daily_makes_one_full_market_request(tmp_path: Path) -> None:
     assert result.bars[0].open.as_tuple().exponent == 0
 
 
+def test_fetch_daily_accepts_reordered_unique_fields(tmp_path: Path) -> None:
+    fields = [
+        "amount",
+        "vol",
+        "pre_close",
+        "close",
+        "low",
+        "high",
+        "open",
+        "trade_date",
+        "ts_code",
+    ]
+    body = _success_body()
+    body["data"] = {
+        "fields": fields,
+        "items": [[10500, 1000, 10, 10.5, 9, 11, 10, "20260724", "600000.SH"]],
+    }
+    collector = _collector(
+        tmp_path,
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=json.dumps(body, allow_nan=True).encode(),
+                headers={"content-type": "application/json"},
+            )
+        ),
+    )
+
+    result = collector.fetch(date(2026, 7, 24))
+
+    assert result.bars[0].open == 10
+    assert result.bars[0].amount == 10500
+
+
 def test_policy_denial_makes_zero_http_calls(tmp_path: Path) -> None:
     calls: list[httpx.Request] = []
 
@@ -126,6 +161,45 @@ def test_fetch_daily_rejects_malformed_shape(tmp_path: Path, body: dict[str, obj
         collector.fetch(date(2026, 7, 24))
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        [
+            "ts_code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "vol",
+            "vol",
+        ],
+        [
+            "ts_code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "vol",
+            "amount",
+            "extra",
+        ],
+    ],
+)
+def test_fetch_daily_rejects_duplicate_or_extra_fields(tmp_path: Path, fields: list[str]) -> None:
+    body = _success_body()
+    body["data"] = {"fields": fields, "items": []}
+    collector = _collector(
+        tmp_path, httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    )
+
+    with pytest.raises(ValueError, match="^TUSHARE_FIELDS_INVALID$"):
+        collector.fetch(date(2026, 7, 24))
+
+
 def test_fetch_daily_rejects_rows_from_another_trade_date(tmp_path: Path) -> None:
     collector = _collector(
         tmp_path,
@@ -135,4 +209,29 @@ def test_fetch_daily_rejects_rows_from_another_trade_date(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError, match="^TUSHARE_TRADE_DATE_MISMATCH$"):
+        collector.fetch(date(2026, 7, 24))
+
+
+@pytest.mark.parametrize("invalid_open", ["not-a-number", float("nan"), float("inf")])
+def test_fetch_daily_normalizes_invalid_numeric_values(
+    tmp_path: Path, invalid_open: object
+) -> None:
+    body = _success_body()
+    data = body["data"]
+    assert isinstance(data, dict)
+    items = data["items"]
+    assert isinstance(items, list)
+    items[0][2] = invalid_open
+    collector = _collector(
+        tmp_path,
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=json.dumps(body, allow_nan=True).encode(),
+                headers={"content-type": "application/json"},
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="^TUSHARE_ROW_INVALID$"):
         collector.fetch(date(2026, 7, 24))

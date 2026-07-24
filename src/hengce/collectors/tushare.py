@@ -2,11 +2,11 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from hengce.contracts.enums import QualityStatus
 from hengce.contracts.market import MarketBar
@@ -100,8 +100,11 @@ class TushareDailyCollector:
             raise ValueError("TUSHARE_FIELDS_INVALID")
         fields = data.get("fields")
         items = data.get("items")
-        if not isinstance(fields, list) or fields != list(self.fields) or not all(
-            isinstance(field, str) for field in fields
+        if (
+            not isinstance(fields, list)
+            or not all(isinstance(field, str) for field in fields)
+            or len(fields) != len(self.fields)
+            or set(fields) != set(self.fields)
         ):
             raise ValueError("TUSHARE_FIELDS_INVALID")
         if not isinstance(items, list) or any(
@@ -123,26 +126,31 @@ class TushareDailyCollector:
         try:
             code = str(row["ts_code"])
             prices = {name: Decimal(str(row[name])) for name in TushareDailyCollector.fields[2:]}
-        except (KeyError, ValueError) as error:
+        except (InvalidOperation, KeyError, ValueError) as error:
             raise ValueError("TUSHARE_ROW_INVALID") from error
+        if any(not price.is_finite() for price in prices.values()):
+            raise ValueError("TUSHARE_ROW_INVALID")
         version = f"daily-{returned_date:%Y%m%d}-{content_hash[:12]}"
-        return MarketBar(
-            record_id=f"{code}-{returned_date:%Y%m%d}-{content_hash[:12]}",
-            source_id="tushare",
-            source_url=TushareDailyCollector.endpoint,
-            collected_at=collected_at,
-            version=version,
-            content_hash=content_hash,
-            license_policy="tushare-daily",
-            quality_status=QualityStatus.VALID,
-            valid_from=collected_at,
-            ts_code=code,
-            trade_date=returned_date,
-            open=prices["open"],
-            high=prices["high"],
-            low=prices["low"],
-            close=prices["close"],
-            pre_close=prices["pre_close"],
-            volume=prices["vol"],
-            amount=prices["amount"],
-        )
+        try:
+            return MarketBar(
+                record_id=f"{code}-{returned_date:%Y%m%d}-{content_hash[:12]}",
+                source_id="tushare",
+                source_url=TushareDailyCollector.endpoint,
+                collected_at=collected_at,
+                version=version,
+                content_hash=content_hash,
+                license_policy="tushare-daily",
+                quality_status=QualityStatus.VALID,
+                valid_from=collected_at,
+                ts_code=code,
+                trade_date=returned_date,
+                open=prices["open"],
+                high=prices["high"],
+                low=prices["low"],
+                close=prices["close"],
+                pre_close=prices["pre_close"],
+                volume=prices["vol"],
+                amount=prices["amount"],
+            )
+        except ValidationError as error:
+            raise ValueError("TUSHARE_ROW_INVALID") from error
