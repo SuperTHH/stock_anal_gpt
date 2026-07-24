@@ -1,6 +1,5 @@
 """Sequential daily market-data ingestion for a single scheduler."""
 
-import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -95,6 +94,7 @@ class MarketIngestionService:
             existing = self.state.get_checkpoint(checkpoint_key)
             if existing is not None:
                 result = self._parse_checkpoint(existing, trade_date)
+                self._validate_checkpoint_artifacts(result, trade_date)
                 self._finish_run(run, RunStatus.SUCCEEDED, {"checkpoint": "SUCCEEDED"})
                 terminal = True
                 return result
@@ -294,16 +294,25 @@ class MarketIngestionService:
         result = self._parse_checkpoint(
             json.dumps(payload["result"], sort_keys=True, separators=(",", ":")), trade_date
         )
-        raw_path = Path(payload["raw_payload_path"])
-        parquet_path = Path(result.parquet_path)
-        if (
-            not raw_path.is_file()
-            or hashlib.sha256(raw_path.read_bytes()).hexdigest() != result.raw_content_hash
-            or not parquet_path.is_file()
-            or self.warehouse.count_bars(trade_date) < result.bar_count
-        ):
-            raise ValueError("MARKET_STAGED_ARTIFACT_INVALID")
+        try:
+            self.raw_store.validate_content_hash(result.raw_content_hash)
+            self.warehouse.validate_artifact(
+                Path(result.parquet_path), trade_date, result.bar_count
+            )
+        except ValueError as error:
+            raise ValueError("MARKET_STAGED_ARTIFACT_INVALID") from error
         return result
+
+    def _validate_checkpoint_artifacts(
+        self, result: MarketIngestionResult, trade_date: date
+    ) -> None:
+        try:
+            self.raw_store.validate_content_hash(result.raw_content_hash)
+            self.warehouse.validate_artifact(
+                Path(result.parquet_path), trade_date, result.bar_count
+            )
+        except ValueError as error:
+            raise ValueError("MARKET_CHECKPOINT_ARTIFACT_INVALID") from error
 
     @staticmethod
     def _parse_checkpoint(value: str, trade_date: date) -> MarketIngestionResult:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -359,6 +360,63 @@ def test_retry_recovers_staged_parquet_after_checkpoint_crash_without_refetch(
     assert collector.calls == 1
     assert warehouse.calls == 1
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None
+
+
+@pytest.mark.parametrize(
+    "artifact", ["raw_missing", "raw_corrupt", "parquet_missing", "parquet_corrupt"]
+)
+def test_checkpoint_with_invalid_artifact_is_rejected_without_refetch(
+    tmp_path: Path, artifact: str
+) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+    result = service.run(TRADE_DATE)
+    raw_path = raw_store.validate_content_hash(result.raw_content_hash)
+    parquet_path = Path(result.parquet_path)
+    if artifact == "raw_missing":
+        raw_path.unlink()
+    elif artifact == "raw_corrupt":
+        raw_path.write_bytes(b"corrupt")
+    elif artifact == "parquet_missing":
+        parquet_path.unlink()
+    else:
+        parquet_path.write_bytes(b"corrupt")
+
+    with pytest.raises(ValueError, match="MARKET_CHECKPOINT_ARTIFACT_INVALID"):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 1
+    assert repository.list_runs(run_type="market_daily")[-1].run_status == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    [
+        (lambda result: {**result, "bar_count": 2}, "MARKET_CHECKPOINT_ARTIFACT_INVALID"),
+        (lambda result: {**result, "trade_date": "2026-07-23"}, "MARKET_CHECKPOINT_INVALID"),
+    ],
+)
+def test_checkpoint_requires_exact_expected_date_and_count(
+    tmp_path: Path, mutate: object, error: str
+) -> None:
+    collector = FakeCollector()
+    service, repository = _service(tmp_path, collector=collector)
+    service.run(TRADE_DATE)
+    checkpoint = repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}")
+    payload = json.loads(checkpoint or "{}")
+    repository.save_checkpoint(
+        f"market_daily:{TRADE_DATE.isoformat()}",
+        json.dumps(mutate(payload)),  # type: ignore[operator]
+    )
+
+    with pytest.raises(ValueError, match=error):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 1
 
 
 def test_retry_discards_missing_staged_artifact_then_refetches(tmp_path: Path) -> None:

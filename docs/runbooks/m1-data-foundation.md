@@ -10,7 +10,9 @@
 
 运行 `hengce ingest-market --trade-date 2026-07-24 --data-dir data`。
 
-成功后，原始响应位于 `data/raw/tushare/`，行情 Parquet 位于
+成功后，原始响应以 SHA-256 全局内容寻址方式保存于
+`data/raw/objects/<sha256>/payload.bin`；每次采集的不可变来源、时间和内容类型记录位于
+`data/raw/provenance/<event-sha256>.json`。行情 Parquet 位于
 `data/normalized/market_bars/trade_date=2026-07-24/`，SQLite 会保存
 `market_daily:2026-07-24` 检查点。重复相同日期不会再次请求或重复写入。
 

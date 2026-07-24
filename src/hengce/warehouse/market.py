@@ -45,7 +45,19 @@ class MarketWarehouse:
                 pass
         finally:
             temporary.unlink(missing_ok=True)
+        self.validate_artifact(target, next(iter(trade_dates)), len(bars))
         return target
+
+    @staticmethod
+    def validate_artifact(path: Path, trade_date: date, expected_count: int) -> None:
+        """Validate the exact published file, including the date and expected row count."""
+        try:
+            table = pq.ParquetFile(path).read(columns=["trade_date"])
+            dates = table.column("trade_date").to_pylist()
+        except (OSError, pa.ArrowException, ValueError) as error:
+            raise ValueError("MARKET_PARQUET_INTEGRITY_ERROR") from error
+        if len(dates) != expected_count or any(value != trade_date.isoformat() for value in dates):
+            raise ValueError("MARKET_PARQUET_INTEGRITY_ERROR")
 
     @staticmethod
     def _canonical_row(row: dict[str, object]) -> str:
