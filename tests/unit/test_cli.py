@@ -9,8 +9,21 @@ from typer.testing import CliRunner
 from hengce import cli
 from hengce.cli import app, build_market_ingestion, load_trade_dates
 from hengce.config import Settings
+from hengce.services.initializer import InitializationResult
 from hengce.services.market_ingestion import MarketIngestionResult
 from hengce.state.repository import StateRepository
+
+
+class ClosingClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __enter__(self) -> "ClosingClient":
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        self.closed = True
+        return False
 
 
 def test_init_state_creates_sqlite_database_idempotently(tmp_path: Path) -> None:
@@ -67,6 +80,96 @@ def test_ingest_command_uses_injected_composition_without_network(
     assert result.exit_code == 0
     service.run.assert_called_once_with(date(2026, 7, 24))
     assert "HENGCE_TUSHARE_TOKEN" not in result.stdout
+
+
+def test_ingest_rejects_invalid_trade_date_before_client_or_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    client_factory = Mock()
+    composition = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+    monkeypatch.setattr(cli, "build_market_ingestion", composition)
+
+    result = runner.invoke(
+        app,
+        ["ingest-market", "--trade-date", "2026-7-24", "--data-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "trade date must use YYYY-MM-DD" in result.stderr
+    assert not client_factory.mock_calls
+    assert not composition.mock_calls
+
+
+def test_history_rejects_invalid_calendar_before_client_or_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    calendar = tmp_path / "invalid-calendar.json"
+    calendar.write_text('{"not": "a list"}', encoding="utf-8")
+    client_factory = Mock()
+    composition = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+    monkeypatch.setattr(cli, "build_market_ingestion", composition)
+
+    result = runner.invoke(
+        app,
+        ["initialize-history", "--calendar-file", str(calendar), "--data-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "TRADE_DATES_INVALID" in str(result.exception)
+    assert not client_factory.mock_calls
+    assert not composition.mock_calls
+
+
+@pytest.mark.parametrize("command_name", ["ingest-market", "initialize-history"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_network_commands_close_owned_client_on_success_and_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    fails: bool,
+) -> None:
+    runner = CliRunner()
+    client = ClosingClient()
+    monkeypatch.setattr(cli.httpx, "Client", Mock(return_value=client))
+    service = Mock()
+    if fails:
+        service.run.side_effect = RuntimeError("fixture failure")
+    else:
+        service.run.return_value = MarketIngestionResult(
+            "2026-07-24", 1, "a" * 64, "fixture.parquet"
+        )
+    monkeypatch.setattr(cli, "build_market_ingestion", Mock(return_value=service))
+
+    if command_name == "ingest-market":
+        arguments = ["ingest-market", "--trade-date", "2026-07-24", "--data-dir", str(tmp_path)]
+    else:
+        calendar = tmp_path / "calendar.json"
+        calendar.write_text('["2026-07-24"]', encoding="utf-8")
+        initializer = Mock()
+        if fails:
+            initializer.run.side_effect = RuntimeError("fixture failure")
+        else:
+            initializer.run.return_value = InitializationResult(
+                completed_dates=1, last_trade_date="2026-07-24"
+            )
+        monkeypatch.setattr(cli, "HistoricalInitializer", Mock(return_value=initializer))
+        arguments = [
+            "initialize-history",
+            "--calendar-file",
+            str(calendar),
+            "--data-dir",
+            str(tmp_path),
+        ]
+
+    result = runner.invoke(app, arguments)
+
+    assert (result.exit_code != 0) is fails
+    assert client.closed
 
 
 def test_load_trade_dates_sorts_and_deduplicates(tmp_path: Path) -> None:

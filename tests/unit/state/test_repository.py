@@ -2,6 +2,8 @@ import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pytest
+
 from hengce.contracts.enums import ReviewStatus, RunStatus
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
@@ -76,6 +78,31 @@ def test_repository_counts_policies(tmp_path: Path) -> None:
     assert repository.count_policies() == 0
     repository.upsert_policy(approved_policy())
     assert repository.count_policies() == 1
+
+
+def test_bulk_upsert_policies_is_atomic_when_later_write_fails(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    original = approved_policy().model_copy(update={"connection_status": "ORIGINAL"})
+    repository.upsert_policy(original)
+    replacement = approved_policy().model_copy(update={"connection_status": "REPLACED"})
+    later = approved_policy().model_copy(update={"source_id": "later-source"})
+
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER abort_later_policy
+            BEFORE INSERT ON source_policies
+            WHEN NEW.source_id = 'later-source'
+            BEGIN SELECT RAISE(ABORT, 'forced failure'); END;
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
+        repository.upsert_policies([replacement, later])
+
+    assert repository.get_policy("tushare") == original
+    assert repository.get_policy("later-source") is None
 
 
 def test_repository_records_runs_as_upserts(tmp_path: Path) -> None:

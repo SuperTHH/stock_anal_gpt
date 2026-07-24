@@ -26,8 +26,13 @@ class StateRepository:
             )
 
     def upsert_policy(self, policy: SourcePolicy) -> None:
+        self.upsert_policies([policy])
+
+    def upsert_policies(self, policies: list[SourcePolicy]) -> None:
+        """Persist a prevalidated policy batch in one SQLite transaction."""
+        now = datetime.now(UTC).isoformat()
         with connect(self.path) as connection:
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO source_policies(source_id, payload_json, updated_at)
                 VALUES (?, ?, ?)
@@ -35,7 +40,7 @@ class StateRepository:
                     payload_json=excluded.payload_json,
                     updated_at=excluded.updated_at
                 """,
-                (policy.source_id, policy.model_dump_json(), datetime.now(UTC).isoformat()),
+                [(policy.source_id, policy.model_dump_json(), now) for policy in policies],
             )
 
     def get_policy(self, source_id: str) -> SourcePolicy | None:

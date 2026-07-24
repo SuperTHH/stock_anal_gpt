@@ -29,6 +29,5 @@ def bootstrap_state(settings: Settings, policy_file: Path) -> StateRepository:
     settings.ensure_local_dirs()
     repository = StateRepository(settings.data_dir / "state" / "hengce.sqlite3")
     repository.migrate()
-    for policy in policies:
-        repository.upsert_policy(policy)
+    repository.upsert_policies(policies)
     return repository

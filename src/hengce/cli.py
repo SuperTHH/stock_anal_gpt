@@ -101,11 +101,10 @@ def ingest_market(
     policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
 ) -> None:
     """Collect exactly one approved Tushare daily-market response."""
+    parsed_trade_date = parse_trade_date(trade_date)
     settings = Settings(data_dir=data_dir)
     with httpx.Client() as client:
-        result = build_market_ingestion(settings, client, policy_file).run(
-            parse_trade_date(trade_date)
-        )
+        result = build_market_ingestion(settings, client, policy_file).run(parsed_trade_date)
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
 
 
@@ -116,13 +115,12 @@ def initialize_history(
     policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
 ) -> None:
     """Resume approved trading-day ingestion from its persisted checkpoint."""
+    trade_dates = load_trade_dates(calendar_file)
     settings = Settings(data_dir=data_dir)
     with httpx.Client() as client:
         ingestion = build_market_ingestion(settings, client, policy_file)
         state = StateRepository(settings.data_dir / "state" / "hengce.sqlite3")
-        result = HistoricalInitializer(ingestion=ingestion, state=state).run(
-            load_trade_dates(calendar_file)
-        )
+        result = HistoricalInitializer(ingestion=ingestion, state=state).run(trade_dates)
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
 
 
