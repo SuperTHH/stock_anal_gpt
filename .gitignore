@@ -14,8 +14,14 @@ data/
 *.sqlite
 *.sqlite3
 *.parquet
+cookie*.json
+cookie*.txt
 cookies*.json
 cookies*.txt
+**/cookies/
+*.har
+*.cookie
+*.cookies
 session*.json
 session*.txt
 **/raw/
