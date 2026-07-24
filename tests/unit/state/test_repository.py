@@ -58,10 +58,12 @@ def test_repository_round_trips_policy_and_checkpoint(tmp_path: Path) -> None:
     repository.migrate()
     repository.migrate()
     repository.upsert_policy(approved_policy())
+    replacement_policy = approved_policy().model_copy(update={"connection_status": "AVAILABLE"})
+    repository.upsert_policy(replacement_policy)
     repository.save_checkpoint("init:last_trade_date", "2026-07-24")
     repository.save_checkpoint("init:last_trade_date", "2026-07-25")
 
-    assert repository.get_policy("tushare") == approved_policy()
+    assert repository.get_policy("tushare") == replacement_policy
     assert repository.get_policy("missing") is None
     assert repository.get_checkpoint("init:last_trade_date") == "2026-07-25"
     assert repository.get_checkpoint("missing") is None
