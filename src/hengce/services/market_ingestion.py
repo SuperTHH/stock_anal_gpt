@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from hengce.collectors.tushare import DailyFetchResult, TushareDailyCollector
 from hengce.contracts.enums import RunStatus
+from hengce.contracts.market import MarketBar
 from hengce.contracts.run import RunRecord
 from hengce.raw_store.store import RawObjectStore
 from hengce.state.repository import StateRepository
@@ -98,6 +99,10 @@ class MarketIngestionService:
                 terminal = True
                 return result
 
+            security_master = self.state.get_latest_security_master_snapshot()
+            if security_master is None:
+                raise ValueError("SECURITY_MASTER_UNAVAILABLE")
+
             lease = self.state.acquire_ingestion_lease(
                 trade_date,
                 owner_id=owner_id,
@@ -156,6 +161,9 @@ class MarketIngestionService:
                 content_type=fetched.content_type,
                 payload=fetched.raw_payload,
             )
+            self._validate_bars_in_scope(fetched.bars, {
+                security.ts_code for security in security_master.securities
+            })
             parquet_path = self.warehouse.write_bars(fetched.bars)
             result = MarketIngestionResult(
                 trade_date=trade_date.isoformat(),
@@ -189,13 +197,22 @@ class MarketIngestionService:
         except Exception as error:
             if acquired:
                 self.state.finish_ingestion_lease(
-                    trade_date, owner_id=owner_id, lifecycle_state="FAILED"
+                    trade_date,
+                    owner_id=owner_id,
+                    lifecycle_state=(
+                        "BLOCKED"
+                        if self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
+                        else "FAILED"
+                    ),
                 )
             if not terminal:
+                is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
                 self._finish_run(
                     run,
-                    RunStatus.FAILED,
-                    {"ingestion": "FAILED"},
+                    RunStatus.BLOCKED if is_master_unavailable else RunStatus.FAILED,
+                    {"security_master": "BLOCKED"}
+                    if is_master_unavailable
+                    else {"ingestion": "FAILED"},
                     error_code=self._error_code(error),
                 )
             raise
@@ -253,6 +270,14 @@ class MarketIngestionService:
             checkpoint_key,
             json.dumps(asdict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         )
+
+    @staticmethod
+    def _validate_bars_in_scope(bars: list[MarketBar], approved_codes: set[str]) -> None:
+        codes = [bar.ts_code for bar in bars]
+        if len(codes) != len(set(codes)):
+            raise ValueError("MARKET_DAILY_DUPLICATE_TS_CODE")
+        if any(code not in approved_codes for code in codes):
+            raise ValueError("MARKET_DAILY_OUT_OF_SCOPE_TS_CODE")
 
     def _restore_staged(self, value: str, trade_date: date) -> MarketIngestionResult:
         try:

@@ -114,6 +114,25 @@ def test_security_master_snapshot_rejects_duplicates_without_persisting(tmp_path
     assert repository.get_security_master_snapshot("sse", "b" * 64) is None
 
 
+def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.save_security_master_snapshot(
+        [security("600000.SH", "MAIN_SH")],
+        source_id="sse", source_url="https://example.test/master.csv",
+        collected_at=datetime(2026, 7, 23, tzinfo=UTC), content_hash="d" * 64,
+        version="v1", quality_lineage={},
+    )
+    newer = repository.save_security_master_snapshot(
+        [security("688001.SH", "STAR")],
+        source_id="sse", source_url="https://example.test/master.csv",
+        collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="e" * 64,
+        version="v2", quality_lineage={},
+    )
+
+    assert repository.get_latest_security_master_snapshot() == newer
+
+
 def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()

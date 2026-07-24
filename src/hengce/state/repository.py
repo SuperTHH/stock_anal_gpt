@@ -262,6 +262,29 @@ class StateRepository:
             ).fetchall()
         return self._snapshot_from_rows(row, members)
 
+    def get_latest_security_master_snapshot(self) -> SecurityMasterSnapshot | None:
+        """Return the newest persisted approved in-scope security-master snapshot."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM security_master_snapshots
+                ORDER BY collected_at DESC, snapshot_id DESC LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            members = connection.execute(
+                """
+                SELECT payload_json FROM security_master_members
+                WHERE snapshot_id=? ORDER BY ts_code
+                """,
+                (row["snapshot_id"],),
+            ).fetchall()
+        snapshot = self._snapshot_from_rows(row, members)
+        return snapshot if snapshot.securities and all(
+            security.is_in_scope for security in snapshot.securities
+        ) else None
+
     @staticmethod
     def _snapshot_from_rows(
         row: sqlite3.Row, members: list[sqlite3.Row]

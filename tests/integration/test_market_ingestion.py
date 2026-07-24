@@ -9,7 +9,7 @@ import pytest
 
 from hengce.collectors.tushare import DailyFetchResult
 from hengce.contracts.enums import QualityStatus
-from hengce.contracts.market import MarketBar
+from hengce.contracts.market import MarketBar, SecurityMaster
 from hengce.raw_store.store import RawObjectStore
 from hengce.state.repository import StateRepository
 from hengce.warehouse.market import MarketWarehouse
@@ -38,6 +38,30 @@ def _bar() -> MarketBar:
         pre_close=10,
         volume=1000,
         amount=10500,
+    )
+
+
+def _security(ts_code: str = "600000.SH") -> SecurityMaster:
+    return SecurityMaster(
+        ts_code=ts_code,
+        symbol=ts_code.split(".")[0],
+        name="Fixture Security",
+        exchange="SSE" if ts_code.endswith(".SH") else "SZSE",
+        board="MAIN_SH" if ts_code.endswith(".SH") else "MAIN_SZ",
+        list_date=date(2020, 1, 1),
+        is_in_scope=True,
+    )
+
+
+def _seed_security_master(repository: StateRepository, *codes: str) -> None:
+    repository.save_security_master_snapshot(
+        [_security(code) for code in codes],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=COLLECTED_AT,
+        content_hash="c" * 64,
+        version="fixture-v1",
+        quality_lineage={"filter": "a_share_cny_four_boards"},
     )
 
 
@@ -111,6 +135,7 @@ def _service(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
+    _seed_security_master(repository, "600000.SH")
     return (
         MarketIngestionService(
             collector=collector or FakeCollector(),
@@ -120,6 +145,64 @@ def _service(
         ),
         repository,
     )
+
+
+def test_missing_security_master_blocks_before_collector_or_artifacts(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    service = MarketIngestionService(
+        collector=collector, raw_store=raw_store, warehouse=warehouse, state=repository
+    )
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_UNAVAILABLE"):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 0
+    assert raw_store.calls == 0
+    assert warehouse.calls == 0
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+    assert repository.list_runs(run_type="market_daily")[-1].run_status == "BLOCKED"
+
+
+def test_duplicate_daily_codes_fail_before_parquet_publication(tmp_path: Path) -> None:
+    duplicate = _bar().model_copy(update={"record_id": "600000.SH-duplicate"})
+    collector = FakeCollector(bars=[_bar(), duplicate])
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+
+    with pytest.raises(ValueError, match="MARKET_DAILY_DUPLICATE_TS_CODE"):
+        service.run(TRADE_DATE)
+
+    assert raw_store.calls == 1
+    assert warehouse.calls == 0
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+    failed_run = repository.list_runs(run_type="market_daily")[-1]
+    assert failed_run.run_status == "FAILED"
+    assert failed_run.error_code == "MARKET_DAILY_DUPLICATE_TS_CODE"
+
+
+def test_out_of_scope_bar_fails_before_parquet_publication(tmp_path: Path) -> None:
+    collector = FakeCollector(bars=[_bar().model_copy(update={"ts_code": "000001.SZ"})])
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+
+    with pytest.raises(ValueError, match="MARKET_DAILY_OUT_OF_SCOPE_TS_CODE"):
+        service.run(TRADE_DATE)
+
+    assert raw_store.calls == 1
+    assert warehouse.calls == 0
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
 
 
 def test_repeated_run_uses_checkpoint_without_second_fetch_or_writes(tmp_path: Path) -> None:
