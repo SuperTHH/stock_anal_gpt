@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Event, Thread
@@ -29,6 +29,7 @@ class MarketIngestionResult:
     bar_count: int
     raw_content_hash: str
     parquet_path: str
+    parquet_content_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,9 @@ class MarketIngestionService:
             existing = self.state.get_checkpoint(checkpoint_key)
             if existing is not None:
                 result = self._parse_checkpoint(existing, trade_date)
-                self._validate_checkpoint_artifacts(result, trade_date)
+                result = self._validate_checkpoint_artifacts(result, trade_date)
+                if result.parquet_content_hash is not None:
+                    self._publish_checkpoint(checkpoint_key, result)
                 self._finish_run(run, RunStatus.SUCCEEDED, {"checkpoint": "SUCCEEDED"})
                 terminal = True
                 return result
@@ -165,11 +168,15 @@ class MarketIngestionService:
                 security.ts_code for security in security_master.securities
             })
             parquet_path = self.warehouse.write_bars(fetched.bars)
+            parquet_content_hash = self.warehouse.validate_artifact(
+                parquet_path, trade_date, len(fetched.bars)
+            )
             result = MarketIngestionResult(
                 trade_date=trade_date.isoformat(),
                 bar_count=len(fetched.bars),
                 raw_content_hash=raw.content_hash,
                 parquet_path=str(parquet_path),
+                parquet_content_hash=parquet_content_hash,
             )
             staged = StagedMarketArtifact(result=result, raw_payload_path=raw.payload_path)
             if not self.state.stage_ingestion_artifact(
@@ -296,23 +303,30 @@ class MarketIngestionService:
         )
         try:
             self.raw_store.validate_content_hash(result.raw_content_hash)
-            self.warehouse.validate_artifact(
-                Path(result.parquet_path), trade_date, result.bar_count
+            parquet_content_hash = self.warehouse.validate_artifact(
+                Path(result.parquet_path),
+                trade_date,
+                result.bar_count,
+                result.parquet_content_hash,
             )
         except ValueError as error:
             raise ValueError("MARKET_STAGED_ARTIFACT_INVALID") from error
-        return result
+        return replace(result, parquet_content_hash=parquet_content_hash)
 
     def _validate_checkpoint_artifacts(
         self, result: MarketIngestionResult, trade_date: date
-    ) -> None:
+    ) -> MarketIngestionResult:
         try:
             self.raw_store.validate_content_hash(result.raw_content_hash)
-            self.warehouse.validate_artifact(
-                Path(result.parquet_path), trade_date, result.bar_count
+            parquet_content_hash = self.warehouse.validate_artifact(
+                Path(result.parquet_path),
+                trade_date,
+                result.bar_count,
+                result.parquet_content_hash,
             )
         except ValueError as error:
             raise ValueError("MARKET_CHECKPOINT_ARTIFACT_INVALID") from error
+        return replace(result, parquet_content_hash=parquet_content_hash)
 
     @staticmethod
     def _parse_checkpoint(value: str, trade_date: date) -> MarketIngestionResult:
@@ -320,12 +334,11 @@ class MarketIngestionService:
             payload = json.loads(value)
         except json.JSONDecodeError as error:
             raise ValueError("MARKET_CHECKPOINT_INVALID: invalid JSON") from error
-        if not isinstance(payload, dict) or set(payload) != {
-            "trade_date",
-            "bar_count",
-            "raw_content_hash",
-            "parquet_path",
-        }:
+        required_fields = {"trade_date", "bar_count", "raw_content_hash", "parquet_path"}
+        optional_fields = required_fields | {"parquet_content_hash"}
+        if not isinstance(payload, dict) or (
+            set(payload) != required_fields and set(payload) != optional_fields
+        ):
             raise ValueError("MARKET_CHECKPOINT_INVALID: required fields")
         if (
             not isinstance(payload["trade_date"], str)
@@ -333,6 +346,8 @@ class MarketIngestionService:
             or isinstance(payload["bar_count"], bool)
             or not isinstance(payload["raw_content_hash"], str)
             or not isinstance(payload["parquet_path"], str)
+            or "parquet_content_hash" in payload
+            and not isinstance(payload["parquet_content_hash"], str)
         ):
             raise ValueError("MARKET_CHECKPOINT_INVALID: field types")
         if payload["trade_date"] != trade_date.isoformat():
@@ -343,4 +358,7 @@ class MarketIngestionService:
             raise ValueError("MARKET_CHECKPOINT_INVALID: raw_content_hash")
         if not payload["parquet_path"]:
             raise ValueError("MARKET_CHECKPOINT_INVALID: parquet_path")
+        content_hash = payload.get("parquet_content_hash")
+        if content_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", content_hash):
+            raise ValueError("MARKET_CHECKPOINT_INVALID: parquet_content_hash")
         return MarketIngestionResult(**payload)

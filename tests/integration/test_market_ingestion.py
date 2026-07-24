@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from threading import Event
 
@@ -360,6 +361,107 @@ def test_retry_recovers_staged_parquet_after_checkpoint_crash_without_refetch(
     assert collector.calls == 1
     assert warehouse.calls == 1
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None
+
+
+def test_legacy_checkpoint_recovers_global_raw_object_without_refetch(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    service, repository = _service(tmp_path, collector=collector, raw_store=raw_store)
+    result = service.run(TRADE_DATE)
+    global_payload = raw_store.validate_content_hash(result.raw_content_hash)
+    legacy = (
+        tmp_path
+        / "raw"
+        / "tushare"
+        / "2026"
+        / "07"
+        / "24"
+        / result.raw_content_hash
+        / "payload.bin"
+    )
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(global_payload.read_bytes())
+    global_payload.unlink()
+    checkpoint = repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}")
+    checkpoint_payload = json.loads(checkpoint or "{}")
+    checkpoint_payload.pop("parquet_content_hash")
+    repository.save_checkpoint(
+        f"market_daily:{TRADE_DATE.isoformat()}", json.dumps(checkpoint_payload)
+    )
+
+    recovered = service.run(TRADE_DATE)
+
+    assert recovered.raw_content_hash == result.raw_content_hash
+    assert raw_store.validate_content_hash(result.raw_content_hash).is_file()
+    rewritten = json.loads(
+        repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") or "{}"
+    )
+    assert rewritten["parquet_content_hash"] == recovered.parquet_content_hash
+    assert collector.calls == 1
+
+
+def test_staged_legacy_raw_object_recovers_without_refetch(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    service, repository = _service(tmp_path, collector=collector, raw_store=raw_store)
+    service.after_artifact_staged = lambda: (_ for _ in ()).throw(RuntimeError("crash"))
+
+    with pytest.raises(RuntimeError, match="crash"):
+        service.run(TRADE_DATE)
+    content_hash = next((tmp_path / "raw" / "objects").iterdir()).name
+    global_payload = raw_store.validate_content_hash(content_hash)
+    legacy = tmp_path / "raw" / "tushare" / "2026" / "07" / "24" / content_hash / "payload.bin"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(global_payload.read_bytes())
+    global_payload.unlink()
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    assert lease is not None
+    staged = json.loads(lease.staged_result_json or "{}")
+    staged["result"].pop("parquet_content_hash")
+    repository.stage_ingestion_artifact(
+        TRADE_DATE,
+        owner_id=lease.owner_id or "",
+        staged_result_json=json.dumps(staged),
+    )
+    service.after_artifact_staged = None
+
+    recovered = service.run(TRADE_DATE)
+
+    assert recovered.raw_content_hash == content_hash
+    assert raw_store.validate_content_hash(content_hash).is_file()
+    assert collector.calls == 1
+
+
+def test_checkpoint_rejects_parseable_parquet_with_changed_content(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(tmp_path, collector=collector, warehouse=warehouse)
+    service.run(TRADE_DATE)
+    changed = warehouse.write_bars([_bar().model_copy(update={"close": Decimal("11")})])
+    checkpoint = repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}")
+    payload = json.loads(checkpoint or "{}")
+    payload["parquet_path"] = str(changed)
+    repository.save_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}", json.dumps(payload))
+
+    with pytest.raises(ValueError, match="MARKET_CHECKPOINT_ARTIFACT_INVALID"):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 1
+
+
+def test_checkpoint_rejects_tampered_parquet_content_hash(tmp_path: Path) -> None:
+    collector = FakeCollector()
+    service, repository = _service(tmp_path, collector=collector)
+    service.run(TRADE_DATE)
+    checkpoint = repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}")
+    payload = json.loads(checkpoint or "{}")
+    payload["parquet_content_hash"] = "0" * 64
+    repository.save_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}", json.dumps(payload))
+
+    with pytest.raises(ValueError, match="MARKET_CHECKPOINT_ARTIFACT_INVALID"):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 1
 
 
 @pytest.mark.parametrize(

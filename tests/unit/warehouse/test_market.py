@@ -47,6 +47,17 @@ def test_write_is_idempotent_and_queryable(tmp_path: Path) -> None:
     ]
 
 
+def test_validation_returns_and_requires_canonical_content_hash(tmp_path: Path) -> None:
+    warehouse = MarketWarehouse(tmp_path)
+    original = warehouse.write_bars([bar("600000.SH")])
+    changed = warehouse.write_bars([bar("600000.SH").model_copy(update={"close": Decimal("11")})])
+    original_hash = warehouse.validate_artifact(original, date(2026, 7, 24), 1)
+
+    assert original.name == f"part-{original_hash}.parquet"
+    with pytest.raises(ValueError, match="MARKET_PARQUET_INTEGRITY_ERROR"):
+        warehouse.validate_artifact(changed, date(2026, 7, 24), 1, original_hash)
+
+
 def test_empty_write_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bars must not be empty"):
         MarketWarehouse(tmp_path).write_bars([])

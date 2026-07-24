@@ -45,19 +45,34 @@ class MarketWarehouse:
                 pass
         finally:
             temporary.unlink(missing_ok=True)
-        self.validate_artifact(target, next(iter(trade_dates)), len(bars))
+        self.validate_artifact(target, next(iter(trade_dates)), len(bars), digest)
         return target
 
     @staticmethod
-    def validate_artifact(path: Path, trade_date: date, expected_count: int) -> None:
-        """Validate the exact published file, including the date and expected row count."""
+    def validate_artifact(
+        path: Path,
+        trade_date: date,
+        expected_count: int,
+        expected_content_hash: str | None = None,
+    ) -> str:
+        """Validate exact canonical content, date/count, and content-addressed filename."""
         try:
-            table = pq.ParquetFile(path).read(columns=["trade_date"])
-            dates = table.column("trade_date").to_pylist()
+            rows = pq.ParquetFile(path).read().to_pylist()
         except (OSError, pa.ArrowException, ValueError) as error:
             raise ValueError("MARKET_PARQUET_INTEGRITY_ERROR") from error
-        if len(dates) != expected_count or any(value != trade_date.isoformat() for value in dates):
+        rows.sort(key=MarketWarehouse._canonical_row)
+        canonical = json.dumps(
+            rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        content_hash = hashlib.sha256(canonical).hexdigest()
+        if (
+            path.name != f"part-{content_hash}.parquet"
+            or expected_content_hash is not None and content_hash != expected_content_hash
+            or len(rows) != expected_count
+            or any(row.get("trade_date") != trade_date.isoformat() for row in rows)
+        ):
             raise ValueError("MARKET_PARQUET_INTEGRITY_ERROR")
+        return content_hash
 
     @staticmethod
     def _canonical_row(row: dict[str, object]) -> str:

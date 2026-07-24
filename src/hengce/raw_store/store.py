@@ -79,6 +79,13 @@ class RawObjectStore:
 
     def validate_content_hash(self, content_hash: str) -> Path:
         payload_path = self.payload_path_for_hash(content_hash)
+        if not payload_path.is_file():
+            legacy_paths = sorted(self.root.glob(f"*/*/*/*/{content_hash}/payload.bin"))
+            if legacy_paths:
+                legacy = legacy_paths[0]
+                self._validate_payload(legacy, content_hash)
+                payload_path.parent.mkdir(parents=True, exist_ok=True)
+                self._publish_if_absent(payload_path, legacy.read_bytes())
         self._validate_payload(payload_path, content_hash)
         return payload_path
 
