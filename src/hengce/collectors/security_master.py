@@ -17,6 +17,8 @@ class OfficialSecurityMasterCsvImporter:
             if reader.fieldnames is None or not self.required_columns.issubset(reader.fieldnames):
                 raise ValueError("SECURITY_MASTER_COLUMNS_INVALID")
             records = [self._to_security(row) for row in reader if self._is_in_scope(row)]
+        if len({record.ts_code for record in records}) != len(records):
+            raise ValueError("SECURITY_MASTER_DUPLICATE_TS_CODE")
         return sorted(records, key=lambda record: record.ts_code)
 
     def _is_in_scope(self, row: dict[str, str | None]) -> bool:

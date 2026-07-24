@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from hengce.collectors.security_master import OfficialSecurityMasterCsvImporter
 
 
@@ -28,3 +30,16 @@ def test_importer_excludes_wrong_currency_and_unknown_board(tmp_path: Path) -> N
     records = OfficialSecurityMasterCsvImporter().parse(path)
 
     assert [record.ts_code for record in records] == ["600001.SH"]
+
+
+def test_importer_rejects_duplicate_codes_after_scope_filtering(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate-master.csv"
+    path.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "600001.SH,600001,First,SSE,MAIN_SH,CNY,20100101,A_SHARE\n"
+        "600001.SH,600001,Second,SSE,MAIN_SH,CNY,20100101,A_SHARE\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_DUPLICATE_TS_CODE"):
+        OfficialSecurityMasterCsvImporter().parse(path)

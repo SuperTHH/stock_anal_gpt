@@ -48,6 +48,34 @@ def test_init_state_seeds_approved_policies(tmp_path: Path) -> None:
     assert "state initialized" in result.stdout
 
 
+def test_import_security_master_persists_local_file_without_creating_network_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    source = tmp_path / "security-master.csv"
+    source.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE\n",
+        encoding="utf-8",
+    )
+    client_factory = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+
+    result = runner.invoke(app, [
+        "import-security-master", "--file", str(source), "--source-id", "sse",
+        "--source-url", "https://www.sse.com.cn/master.csv", "--version", "2026-07-24",
+        "--collected-at", "2026-07-24T09:00:00+00:00", "--data-dir", str(tmp_path),
+    ])
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["security_count"] == 1
+    assert output["source_id"] == "sse"
+    assert output["version"] == "2026-07-24"
+    assert output["content_hash"]
+    assert not client_factory.mock_calls
+
+
 def test_build_market_ingestion_rejects_missing_token_before_client_use(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, tushare_token=None)
     client = Mock()

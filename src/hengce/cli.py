@@ -1,5 +1,6 @@
 """Local-only command-line entry points for the research workspace."""
 
+import hashlib
 import json
 from dataclasses import asdict
 from datetime import date, datetime
@@ -12,6 +13,7 @@ import typer
 from pydantic import SecretStr
 
 from hengce.bootstrap import bootstrap_state
+from hengce.collectors.security_master import OfficialSecurityMasterCsvImporter
 from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
 from hengce.policy.guard import PolicyGuard
@@ -122,6 +124,53 @@ def initialize_history(
         state = StateRepository(settings.data_dir / "state" / "hengce.sqlite3")
         result = HistoricalInitializer(ingestion=ingestion, state=state).run(trade_dates)
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+@app.command("import-security-master")
+def import_security_master(
+    file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    source_id: Annotated[str, typer.Option()],
+    source_url: Annotated[str, typer.Option()],
+    version: Annotated[str, typer.Option()],
+    collected_at: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
+) -> None:
+    """Import a locally supplied official security-master CSV; this command never fetches."""
+    try:
+        parsed_collected_at = datetime.fromisoformat(collected_at)
+    except ValueError as error:
+        raise typer.BadParameter("collected-at must be ISO-8601") from error
+    if parsed_collected_at.tzinfo is None:
+        raise typer.BadParameter("collected-at must include an offset")
+    records = OfficialSecurityMasterCsvImporter().parse(file)
+    content_hash = hashlib.sha256(file.read_bytes()).hexdigest()
+    state = bootstrap_state(Settings(data_dir=data_dir), policy_file)
+    snapshot = state.save_security_master_snapshot(
+        records,
+        source_id=source_id,
+        source_url=source_url,
+        collected_at=parsed_collected_at,
+        content_hash=content_hash,
+        version=version,
+        quality_lineage={
+            "filter": "a_share_cny_four_boards",
+            "boards": ["CHINEXT", "MAIN_SH", "MAIN_SZ", "STAR"],
+            "record_count": len(records),
+        },
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "content_hash": snapshot.content_hash,
+                "security_count": len(snapshot.securities),
+                "source_id": snapshot.source_id,
+                "version": snapshot.version,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

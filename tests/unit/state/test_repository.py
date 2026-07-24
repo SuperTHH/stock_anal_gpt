@@ -7,6 +7,7 @@ from threading import Barrier
 import pytest
 
 from hengce.contracts.enums import ReviewStatus, RunStatus
+from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
 from hengce.state.repository import StateRepository
@@ -57,6 +58,83 @@ def refusal() -> RefusalRecord:
     )
 
 
+def security(code: str, board: str) -> SecurityMaster:
+    return SecurityMaster(
+        ts_code=code,
+        symbol=code.split(".")[0],
+        name=f"Security {code}",
+        exchange="SSE" if code.endswith(".SH") else "SZSE",
+        board=board,
+        list_date=date(2020, 1, 1),
+        is_in_scope=True,
+    )
+
+
+def test_security_master_snapshot_round_trips_four_boards_and_lineage(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    records = [
+        security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR"),
+        security("000001.SZ", "MAIN_SZ"), security("300001.SZ", "CHINEXT"),
+    ]
+
+    snapshot = repository.save_security_master_snapshot(
+        records, source_id="sse", source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, 9, 0, tzinfo=UTC), content_hash="a" * 64,
+        version="2026-07-24", quality_lineage={"filter": "a_share_cny_four_boards", "row_count": 4},
+    )
+
+    assert snapshot.source_id == "sse"
+    assert snapshot.source_url == "https://www.sse.com.cn/master.csv"
+    assert snapshot.collected_at == datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    assert snapshot.content_hash == "a" * 64
+    assert snapshot.version == "2026-07-24"
+    assert snapshot.quality_lineage == {"filter": "a_share_cny_four_boards", "row_count": 4}
+    assert [item.ts_code for item in snapshot.securities] == [
+        "000001.SZ",
+        "300001.SZ",
+        "600000.SH",
+        "688001.SH",
+    ]
+    assert repository.get_security_master_snapshot("sse", "a" * 64) == snapshot
+
+
+def test_security_master_snapshot_rejects_duplicates_without_persisting(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_DUPLICATE_TS_CODE"):
+        repository.save_security_master_snapshot(
+            [security("600000.SH", "MAIN_SH"), security("600000.SH", "MAIN_SH")],
+            source_id="sse", source_url="https://example.test/master.csv",
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="b" * 64,
+            version="v1", quality_lineage={},
+        )
+
+    assert repository.get_security_master_snapshot("sse", "b" * 64) is None
+
+
+def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute("""
+            CREATE TRIGGER abort_security_row BEFORE INSERT ON security_master_members
+            WHEN NEW.ts_code = '688001.SH'
+            BEGIN SELECT RAISE(ABORT, 'forced failure'); END;
+        """)
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
+        repository.save_security_master_snapshot(
+            [security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR")],
+            source_id="sse", source_url="https://example.test/master.csv",
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="c" * 64,
+            version="v1", quality_lineage={},
+        )
+
+    assert repository.get_security_master_snapshot("sse", "c" * 64) is None
+
+
 def test_repository_round_trips_policy_and_checkpoint(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
@@ -99,7 +177,12 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
             row[1] for row in connection.execute("PRAGMA table_info(ingestion_leases)")
         }
 
-    assert migrations == {"001_initial", "002_rate_reservations", "003_ingestion_leases"}
+    assert migrations == {
+        "001_initial",
+        "002_rate_reservations",
+        "003_ingestion_leases",
+        "004_security_master_snapshots",
+    }
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
     assert lease_columns == {
         "trade_date",
