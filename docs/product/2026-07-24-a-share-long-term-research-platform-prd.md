@@ -232,6 +232,7 @@ MVP 覆盖完整本地产品：
 - <https://www.stats.gov.cn/>
 - <https://www.csrc.gov.cn/>
 - <https://tushare.pro/>
+- Tushare HTTP 调用说明：<https://tushare.pro/document/1?doc_id=40>
 
 ### 6.2 禁止自动获取
 
@@ -254,6 +255,7 @@ P0 拒绝以下来源或内容：
 - `source_id`
 - `source_name`
 - `allowed_domains`
+- `allowed_schemes`
 - `allowed_purposes`
 - `fetch_frequency`
 - `full_text_rule`
@@ -273,6 +275,7 @@ P0 拒绝以下来源或内容：
 3. 条款内容或入口发生变化时，来源自动进入 `REVIEW_REQUIRED`，暂停新增采集。
 4. 每次网络请求在发送前经过策略守卫；拒绝请求写入 `RefusalRecord`。
 5. 页面必须展示当前连接状态和官方链接。
+6. 协议必须在 `allowed_schemes` 中逐来源批准。Tushare REST API 仅对官方文档指定的 `http://api.tushare.pro` 允许 HTTP；其他 MVP 自动来源默认只允许 HTTPS。
 
 ### 6.4 访问频率与礼貌采集
 
