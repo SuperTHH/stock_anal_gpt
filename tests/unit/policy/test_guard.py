@@ -48,17 +48,56 @@ def test_guard_allows_exact_approved_domain_and_purpose(tmp_path: Path) -> None:
     assert repository.count_refusals() == 0
 
 
-def test_guard_allows_approved_subdomain(tmp_path: Path) -> None:
+def test_guard_denies_tushare_http_subdomain_even_when_policy_allows_parent(
+    tmp_path: Path,
+) -> None:
     repository = repository_with_policy(tmp_path)
 
-    PolicyGuard(repository).authorize(
-        "tushare",
-        "http://daily.api.tushare.pro/data",
-        "market_daily",
-        "collectors.tushare",
+    with pytest.raises(PolicyDenied, match="^HTTP_ENDPOINT_NOT_ALLOWED$"):
+        PolicyGuard(repository).authorize(
+            "tushare",
+            "http://daily.api.tushare.pro/data",
+            "market_daily",
+            "collectors.tushare",
+        )
+
+    assert repository.count_refusals() == 1
+
+
+def test_guard_denies_http_for_non_tushare_even_when_editable_policy_allows_it(
+    tmp_path: Path,
+) -> None:
+    repository = repository_with_policy(
+        tmp_path,
+        source_id="evil",
+        allowed_domains=["example.com"],
+        allowed_schemes=["http"],
     )
 
-    assert repository.count_refusals() == 0
+    with pytest.raises(PolicyDenied, match="^HTTP_ENDPOINT_NOT_ALLOWED$"):
+        PolicyGuard(repository).authorize(
+            "evil", "http://example.com/", "market_daily", "fixture"
+        )
+
+    assert repository.count_refusals() == 1
+
+
+def test_guard_persists_rate_reservations_across_repository_instances(
+    tmp_path: Path,
+) -> None:
+    repository = repository_with_policy(tmp_path)
+    second_repository = StateRepository(repository.path)
+    now = datetime(2026, 7, 24, 9, 0)
+    sleeps: list[float] = []
+
+    PolicyGuard(repository, clock=lambda: now, sleeper=sleeps.append).authorize(
+        "tushare", "http://api.tushare.pro/", "market_daily", "first"
+    )
+    PolicyGuard(second_repository, clock=lambda: now, sleeper=sleeps.append).authorize(
+        "tushare", "http://api.tushare.pro/", "market_daily", "second"
+    )
+
+    assert sleeps == [60.0]
 
 
 @pytest.mark.parametrize(
@@ -80,7 +119,7 @@ def test_guard_allows_approved_subdomain(tmp_path: Path) -> None:
             "SOURCE_DISABLED",
         ),
         ("tushare", "https://api.tushare.pro/", "market_daily", {}, "SCHEME_NOT_ALLOWED"),
-        ("tushare", "http://example.com/", "market_daily", {}, "DOMAIN_NOT_ALLOWED"),
+        ("tushare", "http://example.com/", "market_daily", {}, "HTTP_ENDPOINT_NOT_ALLOWED"),
         ("tushare", "http://api.tushare.pro/", "profile", {}, "PURPOSE_NOT_ALLOWED"),
     ],
 )

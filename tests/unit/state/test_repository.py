@@ -1,6 +1,8 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -80,6 +82,24 @@ def test_repository_counts_policies(tmp_path: Path) -> None:
     assert repository.count_policies() == 1
 
 
+def test_migrate_applies_rate_reservations_migration_idempotently(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+
+    repository.migrate()
+    repository.migrate()
+
+    with sqlite3.connect(repository.path) as connection:
+        migrations = {
+            row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(rate_reservations)")
+        }
+
+    assert migrations == {"001_initial", "002_rate_reservations"}
+    assert columns == {"source_id", "next_allowed_at", "updated_at"}
+
+
 def test_bulk_upsert_policies_is_atomic_when_later_write_fails(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
@@ -136,3 +156,29 @@ def test_repository_records_refusals_idempotently(tmp_path: Path) -> None:
         ).fetchall()
     assert len(rows) == 1
     assert RefusalRecord.model_validate_json(rows[0][0]) == record
+
+
+def test_rate_reservations_are_atomic_across_instances_and_release_connections(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    repository = StateRepository(path)
+    repository.migrate()
+    repository.upsert_policy(approved_policy())
+    requested_at = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    barrier = Barrier(2)
+
+    def reserve_slot() -> float:
+        barrier.wait()
+        return StateRepository(path).reserve_rate_slot(
+            "tushare",
+            requested_at=requested_at,
+            rate_limit_per_minute=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        delays = sorted(executor.map(lambda _: reserve_slot(), range(2)))
+
+    assert delays == [0.0, 60.0]
+    repository.save_checkpoint("rate-test", "complete")
+    path.unlink()

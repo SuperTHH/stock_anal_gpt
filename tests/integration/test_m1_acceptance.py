@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from hengce.config import Settings
+from hengce.contracts.policy import SourcePolicy
 from hengce.state.repository import StateRepository
 
 POLICY_FILE = Path(__file__).parents[2] / "config" / "source_policies.json"
@@ -73,10 +74,12 @@ def test_seed_write_failure_rolls_back_all_prevalidated_policy_changes(tmp_path:
     from hengce.bootstrap import bootstrap_state
 
     settings = Settings(data_dir=tmp_path / "data")
-    repository = bootstrap_state(settings, POLICY_FILE)
-    original = repository.get_policy("tushare")
-    assert original is not None
-    repository.upsert_policy(original.model_copy(update={"connection_status": "ORIGINAL"}))
+    settings.ensure_local_dirs()
+    repository = StateRepository(settings.data_dir / "state" / "hengce.sqlite3")
+    repository.migrate()
+    tushare = SourcePolicy.model_validate(json.loads(POLICY_FILE.read_text(encoding="utf-8"))[0])
+    original = tushare.model_copy(update={"connection_status": "ORIGINAL"})
+    repository.upsert_policy(original)
 
     import sqlite3
 
@@ -93,5 +96,24 @@ def test_seed_write_failure_rolls_back_all_prevalidated_policy_changes(tmp_path:
     with pytest.raises(sqlite3.IntegrityError, match="seed failure"):
         bootstrap_state(settings, POLICY_FILE)
 
-    assert repository.get_policy("tushare").connection_status == "ORIGINAL"
-    assert repository.count_policies() == 6
+    assert repository.get_policy("tushare") == original
+    assert repository.count_policies() == 1
+
+
+def test_bootstrap_only_inserts_missing_policies_and_preserves_operational_state(
+    tmp_path: Path,
+) -> None:
+    from hengce.bootstrap import bootstrap_state
+
+    settings = Settings(data_dir=tmp_path / "data")
+    repository = bootstrap_state(settings, POLICY_FILE)
+    existing = repository.get_policy("tushare")
+    assert existing is not None
+    changed = existing.model_copy(
+        update={"connection_status": "UNAVAILABLE", "enabled": False}
+    )
+    repository.upsert_policy(changed)
+
+    bootstrap_state(settings, POLICY_FILE)
+
+    assert repository.get_policy("tushare") == changed
