@@ -15,6 +15,9 @@ dependencies = [
   "typer>=0.12,<1",
 ]
 
+[project.scripts]
+hengce = "hengce.cli:app"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.2,<9",
