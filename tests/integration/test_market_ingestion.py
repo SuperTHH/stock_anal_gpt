@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -57,6 +59,19 @@ class FakeCollector:
             collected_at=COLLECTED_AT,
             bars=self.bars,
         )
+
+
+class BlockingCollector(FakeCollector):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetch_started = Event()
+        self.allow_return = Event()
+
+    def fetch(self, trade_date: date) -> DailyFetchResult:
+        self.fetch_started.set()
+        if not self.allow_return.wait(timeout=5):
+            raise TimeoutError("test collector was not released")
+        return super().fetch(trade_date)
 
 
 class CountingRawStore(RawObjectStore):
@@ -211,3 +226,53 @@ def test_stale_checkpoint_is_rejected_without_refetch(tmp_path: Path) -> None:
         service.run(TRADE_DATE)
 
     assert collector.calls == 0
+
+
+def test_concurrent_same_date_runs_allow_only_one_collector_fetch(tmp_path: Path) -> None:
+    collector = BlockingCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    first, _ = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+    second, second_state = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_run = executor.submit(first.run, TRADE_DATE)
+        assert collector.fetch_started.wait(timeout=5)
+        with pytest.raises(RuntimeError, match="MARKET_INGESTION_IN_PROGRESS"):
+            second.run(TRADE_DATE)
+        collector.allow_return.set()
+        assert first_run.result(timeout=5).bar_count == 1
+
+    assert collector.calls == 1
+    blocked = second_state.list_runs(run_type="market_daily")
+    assert any(run.run_status == "BLOCKED" for run in blocked)
+
+
+def test_retry_recovers_staged_parquet_after_checkpoint_crash_without_refetch(
+    tmp_path: Path,
+) -> None:
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+    service.after_artifact_staged = lambda: (_ for _ in ()).throw(RuntimeError("crash"))
+
+    with pytest.raises(RuntimeError, match="crash"):
+        service.run(TRADE_DATE)
+
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+    assert collector.calls == 1
+    assert warehouse.calls == 1
+
+    recovered = service.run(TRADE_DATE)
+
+    assert recovered.bar_count == 1
+    assert collector.calls == 1
+    assert warehouse.calls == 1
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None

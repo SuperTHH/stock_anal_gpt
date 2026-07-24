@@ -82,7 +82,7 @@ def test_repository_counts_policies(tmp_path: Path) -> None:
     assert repository.count_policies() == 1
 
 
-def test_migrate_applies_rate_reservations_migration_idempotently(tmp_path: Path) -> None:
+def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
 
     repository.migrate()
@@ -95,9 +95,20 @@ def test_migrate_applies_rate_reservations_migration_idempotently(tmp_path: Path
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(rate_reservations)")
         }
+        lease_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(ingestion_leases)")
+        }
 
-    assert migrations == {"001_initial", "002_rate_reservations"}
+    assert migrations == {"001_initial", "002_rate_reservations", "003_ingestion_leases"}
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
+    assert lease_columns == {
+        "trade_date",
+        "owner_id",
+        "lease_expires_at",
+        "lifecycle_state",
+        "staged_result_json",
+        "updated_at",
+    }
 
 
 def test_bulk_upsert_policies_is_atomic_when_later_write_fails(tmp_path: Path) -> None:
@@ -182,3 +193,70 @@ def test_rate_reservations_are_atomic_across_instances_and_release_connections(
     assert delays == [0.0, 60.0]
     repository.save_checkpoint("rate-test", "complete")
     path.unlink()
+
+
+def test_ingestion_lease_is_atomic_across_repository_instances(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    StateRepository(path).migrate()
+    now = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    barrier = Barrier(2)
+
+    def acquire(owner_id: str):  # type: ignore[no-untyped-def]
+        barrier.wait()
+        return StateRepository(path).acquire_ingestion_lease(
+            date(2026, 7, 24),
+            owner_id=owner_id,
+            now=now,
+            lease_seconds=60,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        leases = list(executor.map(acquire, ["owner-one", "owner-two"]))
+
+    assert sum(lease.acquired for lease in leases) == 1
+    winner = next(lease for lease in leases if lease.acquired)
+    assert winner.owner_id in {"owner-one", "owner-two"}
+
+
+def test_expired_ingestion_lease_can_be_taken_over_and_terminal_release_is_safe(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    now = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+
+    assert repository.acquire_ingestion_lease(
+        date(2026, 7, 24), owner_id="first", now=now, lease_seconds=60
+    ).acquired
+    assert repository.acquire_ingestion_lease(
+        date(2026, 7, 24), owner_id="second", now=now, lease_seconds=60
+    ).acquired is False
+    assert repository.acquire_ingestion_lease(
+        date(2026, 7, 24), owner_id="second", now=now.replace(minute=2), lease_seconds=60
+    ).acquired
+
+    assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="first") is False
+    assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="second") is True
+    assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="second") is False
+
+
+def test_only_current_lease_owner_can_stage_or_read_artifact(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    now = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    repository.acquire_ingestion_lease(
+        trade_date, owner_id="owner", now=now, lease_seconds=60
+    )
+
+    assert repository.stage_ingestion_artifact(
+        trade_date, owner_id="other", staged_result_json="{}"
+    ) is False
+    assert repository.stage_ingestion_artifact(
+        trade_date, owner_id="owner", staged_result_json='{"ready":true}'
+    ) is True
+    stored = repository.get_ingestion_state(trade_date)
+
+    assert stored is not None
+    assert stored.staged_result_json == '{"ready":true}'
+    assert stored.lifecycle_state == "STAGED"

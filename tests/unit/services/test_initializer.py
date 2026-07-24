@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -108,3 +108,53 @@ def test_initializer_rejects_malformed_checkpoint(tmp_path: Path, checkpoint: st
 
     with pytest.raises(ValueError, match="HISTORY_CHECKPOINT_INVALID"):
         initializer.run([date(2026, 7, 23)])
+
+
+def test_initializer_records_terminal_lifecycle_for_success_and_failure(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+
+    def clock() -> datetime:
+        return datetime(2026, 7, 24, 21, 30, tzinfo=UTC)
+
+    successful = HistoricalInitializer(
+        ingestion=RecordingIngestion(), state=state, clock=clock, run_id_factory=lambda: "success"
+    )
+    failing = HistoricalInitializer(
+        ingestion=RecordingIngestion(fail_on=date(2026, 7, 24)),
+        state=state,
+        clock=clock,
+        run_id_factory=lambda: "failure",
+    )
+
+    successful.run([date(2026, 7, 23)])
+    with pytest.raises(RuntimeError, match="temporary failure"):
+        failing.run([date(2026, 7, 24)])
+
+    runs = {record.run_id: record for record in state.list_runs(run_type="history_initialization")}
+    assert runs["history_initialization:success"].run_status == "SUCCEEDED"
+    assert runs["history_initialization:success"].finished_at == clock()
+    assert runs["history_initialization:failure"].run_status == "FAILED"
+    assert runs["history_initialization:failure"].error_code == "HISTORY_INITIALIZATION_FAILED"
+    assert runs["history_initialization:failure"].error_summary == "history initialization failed"
+
+
+def test_initializer_marks_lease_contention_as_blocked_without_error_details(
+    tmp_path: Path,
+) -> None:
+    state = make_state(tmp_path)
+
+    class BlockedIngestion:
+        def run(self, trade_date: date) -> object:
+            raise RuntimeError("MARKET_INGESTION_IN_PROGRESS")
+
+    initializer = HistoricalInitializer(
+        ingestion=BlockedIngestion(), state=state, run_id_factory=lambda: "blocked"
+    )
+
+    with pytest.raises(RuntimeError, match="MARKET_INGESTION_IN_PROGRESS"):
+        initializer.run([date(2026, 7, 24)])
+
+    record = state.list_runs(run_type="history_initialization")[0]
+    assert record.run_status == "BLOCKED"
+    assert record.error_code == "MARKET_INGESTION_IN_PROGRESS"
+    assert record.error_summary == "history initialization failed"
