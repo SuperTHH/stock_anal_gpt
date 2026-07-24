@@ -3,3 +3,12 @@
 .superdesign/review/
 .superdesign/tmp/
 .superpowers/sdd/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+data/
+*.duckdb
+*.sqlite
+*.sqlite3
