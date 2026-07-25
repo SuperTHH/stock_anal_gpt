@@ -11,7 +11,7 @@ from threading import Event
 import pytest
 
 from hengce.collectors.tushare import DailyFetchResult
-from hengce.contracts.enums import QualityStatus
+from hengce.contracts.enums import QualityStatus, RunStatus
 from hengce.contracts.market import MarketBar, SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.raw_store.store import RawObjectStore
@@ -58,22 +58,43 @@ def _security(ts_code: str = "600000.SH") -> SecurityMaster:
     )
 
 
-def _seed_security_master(repository: StateRepository, *codes: str) -> None:
+def _seed_security_master_source(
+    repository: StateRepository,
+    *,
+    source_id: str,
+    codes: tuple[str, ...],
+) -> None:
+    source_urls = {
+        "sse": "https://www.sse.com.cn/master.csv",
+        "szse": "https://www.szse.cn/master.csv",
+    }
     policies = json.loads(
         files("hengce").joinpath("data", "source_policies.json").read_text(encoding="utf-8")
     )
     repository.upsert_policy(
-        SourcePolicy.model_validate(next(item for item in policies if item["source_id"] == "sse"))
+        SourcePolicy.model_validate(
+            next(item for item in policies if item["source_id"] == source_id)
+        )
     )
     repository.save_security_master_snapshot(
         [_security(code) for code in codes],
-        source_id="sse",
-        source_url="https://www.sse.com.cn/master.csv",
+        source_id=source_id,
+        source_url=source_urls[source_id],
         collected_at=COLLECTED_AT,
-        content_hash="c" * 64,
-        version="fixture-v1",
+        content_hash=("c" if source_id == "sse" else "d") * 64,
+        version=f"{source_id}-fixture-v1",
         quality_lineage={"filter": "a_share_cny_four_boards"},
     )
+
+
+def _seed_complete_security_universe(
+    repository: StateRepository,
+    *,
+    sse_codes: tuple[str, ...] = ("600000.SH",),
+    szse_codes: tuple[str, ...] = ("000001.SZ",),
+) -> None:
+    _seed_security_master_source(repository, source_id="sse", codes=sse_codes)
+    _seed_security_master_source(repository, source_id="szse", codes=szse_codes)
 
 
 class FakeCollector:
@@ -150,7 +171,7 @@ def _service(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     return (
         MarketIngestionService(
             collector=collector or FakeCollector(),
@@ -162,26 +183,44 @@ def _service(
     )
 
 
-def test_missing_security_master_blocks_before_collector_or_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("missing_source", "error_code"),
+    [
+        ("sse", "SECURITY_MASTER_SSE_UNAVAILABLE"),
+        ("szse", "SECURITY_MASTER_SZSE_UNAVAILABLE"),
+    ],
+)
+def test_incomplete_universe_blocks_before_tushare_fetch(
+    tmp_path: Path, missing_source: str, error_code: str
+) -> None:
     collector = FakeCollector()
     raw_store = CountingRawStore(tmp_path / "raw")
     warehouse = CountingWarehouse(tmp_path / "normalized")
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
+    available_source = "szse" if missing_source == "sse" else "sse"
+    available_codes = ("000001.SZ",) if available_source == "szse" else ("600000.SH",)
+    _seed_security_master_source(
+        repository,
+        source_id=available_source,
+        codes=available_codes,
+    )
     from hengce.services.market_ingestion import MarketIngestionService
 
     service = MarketIngestionService(
         collector=collector, raw_store=raw_store, warehouse=warehouse, state=repository
     )
 
-    with pytest.raises(ValueError, match="SECURITY_MASTER_UNAVAILABLE"):
-        service.run(TRADE_DATE)
+    with pytest.raises(ValueError, match=error_code):
+        service.run(date(2026, 7, 22))
 
     assert collector.calls == 0
     assert raw_store.calls == 0
     assert warehouse.calls == 0
-    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
-    assert repository.list_runs(run_type="market_daily")[-1].run_status == "BLOCKED"
+    assert repository.get_checkpoint("market_daily:2026-07-22") is None
+    latest_run = repository.list_runs(run_type="market_daily")[-1]
+    assert latest_run.run_status == RunStatus.BLOCKED
+    assert latest_run.error_code == error_code
 
 
 def test_missing_security_master_hard_crash_before_terminal_write_leaves_no_running_run(
@@ -214,7 +253,7 @@ def test_disabled_security_master_policy_blocks_existing_snapshot_before_fetch(
     warehouse = CountingWarehouse(tmp_path / "normalized")
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     policy = repository.get_policy("sse")
     assert policy is not None
     repository.upsert_policy(policy.model_copy(update={"enabled": False}))
@@ -227,11 +266,14 @@ def test_disabled_security_master_policy_blocks_existing_snapshot_before_fetch(
         state=repository,
     )
 
-    with pytest.raises(ValueError, match="SECURITY_MASTER_UNAVAILABLE"):
+    with pytest.raises(ValueError, match="SECURITY_MASTER_POLICY_DENIED"):
         service.run(TRADE_DATE)
 
     assert collector.calls == 0
     assert repository.count_refusals() == 1
+    blocked_run = repository.list_runs(run_type="market_daily")[-1]
+    assert blocked_run.run_status == RunStatus.BLOCKED
+    assert blocked_run.error_code == "SECURITY_MASTER_POLICY_DENIED"
 
 
 def test_duplicate_daily_codes_fail_before_parquet_publication(tmp_path: Path) -> None:
@@ -254,8 +296,11 @@ def test_duplicate_daily_codes_fail_before_parquet_publication(tmp_path: Path) -
     assert failed_run.error_code == "MARKET_DAILY_DUPLICATE_TS_CODE"
 
 
-def test_out_of_scope_bar_fails_before_parquet_publication(tmp_path: Path) -> None:
-    collector = FakeCollector(bars=[_bar().model_copy(update={"ts_code": "000001.SZ"})])
+@pytest.mark.parametrize("ts_code", ["000002.SZ", "430047.BJ", "900901.SH", "00700.HK"])
+def test_out_of_scope_bar_fails_before_parquet_publication(
+    tmp_path: Path, ts_code: str
+) -> None:
+    collector = FakeCollector(bars=[_bar().model_copy(update={"ts_code": ts_code})])
     raw_store = CountingRawStore(tmp_path / "raw")
     warehouse = CountingWarehouse(tmp_path / "normalized")
     service, repository = _service(
@@ -268,6 +313,27 @@ def test_out_of_scope_bar_fails_before_parquet_publication(tmp_path: Path) -> No
     assert raw_store.calls == 1
     assert warehouse.calls == 0
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+
+
+def test_complete_universe_persists_sh_and_sz_bars(tmp_path: Path) -> None:
+    sz_bar = _bar().model_copy(
+        update={
+            "record_id": "000001.SZ-20260724-fixture",
+            "ts_code": "000001.SZ",
+        }
+    )
+    collector = FakeCollector(bars=[_bar(), sz_bar])
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, _ = _service(tmp_path, collector=collector, warehouse=warehouse)
+
+    result = service.run(TRADE_DATE)
+
+    assert collector.calls == 1
+    assert result.bar_count == 2
+    assert [row["ts_code"] for row in warehouse.read_bars(TRADE_DATE)] == [
+        "000001.SZ",
+        "600000.SH",
+    ]
 
 
 def test_repeated_run_uses_checkpoint_without_second_fetch_or_writes(tmp_path: Path) -> None:
@@ -428,7 +494,7 @@ def test_lease_contention_hard_crash_before_terminal_write_leaves_no_blocked_run
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
     active = RunRecord(
         run_id=f"market_daily:{TRADE_DATE.isoformat()}:active",
@@ -497,7 +563,7 @@ def test_expired_takeover_recovers_prepublication_intent_after_hard_crash(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     raw_store = CountingRawStore(tmp_path / "raw")
     warehouse = CountingWarehouse(tmp_path / "normalized")
     first_collector = FakeCollector()
@@ -558,7 +624,7 @@ def test_stale_owner_cannot_publish_checkpoint_after_replacement_stages_new_iden
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
     replacement = RunRecord(
         run_id=f"market_daily:{TRADE_DATE.isoformat()}:replacement",
@@ -696,7 +762,7 @@ def test_acquired_running_run_exists_before_post_acquire_hard_crash_and_takeover
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
     first = MarketIngestionService(
         collector=FakeCollector(),
@@ -742,7 +808,7 @@ def test_post_atomic_checkpoint_hook_crash_leaves_publisher_terminal(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     collector = FakeCollector()
     raw_store = CountingRawStore(tmp_path / "raw")
     warehouse = CountingWarehouse(tmp_path / "normalized")
@@ -788,7 +854,7 @@ def test_hard_crash_after_atomic_finalize_cannot_leave_running_record(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     service = MarketIngestionService(
         collector=FakeCollector(),
         raw_store=CountingRawStore(tmp_path / "raw"),
@@ -828,7 +894,7 @@ def test_failure_or_block_is_atomic_before_post_finalize_hard_crash(
 
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
-    _seed_security_master(repository, "600000.SH")
+    _seed_complete_security_universe(repository)
     service = MarketIngestionService(
         collector=FakeCollector(error=error),
         raw_store=CountingRawStore(tmp_path / "raw"),

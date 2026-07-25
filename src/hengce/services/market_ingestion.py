@@ -118,9 +118,10 @@ class MarketIngestionService:
                 terminal = True
                 return result
 
-            security_master = self.state.get_latest_security_master_snapshot()
-            if security_master is None:
-                raise ValueError("SECURITY_MASTER_UNAVAILABLE")
+            security_universe = self.state.get_security_master_universe()
+            approved_codes = {
+                security.ts_code for security in security_universe.securities
+            }
 
             lease = self.state.acquire_ingestion_lease(
                 trade_date,
@@ -200,9 +201,7 @@ class MarketIngestionService:
                 content_type=fetched.content_type,
                 payload=fetched.raw_payload,
             )
-            self._validate_bars_in_scope(fetched.bars, {
-                security.ts_code for security in security_master.securities
-            })
+            self._validate_bars_in_scope(fetched.bars, approved_codes)
             parquet_path, parquet_content_hash = self.warehouse.expected_artifact(fetched.bars)
             result = MarketIngestionResult(
                 trade_date=trade_date.isoformat(),
@@ -251,20 +250,20 @@ class MarketIngestionService:
         except Exception as error:
             owned_finalize_attempted = acquired
             if acquired:
-                is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
-                status = RunStatus.BLOCKED if is_master_unavailable else RunStatus.FAILED
+                is_security_master_error = self._is_security_master_error(error)
+                status = RunStatus.BLOCKED if is_security_master_error else RunStatus.FAILED
                 terminal_run = self._terminal_run(
                     run,
                     status,
                     {"security_master": "BLOCKED"}
-                    if is_master_unavailable
+                    if is_security_master_error
                     else {"ingestion": "FAILED"},
                     error_code=self._error_code(error),
                 )
                 finalized = self.state.finalize_ingestion_run(
                     trade_date,
                     owner_id=owner_id,
-                    lifecycle_state="BLOCKED" if is_master_unavailable else "FAILED",
+                    lifecycle_state="BLOCKED" if is_security_master_error else "FAILED",
                     terminal_run=terminal_run,
                 )
                 if finalized:
@@ -273,13 +272,13 @@ class MarketIngestionService:
                     if self.after_ingestion_finalized is not None:
                         self.after_ingestion_finalized()
             if not terminal and not owned_finalize_attempted:
-                is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
+                is_security_master_error = self._is_security_master_error(error)
                 self._before_nonlease_terminal()
                 self._finish_run(
                     run,
-                    RunStatus.BLOCKED if is_master_unavailable else RunStatus.FAILED,
+                    RunStatus.BLOCKED if is_security_master_error else RunStatus.FAILED,
                     {"security_master": "BLOCKED"}
-                    if is_master_unavailable
+                    if is_security_master_error
                     else {"ingestion": "FAILED"},
                     error_code=self._error_code(error),
                 )
@@ -349,6 +348,10 @@ class MarketIngestionService:
         if re.fullmatch(r"[A-Z0-9_:-]+", message):
             return message.split(":", maxsplit=1)[0]
         return "MARKET_INGESTION_FAILED"
+
+    @staticmethod
+    def _is_security_master_error(error: Exception) -> bool:
+        return MarketIngestionService._error_code(error).startswith("SECURITY_MASTER_")
 
     def _publish_checkpoint(self, checkpoint_key: str, result: MarketIngestionResult) -> None:
         self.state.save_checkpoint(checkpoint_key, self._result_json(result))
