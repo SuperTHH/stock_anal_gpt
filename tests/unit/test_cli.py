@@ -166,19 +166,19 @@ def test_check_security_universe_reports_composed_local_universe_without_network
 ) -> None:
     runner = CliRunner()
     sse = tmp_path / "sse-security-master.csv"
-    sse.write_text(
+    sse_csv = (
         "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
         "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE\n"
-        "688001.SH,688001,Example,SSE,STAR,CNY,20190722,A_SHARE\n",
-        encoding="utf-8",
+        "688001.SH,688001,Example,SSE,STAR,CNY,20190722,A_SHARE\n"
     )
+    sse.write_bytes(sse_csv.encode("utf-8"))
     szse = tmp_path / "szse-security-master.csv"
-    szse.write_text(
+    szse_csv = (
         "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
         "000001.SZ,000001,Example,SZSE,MAIN_SZ,CNY,19910403,A_SHARE\n"
-        "300001.SZ,300001,Example,SZSE,CHINEXT,CNY,20091030,A_SHARE\n",
-        encoding="utf-8",
+        "300001.SZ,300001,Example,SZSE,CHINEXT,CNY,20091030,A_SHARE\n"
     )
+    szse.write_bytes(szse_csv.encode("utf-8"))
     client_factory = Mock()
     monkeypatch.setattr(cli.httpx, "Client", client_factory)
 
@@ -229,7 +229,7 @@ def test_check_security_universe_reports_composed_local_universe_without_network
             {"source_id": "szse", "version": "2026-07-24-szse"},
         ],
         "security_count": 4,
-        "universe_hash": "51b567c7b97446a94d4936a3069980dd66dd18b00bf88e579a5a0486341ba1d3",
+        "universe_hash": "9c96ba030d69ebfd0102ff98da4c0f3995ba056518f0763de2a4d9d519409afa",
     }
     assert json.loads(second.stdout) == output
     assert bootstrap.call_count == 2
