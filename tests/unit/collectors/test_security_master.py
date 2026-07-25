@@ -24,16 +24,29 @@ def test_importer_enforces_declared_official_source(
     assert all(record.is_in_scope for record in records)
 
 
-def test_importer_rejects_cross_exchange_in_scope_row(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("source_id", "ts_code", "exchange", "board"),
+    [
+        ("sse", "600001.SH", "SZSE", "MAIN_SH"),
+        ("sse", "600001.SZ", "SSE", "MAIN_SH"),
+        ("sse", "600001.SH", "SSE", "CHINEXT"),
+        ("szse", "000002.SZ", "SSE", "MAIN_SZ"),
+        ("szse", "000002.SH", "SZSE", "MAIN_SZ"),
+        ("szse", "000002.SZ", "SZSE", "STAR"),
+    ],
+)
+def test_importer_rejects_each_source_identity_mismatch(
+    tmp_path: Path, source_id: str, ts_code: str, exchange: str, board: str
+) -> None:
     path = tmp_path / "wrong-source.csv"
     path.write_text(
         "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
-        "000001.SZ,000001,Wrong,SZSE,MAIN_SZ,CNY,19910403,A_SHARE\n",
+        f"{ts_code},000001,Wrong,{exchange},{board},CNY,19910403,A_SHARE\n",
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="SECURITY_MASTER_SOURCE_MISMATCH"):
-        OfficialSecurityMasterCsvImporter().parse(path, source_id="sse")
+        OfficialSecurityMasterCsvImporter().parse(path, source_id=source_id)
 
 
 def test_importer_excludes_wrong_currency_and_unknown_board(tmp_path: Path) -> None:

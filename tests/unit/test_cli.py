@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import zipfile
@@ -194,6 +195,55 @@ def test_import_security_master_rejects_undeclared_source_before_persisting(
     assert result.exception is not None
     assert str(result.exception) == "SECURITY_MASTER_SOURCE_MISMATCH"
     assert not (tmp_path / "state").exists()
+
+
+def test_import_security_master_audits_missing_declared_source_policy_without_persisting(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    source = tmp_path / "security-master.csv"
+    source.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE\n",
+        encoding="utf-8",
+    )
+    policies = json.loads(
+        (Path(__file__).parents[2] / "config" / "source_policies.json").read_text(encoding="utf-8")
+    )
+    policy_file = tmp_path / "source-policies-without-sse.json"
+    policy_file.write_text(
+        json.dumps([policy for policy in policies if policy["source_id"] != "sse"]),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-security-master",
+            "--file",
+            str(source),
+            "--source-id",
+            "sse",
+            "--source-url",
+            "https://www.sse.com.cn/master.csv",
+            "--version",
+            "2026-07-24",
+            "--collected-at",
+            "2026-07-24T09:00:00+00:00",
+            "--data-dir",
+            str(tmp_path),
+            "--policy-file",
+            str(policy_file),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "SOURCE_POLICY_MISSING"
+    repository = StateRepository(tmp_path / "state" / "hengce.sqlite3")
+    assert repository.count_refusals() == 1
+    content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert repository.get_security_master_snapshot("sse", content_hash) is None
 
 
 def test_import_security_master_rejects_cross_exchange_row_for_declared_source(
