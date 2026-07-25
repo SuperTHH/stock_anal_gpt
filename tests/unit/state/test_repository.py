@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -259,6 +260,94 @@ def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: P
     assert repository.get_latest_security_master_snapshot("sse") == newer
 
 
+def test_latest_security_master_snapshot_rejects_empty_newest_without_fallback(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "empty-newest.sqlite3")
+    repository.migrate()
+    repository.upsert_policy(exchange_policy("sse"))
+    save_exchange_snapshot(
+        repository,
+        "sse",
+        content_hash="b" * 64,
+        version="sse-valid-old",
+        collected_hour=8,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO security_master_snapshots(
+                source_id, source_url, collected_at, content_hash, version,
+                quality_lineage_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "sse",
+                "https://www.sse.com.cn/master.csv",
+                datetime(2026, 7, 24, 10, tzinfo=UTC).isoformat(),
+                "c" * 64,
+                "sse-empty-newest",
+                "{}",
+                datetime(2026, 7, 24, 10, tzinfo=UTC).isoformat(),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="^SECURITY_MASTER_SNAPSHOT_INVALID$"):
+        repository.get_latest_security_master_snapshot("sse")
+
+
+def test_latest_security_master_snapshot_rejects_invalid_newest_without_fallback(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "invalid-newest.sqlite3")
+    repository.migrate()
+    repository.upsert_policy(exchange_policy("sse"))
+    save_exchange_snapshot(
+        repository,
+        "sse",
+        content_hash="d" * 64,
+        version="sse-valid-old",
+        collected_hour=8,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    invalid_security = security("688001.SH", "STAR").model_copy(
+        update={"is_in_scope": False}
+    )
+    with sqlite3.connect(repository.path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO security_master_snapshots(
+                source_id, source_url, collected_at, content_hash, version,
+                quality_lineage_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "sse",
+                "https://www.sse.com.cn/master.csv",
+                datetime(2026, 7, 24, 10, tzinfo=UTC).isoformat(),
+                "e" * 64,
+                "sse-invalid-newest",
+                "{}",
+                datetime(2026, 7, 24, 10, tzinfo=UTC).isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO security_master_members(snapshot_id, ts_code, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (
+                cursor.lastrowid,
+                invalid_security.ts_code,
+                invalid_security.model_dump_json(),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="^SECURITY_MASTER_SCOPE_INVALID$"):
+        repository.get_latest_security_master_snapshot("sse")
+
+
 def test_universe_selects_latest_snapshot_per_required_source(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
@@ -301,7 +390,7 @@ def test_universe_selects_latest_snapshot_per_required_source(tmp_path: Path) ->
     assert old_sse not in universe.components
 
 
-def test_universe_requires_both_exchange_snapshots(tmp_path: Path) -> None:
+def test_universe_requires_both_exchange_snapshots_symmetrically(tmp_path: Path) -> None:
     only_sse = StateRepository(tmp_path / "only-sse.sqlite3")
     only_sse.migrate()
     only_sse.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
@@ -316,6 +405,21 @@ def test_universe_requires_both_exchange_snapshots(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="SECURITY_MASTER_SZSE_UNAVAILABLE"):
         only_sse.get_security_master_universe()
+
+    only_szse = StateRepository(tmp_path / "only-szse.sqlite3")
+    only_szse.migrate()
+    only_szse.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    save_exchange_snapshot(
+        only_szse,
+        "szse",
+        content_hash="5" * 64,
+        version="szse-only",
+        collected_hour=9,
+        securities=[security("000001.SZ", "MAIN_SZ")],
+    )
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_SSE_UNAVAILABLE"):
+        only_szse.get_security_master_universe()
 
 
 def test_universe_rejects_duplicate_codes_across_components(tmp_path: Path) -> None:
@@ -396,8 +500,66 @@ def test_universe_hash_is_deterministic(tmp_path: Path) -> None:
 
     first = repository.get_security_master_universe()
     second = repository.get_security_master_universe()
+    expected_identity = [
+        {
+            "source_id": "sse",
+            "version": "sse",
+            "content_hash": "9" * 64,
+            "collected_at": "2026-07-24T09:00:00+00:00",
+        },
+        {
+            "source_id": "szse",
+            "version": "szse",
+            "content_hash": "a" * 64,
+            "collected_at": "2026-07-24T10:00:00+00:00",
+        },
+    ]
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            expected_identity, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
     assert first.universe_hash == second.universe_hash
-    assert len(first.universe_hash) == 64
+    assert expected_digest == "7608ec5aea4b0276a2bdde7a17223a3acf770ed8085e235bcc2bd8707a16f338"
+    assert first.universe_hash == expected_digest
+
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            "UPDATE security_master_snapshots SET version=? WHERE source_id=?",
+            ("sse-changed", "sse"),
+        )
+    version_changed = repository.get_security_master_universe()
+
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            UPDATE security_master_snapshots
+            SET version=?, content_hash=?
+            WHERE source_id=?
+            """,
+            ("sse", "b" * 64, "sse"),
+        )
+    content_hash_changed = repository.get_security_master_universe()
+
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            UPDATE security_master_snapshots
+            SET content_hash=?, collected_at=?
+            WHERE source_id=?
+            """,
+            (
+                "9" * 64,
+                datetime(2026, 7, 24, 12, tzinfo=UTC).isoformat(),
+                "sse",
+            ),
+        )
+    collected_at_changed = repository.get_security_master_universe()
+
+    assert version_changed.universe_hash != first.universe_hash
+    assert content_hash_changed.universe_hash != first.universe_hash
+    assert collected_at_changed.universe_hash != first.universe_hash
 
 
 def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_path: Path) -> None:
