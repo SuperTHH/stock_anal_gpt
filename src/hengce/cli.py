@@ -171,5 +171,35 @@ def import_security_master(
     )
 
 
+@app.command("check-security-universe")
+def check_security_universe(
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Report whether the locally persisted security universe is complete and approved."""
+    state = bootstrap_state(Settings(data_dir=data_dir), policy_file)
+    universe = state.get_security_master_universe()
+    components = sorted(
+        (
+            {"source_id": component.source_id, "version": component.version}
+            for component in universe.components
+        ),
+        key=lambda component: (component["source_id"], component["version"]),
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "as_of": universe.as_of.isoformat(),
+                "component_count": len(components),
+                "components": components,
+                "security_count": len(universe.securities),
+                "universe_hash": universe.universe_hash,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
 if __name__ == "__main__":
     app()

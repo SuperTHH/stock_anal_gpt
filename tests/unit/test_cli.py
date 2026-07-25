@@ -161,6 +161,71 @@ def test_import_security_master_persists_approved_official_file_without_network(
     assert not client_factory.mock_calls
 
 
+def test_check_security_universe_reports_composed_local_universe_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    sse = tmp_path / "sse-security-master.csv"
+    sse.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE\n"
+        "688001.SH,688001,Example,SSE,STAR,CNY,20190722,A_SHARE\n",
+        encoding="utf-8",
+    )
+    szse = tmp_path / "szse-security-master.csv"
+    szse.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "000001.SZ,000001,Example,SZSE,MAIN_SZ,CNY,19910403,A_SHARE\n"
+        "300001.SZ,300001,Example,SZSE,CHINEXT,CNY,20091030,A_SHARE\n",
+        encoding="utf-8",
+    )
+    client_factory = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+
+    for source_id, source_url, source, version in [
+        ("sse", "https://www.sse.com.cn/master.csv", sse, "2026-07-24-sse"),
+        ("szse", "https://www.szse.cn/master.csv", szse, "2026-07-24-szse"),
+    ]:
+        imported = runner.invoke(
+            app,
+            [
+                "import-security-master",
+                "--file",
+                str(source),
+                "--source-id",
+                source_id,
+                "--source-url",
+                source_url,
+                "--version",
+                version,
+                "--collected-at",
+                "2026-07-24T09:00:00+00:00",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        )
+        assert imported.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        ["check-security-universe", "--data-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert len(output.pop("universe_hash")) == 64
+    assert output == {
+        "as_of": "2026-07-24T09:00:00+00:00",
+        "component_count": 2,
+        "components": [
+            {"source_id": "sse", "version": "2026-07-24-sse"},
+            {"source_id": "szse", "version": "2026-07-24-szse"},
+        ],
+        "security_count": 4,
+    }
+    assert not client_factory.mock_calls
+
+
 def test_import_security_master_rejects_undeclared_source_before_persisting(
     tmp_path: Path,
 ) -> None:
