@@ -1,6 +1,7 @@
 """Composition helpers for the local M1 data foundation."""
 
 import json
+from importlib.resources import files
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -10,10 +11,17 @@ from hengce.contracts.policy import SourcePolicy
 from hengce.state.repository import StateRepository
 
 
-def bootstrap_state(settings: Settings, policy_file: Path) -> StateRepository:
+def bootstrap_state(settings: Settings, policy_file: Path | None = None) -> StateRepository:
     """Migrate local state and atomically validate then seed source policies."""
     try:
-        payload = json.loads(policy_file.read_text(encoding="utf-8"))
+        policy_text = (
+            policy_file.read_text(encoding="utf-8")
+            if policy_file is not None
+            else files("hengce")
+            .joinpath("data", "source_policies.json")
+            .read_text(encoding="utf-8")
+        )
+        payload = json.loads(policy_text)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("SOURCE_POLICIES_INVALID") from error
     if not isinstance(payload, list):

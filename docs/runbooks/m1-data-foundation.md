@@ -4,7 +4,7 @@
 
 1. 创建 Python 3.12 虚拟环境，并运行 `python -m pip install -e ".[dev]"`。
 2. 复制 `.env.example` 为 `.env`，仅在本地设置 `HENGCE_TUSHARE_TOKEN`。
-3. 运行 `hengce init-state --data-dir data`。
+3. 运行 `hengce init-state --data-dir data`。默认来源策略已内置于 `hengce` wheel，因而在任何工作目录都可用。如需显式使用操作员策略文件，传入 `--policy-file config/source_policies.json`。
 
 ## 单日摄取
 

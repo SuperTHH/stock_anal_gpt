@@ -23,8 +23,6 @@ from hengce.services.market_ingestion import MarketIngestionService
 from hengce.state.repository import StateRepository
 from hengce.warehouse.market import MarketWarehouse
 
-DEFAULT_POLICY_FILE = Path(__file__).resolve().parents[2] / "config" / "source_policies.json"
-
 app = typer.Typer(no_args_is_help=True)
 
 
@@ -66,7 +64,7 @@ def parse_trade_date(value: str) -> date:
 
 
 def build_market_ingestion(
-    settings: Settings, client: httpx.Client, policy_file: Path = DEFAULT_POLICY_FILE
+    settings: Settings, client: httpx.Client, policy_file: Path | None = None
 ) -> MarketIngestionService:
     """Compose M1 ingestion without making a request; caller owns ``client`` lifecycle."""
     state = bootstrap_state(settings, policy_file)
@@ -89,7 +87,7 @@ def build_market_ingestion(
 @app.command("init-state")
 def init_state(
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
-    policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
+    policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Create idempotent local state and seed the approved source policies."""
     bootstrap_state(Settings(data_dir=data_dir), policy_file)
@@ -100,7 +98,7 @@ def init_state(
 def ingest_market(
     trade_date: Annotated[str, typer.Option()],
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
-    policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
+    policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Collect exactly one approved Tushare daily-market response."""
     parsed_trade_date = parse_trade_date(trade_date)
@@ -114,7 +112,7 @@ def ingest_market(
 def initialize_history(
     calendar_file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
-    policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
+    policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Resume approved trading-day ingestion from its persisted checkpoint."""
     trade_dates = load_trade_dates(calendar_file)
@@ -134,7 +132,7 @@ def import_security_master(
     version: Annotated[str, typer.Option()],
     collected_at: Annotated[str, typer.Option()],
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
-    policy_file: Annotated[Path, typer.Option()] = DEFAULT_POLICY_FILE,
+    policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Import a locally supplied official security-master CSV; this command never fetches."""
     try:

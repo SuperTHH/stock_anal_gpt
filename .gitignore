@@ -9,6 +9,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 data/
+!src/hengce/data/
+!src/hengce/data/source_policies.json
 *.duckdb
 *.db
 *.sqlite

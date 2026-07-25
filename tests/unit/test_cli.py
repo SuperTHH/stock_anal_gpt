@@ -1,6 +1,9 @@
 import json
+import sys
+import zipfile
 from datetime import date
 from pathlib import Path
+from subprocess import run
 from unittest.mock import Mock
 
 import pytest
@@ -46,6 +49,60 @@ def test_init_state_seeds_approved_policies(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "state initialized" in result.stdout
+
+
+def test_default_seed_is_packaged_and_matches_operator_copy() -> None:
+    from importlib.resources import files
+
+    packaged = files("hengce").joinpath("data", "source_policies.json")
+    operator_copy = Path(__file__).parents[2] / "config" / "source_policies.json"
+
+    assert json.loads(packaged.read_text(encoding="utf-8")) == json.loads(
+        operator_copy.read_text(encoding="utf-8")
+    )
+
+
+def test_wheel_contains_default_seed_and_installed_cli_initializes_state(tmp_path: Path) -> None:
+    project_root = Path(__file__).parents[2]
+    dist = tmp_path / "dist"
+    target = tmp_path / "site"
+    data_dir = tmp_path / "data"
+    build = run(
+        [sys.executable, "-m", "hatchling", "build", "-t", "wheel", "-d", str(dist)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+    wheel = next(dist.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        assert "hengce/data/source_policies.json" in archive.namelist()
+
+    install = run(
+        [sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(target), str(wheel)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert install.returncode == 0, install.stderr
+    command = run(
+        [
+            sys.executable,
+            "-c",
+            "from hengce.cli import app; app()",
+            "init-state",
+            "--data-dir",
+            str(data_dir),
+        ],
+        cwd=tmp_path,
+        env={**__import__("os").environ, "PYTHONPATH": str(target)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert command.returncode == 0, command.stderr
+    assert StateRepository(data_dir / "state" / "hengce.sqlite3").count_policies() == 6
 
 
 def test_import_security_master_persists_local_file_without_creating_network_client(

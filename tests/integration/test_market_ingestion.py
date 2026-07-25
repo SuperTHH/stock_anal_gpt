@@ -404,7 +404,24 @@ def test_staged_legacy_raw_object_recovers_without_refetch(tmp_path: Path) -> No
     collector = FakeCollector()
     raw_store = CountingRawStore(tmp_path / "raw")
     service, repository = _service(tmp_path, collector=collector, raw_store=raw_store)
-    service.after_artifact_staged = lambda: (_ for _ in ()).throw(RuntimeError("crash"))
+
+    def stage_legacy_result_then_crash() -> None:
+        lease = repository.get_ingestion_state(TRADE_DATE)
+        assert lease is not None
+        staged = json.loads(lease.staged_result_json or "{}")
+        staged["result"].pop("parquet_content_hash")
+        assert repository.stage_ingestion_artifact(
+            TRADE_DATE,
+            owner_id=lease.owner_id or "",
+            staged_result_json=json.dumps(staged),
+        )
+        persisted = repository.get_ingestion_state(TRADE_DATE)
+        assert persisted is not None
+        persisted_result = json.loads(persisted.staged_result_json or "{}")["result"]
+        assert "parquet_content_hash" not in persisted_result
+        raise RuntimeError("crash")
+
+    service.after_artifact_staged = stage_legacy_result_then_crash
 
     with pytest.raises(RuntimeError, match="crash"):
         service.run(TRADE_DATE)
@@ -414,15 +431,6 @@ def test_staged_legacy_raw_object_recovers_without_refetch(tmp_path: Path) -> No
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(global_payload.read_bytes())
     global_payload.unlink()
-    lease = repository.get_ingestion_state(TRADE_DATE)
-    assert lease is not None
-    staged = json.loads(lease.staged_result_json or "{}")
-    staged["result"].pop("parquet_content_hash")
-    repository.stage_ingestion_artifact(
-        TRADE_DATE,
-        owner_id=lease.owner_id or "",
-        staged_result_json=json.dumps(staged),
-    )
     service.after_artifact_staged = None
 
     recovered = service.run(TRADE_DATE)
@@ -430,6 +438,10 @@ def test_staged_legacy_raw_object_recovers_without_refetch(tmp_path: Path) -> No
     assert recovered.raw_content_hash == content_hash
     assert raw_store.validate_content_hash(content_hash).is_file()
     assert collector.calls == 1
+    rewritten = json.loads(
+        repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") or "{}"
+    )
+    assert rewritten["parquet_content_hash"] == recovered.parquet_content_hash
 
 
 def test_checkpoint_rejects_parseable_parquet_with_changed_content(tmp_path: Path) -> None:
