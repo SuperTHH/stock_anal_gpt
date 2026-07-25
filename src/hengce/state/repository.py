@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 from importlib.resources import files
 from pathlib import Path
 
+from hengce.contracts.enums import RunStatus
 from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
@@ -21,6 +22,8 @@ class IngestionLease:
     acquired: bool
     lifecycle_state: str
     staged_result_json: str | None = None
+    active_run_id: str | None = None
+    abandoned_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,12 @@ class StateRepository:
                     "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (migration.name.removesuffix(".sql"), datetime.now(UTC).isoformat()),
                 )
+            lease_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(ingestion_leases)")
+            }
+            if "active_run_id" not in lease_columns:
+                connection.execute("ALTER TABLE ingestion_leases ADD COLUMN active_run_id TEXT")
 
     def upsert_policy(self, policy: SourcePolicy) -> None:
         self.upsert_policies([policy])
@@ -187,6 +196,14 @@ class StateRepository:
         self._validate_security_master_snapshot(
             securities, source_id, source_url, collected_at, content_hash, version
         )
+        from hengce.policy.guard import PolicyGuard
+
+        PolicyGuard(self).validate(
+            source_id,
+            source_url,
+            "security_master",
+            "state.security_master_import",
+        )
         collected_at_value = collected_at.isoformat()
         with self._connection() as connection:
             existing = connection.execute(
@@ -281,9 +298,22 @@ class StateRepository:
                 (row["snapshot_id"],),
             ).fetchall()
         snapshot = self._snapshot_from_rows(row, members)
-        return snapshot if snapshot.securities and all(
+        if not snapshot.securities or not all(
             security.is_in_scope for security in snapshot.securities
-        ) else None
+        ):
+            return None
+        from hengce.policy.guard import PolicyDenied, PolicyGuard
+
+        try:
+            PolicyGuard(self).validate(
+                snapshot.source_id,
+                snapshot.source_url,
+                "security_master",
+                "services.market_ingestion",
+            )
+        except PolicyDenied:
+            return None
+        return snapshot
 
     @staticmethod
     def _snapshot_from_rows(
@@ -351,6 +381,7 @@ class StateRepository:
         trade_date: date,
         *,
         owner_id: str,
+        run_id: str | None = None,
         now: datetime,
         lease_seconds: float,
     ) -> IngestionLease:
@@ -371,48 +402,92 @@ class StateRepository:
                     """
                     INSERT INTO ingestion_leases(
                         trade_date, owner_id, lease_expires_at, lifecycle_state, staged_result_json,
-                        updated_at
-                    ) VALUES (?, ?, ?, 'RUNNING', NULL, ?)
+                        updated_at, active_run_id
+                    ) VALUES (?, ?, ?, 'RUNNING', NULL, ?, ?)
                     """,
                     (
                         trade_date_value,
                         owner_id,
                         now_timestamp + lease_seconds,
                         datetime.now(UTC).isoformat(),
+                        run_id,
                     ),
                 )
-                return IngestionLease(trade_date_value, owner_id, True, "RUNNING")
+                return IngestionLease(
+                    trade_date=trade_date_value,
+                    owner_id=owner_id,
+                    acquired=True,
+                    lifecycle_state="RUNNING",
+                    active_run_id=run_id,
+                )
             expires_at = row["lease_expires_at"]
             can_acquire = row["owner_id"] is None or (
                 expires_at is not None and float(expires_at) <= now_timestamp
             )
             if can_acquire:
+                abandoned_run_id = (
+                    str(row["active_run_id"])
+                    if row["owner_id"] is not None and row["active_run_id"] is not None
+                    else None
+                )
+                if abandoned_run_id is not None:
+                    abandoned_row = connection.execute(
+                        "SELECT payload_json FROM run_records WHERE run_id=?",
+                        (abandoned_run_id,),
+                    ).fetchone()
+                    if abandoned_row is not None:
+                        abandoned = RunRecord.model_validate_json(abandoned_row["payload_json"])
+                        if abandoned.run_status == "RUNNING":
+                            terminal = abandoned.model_copy(
+                                update={
+                                    "finished_at": now,
+                                    "run_status": RunStatus.FAILED,
+                                    "stage_statuses": {"lease": "FAILED"},
+                                    "error_code": "MARKET_INGESTION_LEASE_EXPIRED",
+                                    "error_summary": "market daily ingestion lease expired",
+                                }
+                            )
+                            connection.execute(
+                                """
+                                UPDATE run_records
+                                SET payload_json=?, updated_at=?
+                                WHERE run_id=?
+                                """,
+                                (terminal.model_dump_json(), now.isoformat(), abandoned_run_id),
+                            )
                 connection.execute(
                     """
                     UPDATE ingestion_leases
-                    SET owner_id=?, lease_expires_at=?, lifecycle_state='RUNNING', updated_at=?
+                    SET owner_id=?, lease_expires_at=?, lifecycle_state='RUNNING', updated_at=?,
+                        active_run_id=?
                     WHERE trade_date=?
                     """,
                     (
                         owner_id,
                         now_timestamp + lease_seconds,
                         datetime.now(UTC).isoformat(),
+                        run_id,
                         trade_date_value,
                     ),
                 )
                 return IngestionLease(
-                    trade_date_value,
-                    owner_id,
-                    True,
-                    "RUNNING",
-                    row["staged_result_json"],
+                    trade_date=trade_date_value,
+                    owner_id=owner_id,
+                    acquired=True,
+                    lifecycle_state="RUNNING",
+                    staged_result_json=row["staged_result_json"],
+                    active_run_id=run_id,
+                    abandoned_run_id=abandoned_run_id,
                 )
             return IngestionLease(
-                trade_date_value,
-                str(row["owner_id"]),
-                False,
-                str(row["lifecycle_state"]),
-                row["staged_result_json"],
+                trade_date=trade_date_value,
+                owner_id=str(row["owner_id"]),
+                acquired=False,
+                lifecycle_state=str(row["lifecycle_state"]),
+                staged_result_json=row["staged_result_json"],
+                active_run_id=(
+                    str(row["active_run_id"]) if row["active_run_id"] is not None else None
+                ),
             )
 
     def release_ingestion_lease(self, trade_date: date, *, owner_id: str) -> bool:
@@ -421,7 +496,7 @@ class StateRepository:
             cursor = connection.execute(
                 """
                 UPDATE ingestion_leases
-                SET owner_id=NULL, lease_expires_at=NULL, updated_at=?
+                SET owner_id=NULL, lease_expires_at=NULL, active_run_id=NULL, updated_at=?
                 WHERE trade_date=? AND owner_id=?
                 """,
                 (datetime.now(UTC).isoformat(), trade_date.isoformat(), owner_id),
@@ -488,6 +563,9 @@ class StateRepository:
             acquired=False,
             lifecycle_state=str(row["lifecycle_state"]),
             staged_result_json=row["staged_result_json"],
+            active_run_id=(
+                str(row["active_run_id"]) if row["active_run_id"] is not None else None
+            ),
         )
 
     def discard_staged_ingestion_artifact(self, trade_date: date, *, owner_id: str) -> bool:
@@ -513,7 +591,8 @@ class StateRepository:
             cursor = connection.execute(
                 """
                 UPDATE ingestion_leases
-                SET owner_id=NULL, lease_expires_at=NULL, lifecycle_state=?, updated_at=?
+                SET owner_id=NULL, lease_expires_at=NULL, lifecycle_state=?, active_run_id=NULL,
+                    updated_at=?
                 WHERE trade_date=? AND owner_id=?
                 """,
                 (

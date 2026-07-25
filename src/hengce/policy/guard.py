@@ -29,6 +29,19 @@ class PolicyGuard:
         self.sleeper = sleeper
 
     def authorize(self, source_id: str, url: str, purpose: str, module: str) -> None:
+        policy = self.validate(source_id, url, purpose, module)
+        delay = self.repository.reserve_rate_slot(
+            source_id,
+            requested_at=self.clock(),
+            rate_limit_per_minute=policy.rate_limit_per_minute,
+        )
+        if delay:
+            self.sleeper(delay)
+
+    def validate(
+        self, source_id: str, url: str, purpose: str, module: str
+    ) -> SourcePolicy:
+        """Validate and audit source access without reserving request rate capacity."""
         policy = self.repository.get_policy(source_id)
         reason = self._deny_reason(policy, url, purpose)
         if reason is not None:
@@ -40,20 +53,14 @@ class PolicyGuard:
                     resolved_domain=(parsed.hostname or "").lower(),
                     requested_purpose=purpose,
                     policy_rule=source_id,
-                    refused_at=datetime.now(UTC),
+                    refused_at=self.clock(),
                     reason_code=reason,
                     requesting_module=module,
                 )
             )
             raise PolicyDenied(reason)
         assert policy is not None
-        delay = self.repository.reserve_rate_slot(
-            source_id,
-            requested_at=self.clock(),
-            rate_limit_per_minute=policy.rate_limit_per_minute,
-        )
-        if delay:
-            self.sleeper(delay)
+        return policy
 
     @staticmethod
     def _deny_reason(
@@ -78,10 +85,7 @@ class PolicyGuard:
             return "SCHEME_NOT_ALLOWED"
 
         hostname = parsed.hostname.lower()
-        if not any(
-            hostname == domain or hostname.endswith(f".{domain}")
-            for domain in policy.allowed_domains
-        ):
+        if hostname not in policy.allowed_domains:
             return "DOMAIN_NOT_ALLOWED"
         if purpose not in policy.allowed_purposes:
             return "PURPOSE_NOT_ALLOWED"

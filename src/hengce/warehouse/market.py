@@ -18,6 +18,27 @@ class MarketWarehouse:
         self.dataset = root / "market_bars"
 
     def write_bars(self, bars: list[MarketBar]) -> Path:
+        target, _ = self.expected_artifact(bars)
+        rows = [bar.model_dump(mode="json") for bar in bars]
+        rows.sort(key=self._canonical_row)
+        digest = target.stem.removeprefix("part-")
+        temporary = target.parent / f".{digest}-{uuid4().hex}.tmp"
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            pq.write_table(pa.Table.from_pylist(rows), temporary, compression="zstd")
+            self._flush(temporary)
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.validate_artifact(target, bars[0].trade_date, len(bars), digest)
+        return target
+
+    def expected_artifact(self, bars: list[MarketBar]) -> tuple[Path, str]:
+        """Return the deterministic target and canonical hash without publishing it."""
         if not bars:
             raise ValueError("bars must not be empty")
         trade_dates = {bar.trade_date for bar in bars}
@@ -32,21 +53,8 @@ class MarketWarehouse:
         digest = hashlib.sha256(canonical).hexdigest()
         trade_date = next(iter(trade_dates)).isoformat()
         partition = self.dataset / f"trade_date={trade_date}"
-        partition.mkdir(parents=True, exist_ok=True)
         target = partition / f"part-{digest}.parquet"
-        temporary = partition / f".{digest}-{uuid4().hex}.tmp"
-
-        try:
-            pq.write_table(pa.Table.from_pylist(rows), temporary, compression="zstd")
-            self._flush(temporary)
-            try:
-                os.link(temporary, target)
-            except FileExistsError:
-                pass
-        finally:
-            temporary.unlink(missing_ok=True)
-        self.validate_artifact(target, next(iter(trade_dates)), len(bars), digest)
-        return target
+        return target, digest
 
     @staticmethod
     def validate_artifact(

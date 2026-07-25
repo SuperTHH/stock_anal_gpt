@@ -51,10 +51,10 @@ class HistoricalInitializer:
         self.state.record_run(run)
         try:
             last_completed = self._load_checkpoint()
-            pending = [item for item in ordered if last_completed is None or item > last_completed]
-            for trade_date in pending:
+            for trade_date in ordered:
                 self.ingestion.run(trade_date)
-                self.state.save_checkpoint(self.checkpoint_key, trade_date.isoformat())
+                if last_completed is None or trade_date > last_completed:
+                    self.state.save_checkpoint(self.checkpoint_key, trade_date.isoformat())
 
             final = self._load_checkpoint()
             completed = sum(1 for item in ordered if final is not None and item <= final)

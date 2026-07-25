@@ -48,6 +48,42 @@ def test_guard_allows_exact_approved_domain_and_purpose(tmp_path: Path) -> None:
     assert repository.count_refusals() == 0
 
 
+def test_rate_free_validation_does_not_consume_the_first_request_slot(tmp_path: Path) -> None:
+    repository = repository_with_policy(tmp_path)
+    now = datetime(2026, 7, 24, 9, 0)
+    sleeps: list[float] = []
+    guard = PolicyGuard(repository, clock=lambda: now, sleeper=sleeps.append)
+
+    guard.validate(
+        "tushare", "http://api.tushare.pro/", "market_daily", "local.import"
+    )
+    guard.authorize(
+        "tushare", "http://api.tushare.pro/", "market_daily", "collectors.tushare"
+    )
+
+    assert sleeps == []
+
+
+def test_rate_free_validation_requires_an_exact_approved_hostname(tmp_path: Path) -> None:
+    repository = repository_with_policy(
+        tmp_path,
+        source_id="sse",
+        allowed_domains=["sse.com.cn"],
+        allowed_schemes=["https"],
+        allowed_purposes=["security_master"],
+    )
+
+    with pytest.raises(PolicyDenied, match="^DOMAIN_NOT_ALLOWED$"):
+        PolicyGuard(repository).validate(
+            "sse",
+            "https://download.sse.com.cn/security-master.csv",
+            "security_master",
+            "local.import",
+        )
+
+    assert repository.count_refusals() == 1
+
+
 def test_guard_denies_tushare_http_subdomain_even_when_policy_allows_parent(
     tmp_path: Path,
 ) -> None:

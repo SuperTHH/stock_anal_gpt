@@ -10,6 +10,7 @@ from hengce.contracts.enums import ReviewStatus, RunStatus
 from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
+from hengce.policy.guard import PolicyDenied
 from hengce.state.repository import StateRepository
 
 
@@ -31,6 +32,28 @@ def approved_policy() -> SourcePolicy:
         connection_status="UNKNOWN",
         enabled=True,
     )
+
+
+def security_master_policy(**overrides: object) -> SourcePolicy:
+    values: dict[str, object] = {
+        "source_id": "sse",
+        "source_name": "SSE",
+        "allowed_domains": ["sse.com.cn", "www.sse.com.cn"],
+        "allowed_schemes": ["https"],
+        "allowed_purposes": ["security_master"],
+        "fetch_frequency": "policy_defined",
+        "full_text_rule": "necessary_public_attachment",
+        "attachment_rule": "pdf_xbrl_only",
+        "rate_limit_per_minute": 6,
+        "robots_policy": "respect",
+        "terms_url": "https://www.sse.com.cn/home/legal/",
+        "terms_reviewed_at": datetime(2026, 7, 24, 9, 0, tzinfo=UTC),
+        "review_status": ReviewStatus.APPROVED,
+        "connection_status": "UNKNOWN",
+        "enabled": True,
+    }
+    values.update(overrides)
+    return SourcePolicy.model_validate(values)
 
 
 def completed_run() -> RunRecord:
@@ -73,6 +96,7 @@ def security(code: str, board: str) -> SecurityMaster:
 def test_security_master_snapshot_round_trips_four_boards_and_lineage(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
+    repository.upsert_policy(security_master_policy())
     records = [
         security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR"),
         security("000001.SZ", "MAIN_SZ"), security("300001.SZ", "CHINEXT"),
@@ -99,6 +123,72 @@ def test_security_master_snapshot_round_trips_four_boards_and_lineage(tmp_path: 
     assert repository.get_security_master_snapshot("sse", "a" * 64) == snapshot
 
 
+@pytest.mark.parametrize(
+    ("policy_overrides", "source_url", "reason"),
+    [
+        (None, "https://www.sse.com.cn/master.csv", "SOURCE_POLICY_MISSING"),
+        ({"enabled": False}, "https://www.sse.com.cn/master.csv", "SOURCE_DISABLED"),
+        (
+            {"enabled": False, "review_status": ReviewStatus.REVIEW_REQUIRED},
+            "https://www.sse.com.cn/master.csv",
+            "SOURCE_REVIEW_REQUIRED",
+        ),
+        (
+            {"allowed_purposes": ["trading_status"]},
+            "https://www.sse.com.cn/master.csv",
+            "PURPOSE_NOT_ALLOWED",
+        ),
+        ({}, "http://www.sse.com.cn/master.csv", "HTTP_ENDPOINT_NOT_ALLOWED"),
+        ({}, "https://download.sse.com.cn/master.csv", "DOMAIN_NOT_ALLOWED"),
+    ],
+)
+def test_security_master_snapshot_denials_are_audited_and_never_persist(
+    tmp_path: Path,
+    policy_overrides: dict[str, object] | None,
+    source_url: str,
+    reason: str,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    if policy_overrides is not None:
+        repository.upsert_policy(security_master_policy(**policy_overrides))
+
+    with pytest.raises(PolicyDenied, match=f"^{reason}$"):
+        repository.save_security_master_snapshot(
+            [security("600000.SH", "MAIN_SH")],
+            source_id="sse",
+            source_url=source_url,
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+            content_hash="f" * 64,
+            version="v1",
+            quality_lineage={},
+        )
+
+    assert repository.get_security_master_snapshot("sse", "f" * 64) is None
+    assert repository.count_refusals() == 1
+
+
+def test_disabled_policy_prevents_an_existing_snapshot_from_gating_ingestion(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.upsert_policy(security_master_policy())
+    repository.save_security_master_snapshot(
+        [security("600000.SH", "MAIN_SH")],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+        content_hash="f" * 64,
+        version="v1",
+        quality_lineage={},
+    )
+    repository.upsert_policy(security_master_policy(enabled=False))
+
+    assert repository.get_latest_security_master_snapshot() is None
+    assert repository.count_refusals() == 1
+
+
 def test_security_master_snapshot_rejects_duplicates_without_persisting(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
@@ -117,15 +207,16 @@ def test_security_master_snapshot_rejects_duplicates_without_persisting(tmp_path
 def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
+    repository.upsert_policy(security_master_policy())
     repository.save_security_master_snapshot(
         [security("600000.SH", "MAIN_SH")],
-        source_id="sse", source_url="https://example.test/master.csv",
+        source_id="sse", source_url="https://www.sse.com.cn/master.csv",
         collected_at=datetime(2026, 7, 23, tzinfo=UTC), content_hash="d" * 64,
         version="v1", quality_lineage={},
     )
     newer = repository.save_security_master_snapshot(
         [security("688001.SH", "STAR")],
-        source_id="sse", source_url="https://example.test/master.csv",
+        source_id="sse", source_url="https://www.sse.com.cn/master.csv",
         collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="e" * 64,
         version="v2", quality_lineage={},
     )
@@ -136,6 +227,7 @@ def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: P
 def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
+    repository.upsert_policy(security_master_policy())
     with sqlite3.connect(repository.path) as connection:
         connection.execute("""
             CREATE TRIGGER abort_security_row BEFORE INSERT ON security_master_members
@@ -146,7 +238,7 @@ def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_
     with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
         repository.save_security_master_snapshot(
             [security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR")],
-            source_id="sse", source_url="https://example.test/master.csv",
+            source_id="sse", source_url="https://www.sse.com.cn/master.csv",
             collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="c" * 64,
             version="v1", quality_lineage={},
         )
@@ -201,6 +293,7 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
         "002_rate_reservations",
         "003_ingestion_leases",
         "004_security_master_snapshots",
+        "005_ingestion_run_link",
     }
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
     assert lease_columns == {
@@ -210,6 +303,7 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
         "lifecycle_state",
         "staged_result_json",
         "updated_at",
+        "active_run_id",
     }
 
 
@@ -340,6 +434,49 @@ def test_expired_ingestion_lease_can_be_taken_over_and_terminal_release_is_safe(
     assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="first") is False
     assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="second") is True
     assert repository.release_ingestion_lease(date(2026, 7, 24), owner_id="second") is False
+
+
+def test_expired_lease_takeover_terminalizes_linked_running_record_before_new_run(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    abandoned = RunRecord(
+        run_id="market_daily:2026-07-24:first",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status="RUNNING",
+        stage_statuses={"lease": "RUNNING"},
+    )
+    repository.record_run(abandoned)
+    assert repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="first",
+        run_id=abandoned.run_id,
+        now=started,
+        lease_seconds=60,
+    ).acquired
+
+    takeover = repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="second",
+        run_id="market_daily:2026-07-24:second",
+        now=started.replace(minute=2),
+        lease_seconds=60,
+    )
+
+    assert takeover.acquired
+    assert takeover.abandoned_run_id == abandoned.run_id
+    persisted = {
+        run.run_id: run for run in repository.list_runs(run_type="market_daily")
+    }[abandoned.run_id]
+    assert persisted.run_status == "FAILED"
+    assert persisted.finished_at == started.replace(minute=2)
+    assert persisted.error_code == "MARKET_INGESTION_LEASE_EXPIRED"
+    assert persisted.stage_statuses == {"lease": "FAILED"}
 
 
 def test_only_current_lease_owner_can_stage_or_read_artifact(tmp_path: Path) -> None:

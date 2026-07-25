@@ -55,6 +55,7 @@ class MarketIngestionService:
         clock: Callable[[], datetime] | None = None,
         owner_id_factory: Callable[[], str] | None = None,
         after_artifact_staged: Callable[[], None] | None = None,
+        after_parquet_published: Callable[[], None] | None = None,
         lease_seconds: float = 300,
         lease_renewal_interval_seconds: float | None = None,
     ) -> None:
@@ -65,6 +66,7 @@ class MarketIngestionService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.owner_id_factory = owner_id_factory or (lambda: uuid4().hex)
         self.after_artifact_staged = after_artifact_staged
+        self.after_parquet_published = after_parquet_published
         if lease_seconds <= 0:
             raise ValueError("INGESTION_LEASE_INVALID")
         self.lease_seconds = lease_seconds
@@ -85,7 +87,6 @@ class MarketIngestionService:
             run_status=RunStatus.RUNNING,
             stage_statuses={"checkpoint": "RUNNING"},
         )
-        self.state.record_run(run)
         checkpoint_key = f"market_daily:{trade_date.isoformat()}"
         acquired = False
         terminal = False
@@ -94,6 +95,7 @@ class MarketIngestionService:
         try:
             existing = self.state.get_checkpoint(checkpoint_key)
             if existing is not None:
+                self.state.record_run(run)
                 result = self._parse_checkpoint(existing, trade_date)
                 result = self._validate_checkpoint_artifacts(result, trade_date)
                 if result.parquet_content_hash is not None:
@@ -104,14 +106,17 @@ class MarketIngestionService:
 
             security_master = self.state.get_latest_security_master_snapshot()
             if security_master is None:
+                self.state.record_run(run)
                 raise ValueError("SECURITY_MASTER_UNAVAILABLE")
 
             lease = self.state.acquire_ingestion_lease(
                 trade_date,
                 owner_id=owner_id,
+                run_id=run.run_id,
                 now=self.clock(),
                 lease_seconds=self.lease_seconds,
             )
+            self.state.record_run(run)
             if not lease.acquired:
                 self._finish_run(
                     run,
@@ -167,10 +172,7 @@ class MarketIngestionService:
             self._validate_bars_in_scope(fetched.bars, {
                 security.ts_code for security in security_master.securities
             })
-            parquet_path = self.warehouse.write_bars(fetched.bars)
-            parquet_content_hash = self.warehouse.validate_artifact(
-                parquet_path, trade_date, len(fetched.bars)
-            )
+            parquet_path, parquet_content_hash = self.warehouse.expected_artifact(fetched.bars)
             result = MarketIngestionResult(
                 trade_date=trade_date.isoformat(),
                 bar_count=len(fetched.bars),
@@ -187,6 +189,14 @@ class MarketIngestionService:
                 ),
             ):
                 raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
+            published_path = self.warehouse.write_bars(fetched.bars)
+            if published_path != parquet_path:
+                raise RuntimeError("MARKET_PARQUET_IDENTITY_CHANGED")
+            if self.after_parquet_published is not None:
+                self.after_parquet_published()
+            self.warehouse.validate_artifact(
+                parquet_path, trade_date, len(fetched.bars), parquet_content_hash
+            )
             if self.after_artifact_staged is not None:
                 self.after_artifact_staged()
             self._publish_checkpoint(checkpoint_key, result)

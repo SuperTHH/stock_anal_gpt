@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import zipfile
@@ -80,23 +81,31 @@ def test_wheel_contains_default_seed_and_installed_cli_initializes_state(tmp_pat
         assert "hengce/data/source_policies.json" in archive.namelist()
 
     install = run(
-        [sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(target), str(wheel)],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--ignore-installed",
+            "--no-deps",
+            "--prefix",
+            str(target),
+            str(wheel),
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert install.returncode == 0, install.stderr
+    wrapper = target / "Scripts" / "hengce.exe"
+    assert wrapper.is_file()
     command = run(
-        [
-            sys.executable,
-            "-c",
-            "from hengce.cli import app; app()",
-            "init-state",
-            "--data-dir",
-            str(data_dir),
-        ],
+        [str(wrapper), "init-state", "--data-dir", str(data_dir)],
         cwd=tmp_path,
-        env={**__import__("os").environ, "PYTHONPATH": str(target)},
+        env={
+            **__import__("os").environ,
+            "PYTHONPATH": str(target / "Lib" / "site-packages"),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -105,8 +114,55 @@ def test_wheel_contains_default_seed_and_installed_cli_initializes_state(tmp_pat
     assert StateRepository(data_dir / "state" / "hengce.sqlite3").count_policies() == 6
 
 
-def test_import_security_master_persists_local_file_without_creating_network_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("source_id", "source_url", "row"),
+    [
+        (
+            "sse",
+            "https://www.sse.com.cn/master.csv",
+            "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE",
+        ),
+        (
+            "szse",
+            "https://www.szse.cn/master.csv",
+            "000001.SZ,000001,Example,SZSE,MAIN_SZ,CNY,19910403,A_SHARE",
+        ),
+    ],
+)
+def test_import_security_master_persists_approved_official_file_without_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+    source_url: str,
+    row: str,
+) -> None:
+    runner = CliRunner()
+    source = tmp_path / "security-master.csv"
+    source.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        f"{row}\n",
+        encoding="utf-8",
+    )
+    client_factory = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+
+    result = runner.invoke(app, [
+        "import-security-master", "--file", str(source), "--source-id", source_id,
+        "--source-url", source_url, "--version", "2026-07-24",
+        "--collected-at", "2026-07-24T09:00:00+00:00", "--data-dir", str(tmp_path),
+    ])
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["security_count"] == 1
+    assert output["source_id"] == source_id
+    assert output["version"] == "2026-07-24"
+    assert output["content_hash"]
+    assert not client_factory.mock_calls
+
+
+def test_import_security_master_audits_policy_denial_without_persisting(
+    tmp_path: Path,
 ) -> None:
     runner = CliRunner()
     source = tmp_path / "security-master.csv"
@@ -115,22 +171,33 @@ def test_import_security_master_persists_local_file_without_creating_network_cli
         "600000.SH,600000,Example,SSE,MAIN_SH,CNY,19991110,A_SHARE\n",
         encoding="utf-8",
     )
-    client_factory = Mock()
-    monkeypatch.setattr(cli.httpx, "Client", client_factory)
 
-    result = runner.invoke(app, [
-        "import-security-master", "--file", str(source), "--source-id", "sse",
-        "--source-url", "https://www.sse.com.cn/master.csv", "--version", "2026-07-24",
-        "--collected-at", "2026-07-24T09:00:00+00:00", "--data-dir", str(tmp_path),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "import-security-master",
+            "--file",
+            str(source),
+            "--source-id",
+            "unknown",
+            "--source-url",
+            "https://unknown.example/master.csv",
+            "--version",
+            "2026-07-24",
+            "--collected-at",
+            "2026-07-24T09:00:00+00:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
 
-    assert result.exit_code == 0
-    output = json.loads(result.stdout)
-    assert output["security_count"] == 1
-    assert output["source_id"] == "sse"
-    assert output["version"] == "2026-07-24"
-    assert output["content_hash"]
-    assert not client_factory.mock_calls
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "SOURCE_POLICY_MISSING"
+    repository = StateRepository(tmp_path / "state" / "hengce.sqlite3")
+    assert repository.count_refusals() == 1
+    content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert repository.get_security_master_snapshot("unknown", content_hash) is None
 
 
 def test_build_market_ingestion_rejects_missing_token_before_client_use(tmp_path: Path) -> None:

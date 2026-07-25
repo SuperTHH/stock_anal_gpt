@@ -2,6 +2,10 @@
 
 Import only a CSV that has already been obtained and approved from an official source.
 The command makes no HTTP request and does not require `HENGCE_TUSHARE_TOKEN`.
+Run `hengce init-state --data-dir data` first. The persisted `SourcePolicy` for
+`source_id` must be approved, enabled, allow the `security_master` purpose, and allow
+the URL's exact scheme and hostname. The bundled SSE and SZSE policies allow official
+HTTPS URLs on `sse.com.cn`/`www.sse.com.cn` and `szse.cn`/`www.szse.cn`.
 
 ```powershell
 hengce import-security-master `
@@ -22,3 +26,5 @@ On success, stdout is deterministic JSON containing `content_hash`, `security_co
 `source_id`, and `version`. SQLite persists the complete filtered snapshot plus source
 URL, collection time, SHA-256 content hash, version, and filter-quality lineage. Repeating
 the same command is idempotent and preserves the existing auditable snapshot.
+Policy denial is audited before any snapshot is written and does not reserve a network
+rate-limit slot.

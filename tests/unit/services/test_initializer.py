@@ -55,7 +55,7 @@ def test_initializer_handles_empty_input(tmp_path: Path) -> None:
     assert result.last_trade_date is None
 
 
-def test_initializer_skips_dates_at_or_before_existing_checkpoint(tmp_path: Path) -> None:
+def test_initializer_revalidates_dates_at_or_before_existing_checkpoint(tmp_path: Path) -> None:
     state = make_state(tmp_path)
     state.save_checkpoint(HistoricalInitializer.checkpoint_key, "2026-07-23")
     ingestion = RecordingIngestion()
@@ -63,9 +63,24 @@ def test_initializer_skips_dates_at_or_before_existing_checkpoint(tmp_path: Path
 
     result = initializer.run([date(2026, 7, 22), date(2026, 7, 23), date(2026, 7, 24)])
 
-    assert ingestion.calls == [date(2026, 7, 24)]
+    assert ingestion.calls == [date(2026, 7, 22), date(2026, 7, 23), date(2026, 7, 24)]
     assert result.completed_dates == 3
     assert result.last_trade_date == "2026-07-24"
+
+
+def test_initializer_fails_when_completed_date_artifact_revalidation_fails(
+    tmp_path: Path,
+) -> None:
+    state = make_state(tmp_path)
+    state.save_checkpoint(HistoricalInitializer.checkpoint_key, "2026-07-23")
+    ingestion = RecordingIngestion(fail_on=date(2026, 7, 22))
+    initializer = HistoricalInitializer(ingestion=ingestion, state=state)
+
+    with pytest.raises(RuntimeError, match="temporary failure"):
+        initializer.run([date(2026, 7, 22), date(2026, 7, 23), date(2026, 7, 24)])
+
+    assert ingestion.calls == [date(2026, 7, 22)]
+    assert state.get_checkpoint(HistoricalInitializer.checkpoint_key) == "2026-07-23"
 
 
 def test_initializer_does_not_advance_checkpoint_after_failure(tmp_path: Path) -> None:
@@ -80,7 +95,7 @@ def test_initializer_does_not_advance_checkpoint_after_failure(tmp_path: Path) -
     assert ingestion.calls == [date(2026, 7, 22), date(2026, 7, 23)]
 
 
-def test_initializer_resumes_after_last_completed_date(tmp_path: Path) -> None:
+def test_initializer_revalidates_completed_dates_before_resuming(tmp_path: Path) -> None:
     state = make_state(tmp_path)
     ingestion = RecordingIngestion(fail_on=date(2026, 7, 23))
     initializer = HistoricalInitializer(ingestion=ingestion, state=state)
@@ -93,6 +108,7 @@ def test_initializer_resumes_after_last_completed_date(tmp_path: Path) -> None:
     assert ingestion.calls == [
         date(2026, 7, 22),
         date(2026, 7, 23),
+        date(2026, 7, 22),
         date(2026, 7, 23),
         date(2026, 7, 24),
     ]
