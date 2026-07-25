@@ -297,16 +297,24 @@ class StateRepository:
     ) -> SecurityMasterSnapshot | None:
         """Return the newest persisted approved in-scope security-master snapshot."""
         with self._connection() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT * FROM security_master_snapshots
                 WHERE source_id=?
-                ORDER BY collected_at DESC, snapshot_id DESC LIMIT 1
                 """,
                 (source_id,),
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            if not rows:
                 return None
+            row = max(
+                rows,
+                key=lambda candidate: (
+                    datetime.fromisoformat(
+                        str(candidate["collected_at"])
+                    ).astimezone(UTC),
+                    int(candidate["snapshot_id"]),
+                ),
+            )
             members = connection.execute(
                 """
                 SELECT payload_json FROM security_master_members
@@ -413,6 +421,20 @@ class StateRepository:
             raise ValueError("SECURITY_MASTER_SNAPSHOT_INVALID")
         if len({security.ts_code for security in securities}) != len(securities):
             raise ValueError("SECURITY_MASTER_DUPLICATE_TS_CODE")
+        expected_lineage = {
+            "sse": ("SSE", ".SH", {"MAIN_SH", "STAR"}),
+            "szse": ("SZSE", ".SZ", {"MAIN_SZ", "CHINEXT"}),
+        }.get(source_id)
+        if expected_lineage is None:
+            raise ValueError("SECURITY_MASTER_SOURCE_MISMATCH")
+        expected_exchange, expected_suffix, expected_boards = expected_lineage
+        if any(
+            security.exchange != expected_exchange
+            or not security.ts_code.endswith(expected_suffix)
+            or security.board not in expected_boards
+            for security in securities
+        ):
+            raise ValueError("SECURITY_MASTER_SOURCE_MISMATCH")
         allowed_boards = {"MAIN_SH", "STAR", "MAIN_SZ", "CHINEXT"}
         if any(
             not security.is_in_scope

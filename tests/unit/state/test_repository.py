@@ -2,7 +2,7 @@ import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
@@ -128,19 +128,20 @@ def save_exchange_snapshot(
     )
 
 
-def test_security_master_snapshot_round_trips_four_boards_and_lineage(tmp_path: Path) -> None:
+def test_security_master_snapshot_round_trips_exchange_boards_and_lineage(
+    tmp_path: Path,
+) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()
     repository.upsert_policy(security_master_policy())
     records = [
         security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR"),
-        security("000001.SZ", "MAIN_SZ"), security("300001.SZ", "CHINEXT"),
     ]
 
     snapshot = repository.save_security_master_snapshot(
         records, source_id="sse", source_url="https://www.sse.com.cn/master.csv",
         collected_at=datetime(2026, 7, 24, 9, 0, tzinfo=UTC), content_hash="a" * 64,
-        version="2026-07-24", quality_lineage={"filter": "a_share_cny_four_boards", "row_count": 4},
+        version="2026-07-24", quality_lineage={"filter": "a_share_cny_four_boards", "row_count": 2},
     )
 
     assert snapshot.source_id == "sse"
@@ -148,14 +149,42 @@ def test_security_master_snapshot_round_trips_four_boards_and_lineage(tmp_path: 
     assert snapshot.collected_at == datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
     assert snapshot.content_hash == "a" * 64
     assert snapshot.version == "2026-07-24"
-    assert snapshot.quality_lineage == {"filter": "a_share_cny_four_boards", "row_count": 4}
+    assert snapshot.quality_lineage == {"filter": "a_share_cny_four_boards", "row_count": 2}
     assert [item.ts_code for item in snapshot.securities] == [
-        "000001.SZ",
-        "300001.SZ",
         "600000.SH",
         "688001.SH",
     ]
     assert repository.get_security_master_snapshot("sse", "a" * 64) == snapshot
+
+
+@pytest.mark.parametrize(
+    ("source_id", "record"),
+    [
+        ("sse", security("000001.SZ", "MAIN_SZ")),
+        ("szse", security("600000.SH", "MAIN_SH")),
+        ("unknown", security("600000.SH", "MAIN_SH")),
+    ],
+)
+def test_security_master_snapshot_rejects_source_lineage_before_persisting(
+    tmp_path: Path,
+    source_id: str,
+    record: SecurityMaster,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+
+    with pytest.raises(ValueError, match="^SECURITY_MASTER_SOURCE_MISMATCH$"):
+        repository.save_security_master_snapshot(
+            [record],
+            source_id=source_id,
+            source_url="https://example.test/master.csv",
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+            content_hash="9" * 64,
+            version="v1",
+            quality_lineage={},
+        )
+
+    assert repository.get_security_master_snapshot(source_id, "9" * 64) is None
 
 
 @pytest.mark.parametrize(
@@ -258,6 +287,55 @@ def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: P
     )
 
     assert repository.get_latest_security_master_snapshot("sse") == newer
+
+
+def test_latest_security_master_snapshot_uses_absolute_time_then_snapshot_id(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "absolute-time.sqlite3")
+    repository.migrate()
+    repository.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    earlier = repository.save_security_master_snapshot(
+        [security("600000.SH", "MAIN_SH")],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, 10, tzinfo=timezone(timedelta(hours=8))),
+        content_hash="a" * 64,
+        version="earlier",
+        quality_lineage={},
+    )
+    later = repository.save_security_master_snapshot(
+        [security("688001.SH", "STAR")],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, 3, tzinfo=UTC),
+        content_hash="b" * 64,
+        version="later",
+        quality_lineage={},
+    )
+    assert repository.get_latest_security_master_snapshot("sse") == later
+
+    same_instant_later_id = repository.save_security_master_snapshot(
+        [security("600001.SH", "MAIN_SH")],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, 11, tzinfo=timezone(timedelta(hours=8))),
+        content_hash="c" * 64,
+        version="same-instant-later-id",
+        quality_lineage={},
+    )
+    save_exchange_snapshot(
+        repository,
+        "szse",
+        content_hash="d" * 64,
+        version="isolated-newer-source",
+        collected_hour=12,
+        securities=[security("000001.SZ", "MAIN_SZ")],
+    )
+
+    assert earlier.collected_at.isoformat() == "2026-07-24T10:00:00+08:00"
+    assert later.collected_at.isoformat() == "2026-07-24T03:00:00+00:00"
+    assert repository.get_latest_security_master_snapshot("sse") == same_instant_later_id
 
 
 def test_latest_security_master_snapshot_rejects_empty_newest_without_fallback(
@@ -422,13 +500,15 @@ def test_universe_requires_both_exchange_snapshots_symmetrically(tmp_path: Path)
         only_szse.get_security_master_universe()
 
 
-def test_universe_rejects_duplicate_codes_across_components(tmp_path: Path) -> None:
+def test_universe_rejects_duplicate_codes_across_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     duplicate_components = StateRepository(tmp_path / "duplicate-components.sqlite3")
     duplicate_components.migrate()
     duplicate_components.upsert_policies(
         [exchange_policy("sse"), exchange_policy("szse")]
     )
-    save_exchange_snapshot(
+    sse = save_exchange_snapshot(
         duplicate_components,
         "sse",
         content_hash="5" * 64,
@@ -436,13 +516,27 @@ def test_universe_rejects_duplicate_codes_across_components(tmp_path: Path) -> N
         collected_hour=9,
         securities=[security("600000.SH", "MAIN_SH")],
     )
-    save_exchange_snapshot(
+    szse = save_exchange_snapshot(
         duplicate_components,
         "szse",
         content_hash="6" * 64,
         version="szse-duplicate",
         collected_hour=10,
-        securities=[security("600000.SH", "MAIN_SH")],
+        securities=[security("000001.SZ", "MAIN_SZ")],
+    )
+    duplicate_szse = SecurityMasterSnapshot(
+        source_id=szse.source_id,
+        source_url=szse.source_url,
+        collected_at=szse.collected_at,
+        content_hash=szse.content_hash,
+        version=szse.version,
+        quality_lineage=szse.quality_lineage,
+        securities=[szse.securities[0].model_copy(update={"ts_code": "600000.SH"})],
+    )
+    monkeypatch.setattr(
+        duplicate_components,
+        "get_latest_security_master_snapshot",
+        lambda source_id: sse if source_id == "sse" else duplicate_szse,
     )
 
     with pytest.raises(ValueError, match="SECURITY_MASTER_DUPLICATE_TS_CODE"):
