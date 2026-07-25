@@ -58,6 +58,8 @@ class MarketIngestionService:
         after_parquet_published: Callable[[], None] | None = None,
         after_checkpoint_published: Callable[[], None] | None = None,
         after_ingestion_finalized: Callable[[], None] | None = None,
+        after_lease_acquired: Callable[[], None] | None = None,
+        before_nonlease_terminal_recorded: Callable[[], None] | None = None,
         lease_seconds: float = 300,
         lease_renewal_interval_seconds: float | None = None,
     ) -> None:
@@ -71,6 +73,8 @@ class MarketIngestionService:
         self.after_parquet_published = after_parquet_published
         self.after_checkpoint_published = after_checkpoint_published
         self.after_ingestion_finalized = after_ingestion_finalized
+        self.after_lease_acquired = after_lease_acquired
+        self.before_nonlease_terminal_recorded = before_nonlease_terminal_recorded
         if lease_seconds <= 0:
             raise ValueError("INGESTION_LEASE_INVALID")
         self.lease_seconds = lease_seconds
@@ -99,30 +103,34 @@ class MarketIngestionService:
         try:
             existing = self.state.get_checkpoint(checkpoint_key)
             if existing is not None:
-                self.state.record_run(run)
                 result = self._parse_checkpoint(existing, trade_date)
                 result = self._validate_checkpoint_artifacts(result, trade_date)
-                self.state.reconcile_published_ingestion(trade_date, now=self.clock())
+                checkpoint_value = self._result_json(result)
+                self.state.reconcile_published_ingestion(
+                    trade_date,
+                    checkpoint_value=checkpoint_value,
+                    now=self.clock(),
+                )
                 if result.parquet_content_hash is not None:
                     self._publish_checkpoint(checkpoint_key, result)
+                self._before_nonlease_terminal()
                 self._finish_run(run, RunStatus.SUCCEEDED, {"checkpoint": "SUCCEEDED"})
                 terminal = True
                 return result
 
             security_master = self.state.get_latest_security_master_snapshot()
             if security_master is None:
-                self.state.record_run(run)
                 raise ValueError("SECURITY_MASTER_UNAVAILABLE")
 
             lease = self.state.acquire_ingestion_lease(
                 trade_date,
                 owner_id=owner_id,
-                run_id=run.run_id,
+                running_run=run,
                 now=self.clock(),
                 lease_seconds=self.lease_seconds,
             )
-            self.state.record_run(run)
             if not lease.acquired:
+                self._before_nonlease_terminal()
                 self._finish_run(
                     run,
                     RunStatus.BLOCKED,
@@ -132,6 +140,8 @@ class MarketIngestionService:
                 terminal = True
                 raise IngestionInProgressError("MARKET_INGESTION_IN_PROGRESS")
             acquired = True
+            if self.after_lease_acquired is not None:
+                self.after_lease_acquired()
             heartbeat_stop = Event()
             heartbeat = Thread(
                 target=self._renew_lease_until_stopped,
@@ -141,7 +151,8 @@ class MarketIngestionService:
             heartbeat.start()
             if lease.staged_result_json is not None:
                 try:
-                    result = self._restore_staged(lease.staged_result_json, trade_date)
+                    staged = self._restore_staged(lease.staged_result_json, trade_date)
+                    result = staged.result
                 except ValueError as error:
                     is_invalid_stage = str(error) == "MARKET_STAGED_ARTIFACT_INVALID"
                     discarded = is_invalid_stage and self.state.discard_staged_ingestion_artifact(
@@ -150,24 +161,31 @@ class MarketIngestionService:
                     if not discarded:
                         raise
                 else:
-                    self._publish_checkpoint(checkpoint_key, result)
-                    if self.after_checkpoint_published is not None:
-                        self.after_checkpoint_published()
+                    normalized_stage = self._staged_json(staged)
+                    if not self.state.stage_ingestion_artifact(
+                        trade_date,
+                        owner_id=owner_id,
+                        staged_result_json=normalized_stage,
+                    ):
+                        raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
                     terminal_run = self._terminal_run(
                         run,
                         RunStatus.SUCCEEDED,
                         {"lease": "SUCCEEDED", "reconcile": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
                         retry_count=1,
                     )
-                    if not self.state.finalize_ingestion_run(
+                    if not self.state.publish_and_finalize_ingestion(
+                        checkpoint_key,
+                        self._result_json(result),
                         trade_date,
                         owner_id=owner_id,
-                        lifecycle_state="SUCCEEDED",
                         terminal_run=terminal_run,
                     ):
                         raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
                     acquired = False
                     terminal = True
+                    if self.after_checkpoint_published is not None:
+                        self.after_checkpoint_published()
                     if self.after_ingestion_finalized is not None:
                         self.after_ingestion_finalized()
                     return result
@@ -197,9 +215,7 @@ class MarketIngestionService:
             if not self.state.stage_ingestion_artifact(
                 trade_date,
                 owner_id=owner_id,
-                staged_result_json=json.dumps(
-                    asdict(staged), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ),
+                staged_result_json=self._staged_json(staged),
             ):
                 raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
             published_path = self.warehouse.write_bars(fetched.bars)
@@ -212,23 +228,23 @@ class MarketIngestionService:
             )
             if self.after_artifact_staged is not None:
                 self.after_artifact_staged()
-            self._publish_checkpoint(checkpoint_key, result)
-            if self.after_checkpoint_published is not None:
-                self.after_checkpoint_published()
             terminal_run = self._terminal_run(
                 run,
                 RunStatus.SUCCEEDED,
                 {"collect": "SUCCEEDED", "artifacts": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
             )
-            if not self.state.finalize_ingestion_run(
+            if not self.state.publish_and_finalize_ingestion(
+                checkpoint_key,
+                self._result_json(result),
                 trade_date,
                 owner_id=owner_id,
-                lifecycle_state="SUCCEEDED",
                 terminal_run=terminal_run,
             ):
                 raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
             acquired = False
             terminal = True
+            if self.after_checkpoint_published is not None:
+                self.after_checkpoint_published()
             if self.after_ingestion_finalized is not None:
                 self.after_ingestion_finalized()
             return result
@@ -258,6 +274,7 @@ class MarketIngestionService:
                         self.after_ingestion_finalized()
             if not terminal and not owned_finalize_attempted:
                 is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
+                self._before_nonlease_terminal()
                 self._finish_run(
                     run,
                     RunStatus.BLOCKED if is_master_unavailable else RunStatus.FAILED,
@@ -334,10 +351,23 @@ class MarketIngestionService:
         return "MARKET_INGESTION_FAILED"
 
     def _publish_checkpoint(self, checkpoint_key: str, result: MarketIngestionResult) -> None:
-        self.state.save_checkpoint(
-            checkpoint_key,
-            json.dumps(asdict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        self.state.save_checkpoint(checkpoint_key, self._result_json(result))
+
+    @staticmethod
+    def _result_json(result: MarketIngestionResult) -> str:
+        return json.dumps(
+            asdict(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
+
+    @staticmethod
+    def _staged_json(staged: StagedMarketArtifact) -> str:
+        return json.dumps(
+            asdict(staged), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+
+    def _before_nonlease_terminal(self) -> None:
+        if self.before_nonlease_terminal_recorded is not None:
+            self.before_nonlease_terminal_recorded()
 
     @staticmethod
     def _validate_bars_in_scope(bars: list[MarketBar], approved_codes: set[str]) -> None:
@@ -347,7 +377,7 @@ class MarketIngestionService:
         if any(code not in approved_codes for code in codes):
             raise ValueError("MARKET_DAILY_OUT_OF_SCOPE_TS_CODE")
 
-    def _restore_staged(self, value: str, trade_date: date) -> MarketIngestionResult:
+    def _restore_staged(self, value: str, trade_date: date) -> StagedMarketArtifact:
         try:
             payload = json.loads(value)
         except json.JSONDecodeError as error:
@@ -372,7 +402,10 @@ class MarketIngestionService:
             )
         except ValueError as error:
             raise ValueError("MARKET_STAGED_ARTIFACT_INVALID") from error
-        return replace(result, parquet_content_hash=parquet_content_hash)
+        return StagedMarketArtifact(
+            result=replace(result, parquet_content_hash=parquet_content_hash),
+            raw_payload_path=payload["raw_payload_path"],
+        )
 
     def _validate_checkpoint_artifacts(
         self, result: MarketIngestionResult, trade_date: date

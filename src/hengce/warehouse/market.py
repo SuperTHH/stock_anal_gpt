@@ -93,7 +93,10 @@ class MarketWarehouse:
 
     def _files(self, trade_date: date) -> list[str]:
         partition = self.dataset / f"trade_date={trade_date.isoformat()}"
-        return [str(path).replace("\\", "/") for path in partition.glob("part-*.parquet")]
+        files = sorted(partition.glob("part-*.parquet"))
+        if len(files) > 1:
+            raise ValueError("MARKET_PARQUET_MULTIPLE_ARTIFACTS")
+        return [str(path).replace("\\", "/") for path in files]
 
     def count_bars(self, trade_date: date) -> int:
         files = self._files(trade_date)

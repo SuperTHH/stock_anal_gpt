@@ -385,6 +385,7 @@ class StateRepository:
         *,
         owner_id: str,
         run_id: str | None = None,
+        running_run: RunRecord | None = None,
         now: datetime,
         lease_seconds: float,
     ) -> IngestionLease:
@@ -393,6 +394,15 @@ class StateRepository:
             raise ValueError("INGESTION_OWNER_INVALID")
         if lease_seconds <= 0:
             raise ValueError("INGESTION_LEASE_INVALID")
+        if running_run is not None:
+            if (
+                running_run.run_status != RunStatus.RUNNING
+                or running_run.trade_date != trade_date
+                or run_id is not None
+                and run_id != running_run.run_id
+            ):
+                raise ValueError("INGESTION_RUNNING_RUN_INVALID")
+            run_id = running_run.run_id
         trade_date_value = trade_date.isoformat()
         now_timestamp = now.timestamp()
         with self._connection() as connection:
@@ -416,6 +426,8 @@ class StateRepository:
                         run_id,
                     ),
                 )
+                if running_run is not None:
+                    self._upsert_run(connection, running_run, now)
                 return IngestionLease(
                     trade_date=trade_date_value,
                     owner_id=owner_id,
@@ -473,6 +485,8 @@ class StateRepository:
                         trade_date_value,
                     ),
                 )
+                if running_run is not None:
+                    self._upsert_run(connection, running_run, now)
                 return IngestionLease(
                     trade_date=trade_date_value,
                     owner_id=owner_id,
@@ -609,8 +623,77 @@ class StateRepository:
             )
         return True
 
-    def reconcile_published_ingestion(self, trade_date: date, *, now: datetime) -> str | None:
+    def publish_and_finalize_ingestion(
+        self,
+        checkpoint_key: str,
+        checkpoint_value: str,
+        trade_date: date,
+        *,
+        owner_id: str,
+        terminal_run: RunRecord,
+    ) -> bool:
+        """Publish a matching staged identity and terminalize its owner in one transaction."""
+        if (
+            terminal_run.run_status != RunStatus.SUCCEEDED
+            or terminal_run.finished_at is None
+        ):
+            raise ValueError("INGESTION_TERMINAL_RUN_INVALID")
+        checkpoint_identity = self._ingestion_result_identity(checkpoint_value, staged=False)
+        if checkpoint_identity is None:
+            raise ValueError("INGESTION_CHECKPOINT_IDENTITY_INVALID")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                """
+                SELECT * FROM ingestion_leases
+                WHERE trade_date=? AND owner_id=? AND active_run_id=?
+                """,
+                (trade_date.isoformat(), owner_id, terminal_run.run_id),
+            ).fetchone()
+            if lease is None or self._ingestion_result_identity(
+                lease["staged_result_json"], staged=True
+            ) != checkpoint_identity:
+                return False
+            connection.execute(
+                """
+                INSERT INTO checkpoints(checkpoint_key, checkpoint_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(checkpoint_key) DO UPDATE SET
+                    checkpoint_value=excluded.checkpoint_value,
+                    updated_at=excluded.updated_at
+                """,
+                (checkpoint_key, checkpoint_value, terminal_run.finished_at.isoformat()),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE ingestion_leases
+                SET owner_id=NULL, lease_expires_at=NULL, lifecycle_state='SUCCEEDED',
+                    active_run_id=NULL, updated_at=?
+                WHERE trade_date=? AND owner_id=? AND active_run_id=?
+                """,
+                (
+                    terminal_run.finished_at.isoformat(),
+                    trade_date.isoformat(),
+                    owner_id,
+                    terminal_run.run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._upsert_run(connection, terminal_run, terminal_run.finished_at)
+        return True
+
+    def reconcile_published_ingestion(
+        self,
+        trade_date: date,
+        *,
+        checkpoint_value: str,
+        now: datetime,
+    ) -> str | None:
         """Atomically close a linked run after a validated checkpoint proves publication."""
+        checkpoint_identity = self._ingestion_result_identity(checkpoint_value, staged=False)
+        if checkpoint_identity is None:
+            return None
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             lease = connection.execute(
@@ -621,6 +704,10 @@ class StateRepository:
                 lease is None
                 or lease["owner_id"] is None
                 or lease["active_run_id"] is None
+                or self._ingestion_result_identity(
+                    lease["staged_result_json"], staged=True
+                )
+                != checkpoint_identity
             ):
                 return None
             run_id = str(lease["active_run_id"])
@@ -667,6 +754,54 @@ class StateRepository:
                 ),
             )
         return run_id
+
+    @staticmethod
+    def _ingestion_result_identity(
+        value: str | None, *, staged: bool
+    ) -> tuple[str, int, str, str, str] | None:
+        if value is None:
+            return None
+        try:
+            payload = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if staged:
+            if not isinstance(payload, dict):
+                return None
+            payload = payload.get("result")
+        if not isinstance(payload, dict):
+            return None
+        fields = (
+            "trade_date",
+            "bar_count",
+            "raw_content_hash",
+            "parquet_path",
+            "parquet_content_hash",
+        )
+        values = tuple(payload.get(field) for field in fields)
+        if (
+            not isinstance(values[0], str)
+            or not isinstance(values[1], int)
+            or isinstance(values[1], bool)
+            or not all(isinstance(item, str) for item in values[2:])
+        ):
+            return None
+        return values  # type: ignore[return-value]
+
+    @staticmethod
+    def _upsert_run(
+        connection: sqlite3.Connection, run: RunRecord, updated_at: datetime
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO run_records(run_id, payload_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (run.run_id, run.model_dump_json(), updated_at.isoformat()),
+        )
 
     def get_ingestion_state(self, trade_date: date) -> IngestionLease | None:
         with self._connection() as connection:

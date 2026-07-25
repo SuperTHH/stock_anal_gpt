@@ -58,6 +58,21 @@ def test_validation_returns_and_requires_canonical_content_hash(tmp_path: Path) 
         warehouse.validate_artifact(changed, date(2026, 7, 24), 1, original_hash)
 
 
+def test_multiple_daily_parts_block_instead_of_silently_counting_duplicate_batches(
+    tmp_path: Path,
+) -> None:
+    warehouse = MarketWarehouse(tmp_path)
+    warehouse.write_bars([bar("600000.SH")])
+    warehouse.write_bars(
+        [bar("600000.SH").model_copy(update={"close": Decimal("10.75")})]
+    )
+
+    with pytest.raises(ValueError, match="^MARKET_PARQUET_MULTIPLE_ARTIFACTS$"):
+        warehouse.count_bars(date(2026, 7, 24))
+    with pytest.raises(ValueError, match="^MARKET_PARQUET_MULTIPLE_ARTIFACTS$"):
+        warehouse.read_bars(date(2026, 7, 24))
+
+
 def test_empty_write_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bars must not be empty"):
         MarketWarehouse(tmp_path).write_bars([])

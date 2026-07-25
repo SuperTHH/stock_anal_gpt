@@ -184,6 +184,28 @@ def test_missing_security_master_blocks_before_collector_or_artifacts(tmp_path: 
     assert repository.list_runs(run_type="market_daily")[-1].run_status == "BLOCKED"
 
 
+def test_missing_security_master_hard_crash_before_terminal_write_leaves_no_running_run(
+    tmp_path: Path,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    service = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        owner_id_factory=lambda: "missing-master",
+        before_nonlease_terminal_recorded=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        service.run(TRADE_DATE)
+
+    assert repository.list_runs(run_type="market_daily") == []
+
+
 def test_disabled_security_master_policy_blocks_existing_snapshot_before_fetch(
     tmp_path: Path,
 ) -> None:
@@ -398,6 +420,50 @@ def test_concurrent_same_date_runs_allow_only_one_collector_fetch(tmp_path: Path
     assert any(run.run_status == "BLOCKED" for run in blocked)
 
 
+def test_lease_contention_hard_crash_before_terminal_write_leaves_no_blocked_running_run(
+    tmp_path: Path,
+) -> None:
+    from hengce.contracts.run import RunRecord
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    active = RunRecord(
+        run_id=f"market_daily:{TRADE_DATE.isoformat()}:active",
+        trade_date=TRADE_DATE,
+        run_type="market_daily",
+        started_at=started,
+        run_status="RUNNING",
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+    repository.record_run(active)
+    repository.acquire_ingestion_lease(
+        TRADE_DATE,
+        owner_id="active",
+        run_id=active.run_id,
+        now=started,
+        lease_seconds=60,
+    )
+    contender = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        clock=lambda: started,
+        owner_id_factory=lambda: "contender",
+        before_nonlease_terminal_recorded=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        contender.run(TRADE_DATE)
+
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert f"market_daily:{TRADE_DATE.isoformat()}:contender" not in runs
+    assert runs[active.run_id].run_status == "RUNNING"
+
+
 def test_retry_recovers_staged_parquet_after_checkpoint_crash_without_refetch(
     tmp_path: Path,
 ) -> None:
@@ -484,7 +550,192 @@ def test_expired_takeover_recovers_prepublication_intent_after_hard_crash(
     assert all(run.run_status != "RUNNING" for run in runs.values())
 
 
-def test_checkpoint_fast_path_reconciles_run_after_post_checkpoint_hard_crash(
+def test_stale_owner_cannot_publish_checkpoint_after_replacement_stages_new_identity(
+    tmp_path: Path,
+) -> None:
+    from hengce.contracts.run import RunRecord
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    replacement = RunRecord(
+        run_id=f"market_daily:{TRADE_DATE.isoformat()}:replacement",
+        trade_date=TRADE_DATE,
+        run_type="market_daily",
+        started_at=started.replace(minute=2),
+        run_status="RUNNING",
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+
+    def replace_owner_after_old_parquet_publication() -> None:
+        repository.record_run(replacement)
+        assert repository.acquire_ingestion_lease(
+            TRADE_DATE,
+            owner_id="replacement",
+            run_id=replacement.run_id,
+            now=started.replace(minute=2),
+            lease_seconds=60,
+        ).acquired
+        staged_b = {
+            "raw_payload_path": "raw-b",
+            "result": {
+                "trade_date": TRADE_DATE.isoformat(),
+                "bar_count": 1,
+                "raw_content_hash": "d" * 64,
+                "parquet_path": "part-b.parquet",
+                "parquet_content_hash": "e" * 64,
+            },
+        }
+        assert repository.stage_ingestion_artifact(
+            TRADE_DATE,
+            owner_id="replacement",
+            staged_result_json=json.dumps(staged_b, sort_keys=True),
+        )
+
+    service = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        clock=lambda: started,
+        owner_id_factory=lambda: "stale",
+        lease_seconds=60,
+        after_artifact_staged=replace_owner_after_old_parquet_publication,
+    )
+
+    with pytest.raises(RuntimeError, match="MARKET_INGESTION_LEASE_LOST"):
+        service.run(TRADE_DATE)
+
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert lease is not None
+    assert lease.owner_id == "replacement"
+    assert lease.active_run_id == replacement.run_id
+    assert runs[replacement.run_id].run_status == "RUNNING"
+
+
+def test_checkpoint_fast_path_does_not_reconcile_mismatched_replacement_intent(
+    tmp_path: Path,
+) -> None:
+    from hengce.contracts.run import RunRecord
+
+    service, repository = _service(tmp_path)
+    service.run(TRADE_DATE)
+    replacement = RunRecord(
+        run_id=f"market_daily:{TRADE_DATE.isoformat()}:replacement",
+        trade_date=TRADE_DATE,
+        run_type="market_daily",
+        started_at=COLLECTED_AT,
+        run_status="RUNNING",
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+    repository.record_run(replacement)
+    assert repository.acquire_ingestion_lease(
+        TRADE_DATE,
+        owner_id="replacement",
+        run_id=replacement.run_id,
+        now=COLLECTED_AT,
+        lease_seconds=60,
+    ).acquired
+    staged_b = {
+        "raw_payload_path": "raw-b",
+        "result": {
+            "trade_date": TRADE_DATE.isoformat(),
+            "bar_count": 1,
+            "raw_content_hash": "d" * 64,
+            "parquet_path": "part-b.parquet",
+            "parquet_content_hash": "e" * 64,
+        },
+    }
+    assert repository.stage_ingestion_artifact(
+        TRADE_DATE,
+        owner_id="replacement",
+        staged_result_json=json.dumps(staged_b, sort_keys=True),
+    )
+
+    service.run(TRADE_DATE)
+
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert lease is not None
+    assert lease.owner_id == "replacement"
+    assert lease.active_run_id == replacement.run_id
+    assert runs[replacement.run_id].run_status == "RUNNING"
+
+
+def test_checkpoint_fast_path_hard_crash_before_terminal_write_leaves_no_running_run(
+    tmp_path: Path,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    service, repository = _service(tmp_path)
+    service.run(TRADE_DATE)
+    fast = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        owner_id_factory=lambda: "fast-crash",
+        before_nonlease_terminal_recorded=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        fast.run(TRADE_DATE)
+
+    run_ids = {run.run_id for run in repository.list_runs(run_type="market_daily")}
+    assert f"market_daily:{TRADE_DATE.isoformat()}:fast-crash" not in run_ids
+
+
+def test_acquired_running_run_exists_before_post_acquire_hard_crash_and_takeover(
+    tmp_path: Path,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    first = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        clock=lambda: started,
+        owner_id_factory=lambda: "first",
+        lease_seconds=60,
+        after_lease_acquired=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        first.run(TRADE_DATE)
+
+    first_run_id = f"market_daily:{TRADE_DATE.isoformat()}:first"
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert lease is not None
+    assert lease.active_run_id == first_run_id
+    assert runs[first_run_id].run_status == "RUNNING"
+
+    second = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        clock=lambda: started.replace(minute=2),
+        owner_id_factory=lambda: "second",
+        lease_seconds=60,
+    )
+    second.run(TRADE_DATE)
+
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert runs[first_run_id].run_status == "FAILED"
+    assert runs[f"market_daily:{TRADE_DATE.isoformat()}:second"].run_status == "SUCCEEDED"
+
+
+def test_post_atomic_checkpoint_hook_crash_leaves_publisher_terminal(
     tmp_path: Path,
 ) -> None:
     from hengce.services.market_ingestion import MarketIngestionService
@@ -508,7 +759,7 @@ def test_checkpoint_fast_path_reconciles_run_after_post_checkpoint_hard_crash(
         first.run(TRADE_DATE)
 
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None
-    assert repository.list_runs(run_type="market_daily")[0].run_status == "RUNNING"
+    assert repository.list_runs(run_type="market_daily")[0].run_status == "SUCCEEDED"
 
     second = MarketIngestionService(
         collector=collector,

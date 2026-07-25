@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -414,6 +415,73 @@ def test_ingestion_lease_is_atomic_across_repository_instances(tmp_path: Path) -
     assert winner.owner_id in {"owner-one", "owner-two"}
 
 
+def test_acquire_ingestion_lease_atomically_records_linked_running_run(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    running = RunRecord(
+        run_id="market_daily:2026-07-24:owner",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+
+    lease = repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="owner",
+        running_run=running,
+        now=started,
+        lease_seconds=60,
+    )
+
+    assert lease.acquired
+    assert lease.active_run_id == running.run_id
+    assert repository.list_runs(run_type="market_daily") == [running]
+
+
+def test_acquire_ingestion_lease_rolls_back_when_running_run_insert_fails(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    running = RunRecord(
+        run_id="market_daily:2026-07-24:owner",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER abort_running_run
+            BEFORE INSERT ON run_records
+            WHEN NEW.run_id = 'market_daily:2026-07-24:owner'
+            BEGIN SELECT RAISE(ABORT, 'forced acquire failure'); END;
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced acquire failure"):
+        repository.acquire_ingestion_lease(
+            trade_date,
+            owner_id="owner",
+            running_run=running,
+            now=started,
+            lease_seconds=60,
+        )
+
+    assert repository.get_ingestion_state(trade_date) is None
+    assert repository.list_runs(run_type="market_daily") == []
+
+
 def test_expired_ingestion_lease_can_be_taken_over_and_terminal_release_is_safe(
     tmp_path: Path,
 ) -> None:
@@ -577,6 +645,70 @@ def test_finalize_ingestion_run_rolls_back_lease_when_run_update_fails(
         )
 
     lease = repository.get_ingestion_state(trade_date)
+    assert lease is not None
+    assert lease.owner_id == "owner"
+    assert lease.active_run_id == running.run_id
+    assert repository.list_runs(run_type="market_daily")[0].run_status == "RUNNING"
+
+
+def test_checkpoint_publish_rolls_back_with_lease_and_run_update_failure(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    running = RunRecord(
+        run_id="market_daily:2026-07-24:owner",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"checkpoint": "RUNNING"},
+    )
+    repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="owner",
+        running_run=running,
+        now=started,
+        lease_seconds=60,
+    )
+    result = {
+        "trade_date": trade_date.isoformat(),
+        "bar_count": 1,
+        "raw_content_hash": "a" * 64,
+        "parquet_path": "part-a.parquet",
+        "parquet_content_hash": "b" * 64,
+    }
+    repository.stage_ingestion_artifact(
+        trade_date,
+        owner_id="owner",
+        staged_result_json=json.dumps({"raw_payload_path": "raw-a", "result": result}),
+    )
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER abort_published_run
+            BEFORE UPDATE ON run_records
+            WHEN NEW.run_id = 'market_daily:2026-07-24:owner'
+            BEGIN SELECT RAISE(ABORT, 'forced publish failure'); END;
+            """
+        )
+    terminal = running.model_copy(
+        update={"finished_at": started.replace(minute=1), "run_status": RunStatus.SUCCEEDED}
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced publish failure"):
+        repository.publish_and_finalize_ingestion(
+            "market_daily:2026-07-24",
+            json.dumps(result),
+            trade_date,
+            owner_id="owner",
+            terminal_run=terminal,
+        )
+
+    lease = repository.get_ingestion_state(trade_date)
+    assert repository.get_checkpoint("market_daily:2026-07-24") is None
     assert lease is not None
     assert lease.owner_id == "owner"
     assert lease.active_run_id == running.run_id
