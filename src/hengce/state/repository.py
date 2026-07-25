@@ -43,6 +43,9 @@ class StateRepository:
 
     def migrate(self) -> None:
         with self._connection() as connection:
+            # Numbered SQL files remain the migration ledger. Schema changes that SQLite
+            # cannot express idempotently in SQL use a comment-only marker (currently 005)
+            # plus a guarded Python alteration immediately after the migration loop.
             migration_root = files("hengce.state").joinpath("migrations")
             for migration in sorted(
                 item for item in migration_root.iterdir() if item.name.endswith(".sql")
@@ -533,7 +536,7 @@ class StateRepository:
     def stage_ingestion_artifact(
         self, trade_date: date, *, owner_id: str, staged_result_json: str
     ) -> bool:
-        """Durably save a published artifact before its checkpoint is made visible."""
+        """Durably save expected artifact identity as a pre-publication recovery intent."""
         with self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -549,6 +552,121 @@ class StateRepository:
                 ),
             )
         return cursor.rowcount == 1
+
+    def finalize_ingestion_run(
+        self,
+        trade_date: date,
+        *,
+        owner_id: str,
+        lifecycle_state: str,
+        terminal_run: RunRecord,
+    ) -> bool:
+        """Atomically terminalize an owned lease and its exactly linked run record."""
+        expected_status = {
+            "SUCCEEDED": RunStatus.SUCCEEDED,
+            "FAILED": RunStatus.FAILED,
+            "BLOCKED": RunStatus.BLOCKED,
+        }
+        if lifecycle_state not in expected_status:
+            raise ValueError("INGESTION_LIFECYCLE_INVALID")
+        if (
+            terminal_run.run_status != expected_status[lifecycle_state]
+            or terminal_run.finished_at is None
+        ):
+            raise ValueError("INGESTION_TERMINAL_RUN_INVALID")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE ingestion_leases
+                SET owner_id=NULL, lease_expires_at=NULL, lifecycle_state=?, active_run_id=NULL,
+                    updated_at=?
+                WHERE trade_date=? AND owner_id=? AND active_run_id=?
+                """,
+                (
+                    lifecycle_state,
+                    datetime.now(UTC).isoformat(),
+                    trade_date.isoformat(),
+                    owner_id,
+                    terminal_run.run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            connection.execute(
+                """
+                INSERT INTO run_records(run_id, payload_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    terminal_run.run_id,
+                    terminal_run.model_dump_json(),
+                    terminal_run.finished_at.isoformat(),
+                ),
+            )
+        return True
+
+    def reconcile_published_ingestion(self, trade_date: date, *, now: datetime) -> str | None:
+        """Atomically close a linked run after a validated checkpoint proves publication."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                "SELECT * FROM ingestion_leases WHERE trade_date=?",
+                (trade_date.isoformat(),),
+            ).fetchone()
+            if (
+                lease is None
+                or lease["owner_id"] is None
+                or lease["active_run_id"] is None
+            ):
+                return None
+            run_id = str(lease["active_run_id"])
+            row = connection.execute(
+                "SELECT payload_json FROM run_records WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            linked_run = RunRecord.model_validate_json(row["payload_json"])
+            if linked_run.run_status == RunStatus.RUNNING:
+                linked_run = linked_run.model_copy(
+                    update={
+                        "finished_at": now,
+                        "run_status": RunStatus.SUCCEEDED,
+                        "stage_statuses": {
+                            "checkpoint": "SUCCEEDED",
+                            "reconcile": "SUCCEEDED",
+                        },
+                        "error_code": None,
+                        "error_summary": None,
+                    }
+                )
+                connection.execute(
+                    """
+                    UPDATE run_records
+                    SET payload_json=?, updated_at=?
+                    WHERE run_id=?
+                    """,
+                    (linked_run.model_dump_json(), now.isoformat(), run_id),
+                )
+            connection.execute(
+                """
+                UPDATE ingestion_leases
+                SET owner_id=NULL, lease_expires_at=NULL, lifecycle_state='SUCCEEDED',
+                    active_run_id=NULL, updated_at=?
+                WHERE trade_date=? AND owner_id=? AND active_run_id=?
+                """,
+                (
+                    now.isoformat(),
+                    trade_date.isoformat(),
+                    str(lease["owner_id"]),
+                    run_id,
+                ),
+            )
+        return run_id
 
     def get_ingestion_state(self, trade_date: date) -> IngestionLease | None:
         with self._connection() as connection:

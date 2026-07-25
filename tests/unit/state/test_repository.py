@@ -479,6 +479,156 @@ def test_expired_lease_takeover_terminalizes_linked_running_record_before_new_ru
     assert persisted.stage_statuses == {"lease": "FAILED"}
 
 
+@pytest.mark.parametrize(
+    ("lifecycle_state", "run_status"),
+    [("FAILED", RunStatus.FAILED), ("BLOCKED", RunStatus.BLOCKED)],
+)
+def test_finalize_ingestion_run_atomically_terminalizes_failure_or_block(
+    tmp_path: Path,
+    lifecycle_state: str,
+    run_status: RunStatus,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    running = RunRecord(
+        run_id=f"market_daily:2026-07-24:{lifecycle_state.lower()}",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"lease": "RUNNING"},
+    )
+    repository.record_run(running)
+    assert repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id=lifecycle_state.lower(),
+        run_id=running.run_id,
+        now=started,
+        lease_seconds=60,
+    ).acquired
+    terminal = running.model_copy(
+        update={
+            "finished_at": started.replace(minute=1),
+            "run_status": run_status,
+            "stage_statuses": {"ingestion": lifecycle_state},
+            "error_code": f"MARKET_{lifecycle_state}",
+        }
+    )
+
+    assert repository.finalize_ingestion_run(
+        trade_date,
+        owner_id=lifecycle_state.lower(),
+        lifecycle_state=lifecycle_state,
+        terminal_run=terminal,
+    )
+
+    lease = repository.get_ingestion_state(trade_date)
+    assert lease is not None
+    assert lease.lifecycle_state == lifecycle_state
+    assert lease.owner_id is None
+    assert lease.active_run_id is None
+    assert repository.list_runs(run_type="market_daily")[0] == terminal
+
+
+def test_finalize_ingestion_run_rolls_back_lease_when_run_update_fails(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    running = RunRecord(
+        run_id="market_daily:2026-07-24:owner",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"lease": "RUNNING"},
+    )
+    repository.record_run(running)
+    repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="owner",
+        run_id=running.run_id,
+        now=started,
+        lease_seconds=60,
+    )
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER abort_terminal_run
+            BEFORE UPDATE ON run_records
+            WHEN NEW.run_id = 'market_daily:2026-07-24:owner'
+            BEGIN SELECT RAISE(ABORT, 'forced finalize failure'); END;
+            """
+        )
+    terminal = running.model_copy(
+        update={"finished_at": started, "run_status": RunStatus.SUCCEEDED}
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced finalize failure"):
+        repository.finalize_ingestion_run(
+            trade_date,
+            owner_id="owner",
+            lifecycle_state="SUCCEEDED",
+            terminal_run=terminal,
+        )
+
+    lease = repository.get_ingestion_state(trade_date)
+    assert lease is not None
+    assert lease.owner_id == "owner"
+    assert lease.active_run_id == running.run_id
+    assert repository.list_runs(run_type="market_daily")[0].run_status == "RUNNING"
+
+
+def test_stale_owner_cannot_finalize_new_owner_lease_or_run(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    trade_date = date(2026, 7, 24)
+    started = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    first = RunRecord(
+        run_id="market_daily:2026-07-24:first",
+        trade_date=trade_date,
+        run_type="market_daily",
+        started_at=started,
+        run_status=RunStatus.RUNNING,
+        stage_statuses={"lease": "RUNNING"},
+    )
+    second = first.model_copy(
+        update={"run_id": "market_daily:2026-07-24:second", "started_at": started.replace(minute=2)}
+    )
+    repository.record_run(first)
+    repository.acquire_ingestion_lease(
+        trade_date, owner_id="first", run_id=first.run_id, now=started, lease_seconds=60
+    )
+    repository.acquire_ingestion_lease(
+        trade_date,
+        owner_id="second",
+        run_id=second.run_id,
+        now=started.replace(minute=2),
+        lease_seconds=60,
+    )
+    repository.record_run(second)
+
+    assert repository.finalize_ingestion_run(
+        trade_date,
+        owner_id="first",
+        lifecycle_state="SUCCEEDED",
+        terminal_run=first.model_copy(
+            update={"finished_at": started.replace(minute=3), "run_status": RunStatus.SUCCEEDED}
+        ),
+    ) is False
+
+    lease = repository.get_ingestion_state(trade_date)
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert lease is not None
+    assert lease.owner_id == "second"
+    assert lease.active_run_id == second.run_id
+    assert runs[second.run_id].run_status == "RUNNING"
+
+
 def test_only_current_lease_owner_can_stage_or_read_artifact(tmp_path: Path) -> None:
     repository = StateRepository(tmp_path / "state.sqlite3")
     repository.migrate()

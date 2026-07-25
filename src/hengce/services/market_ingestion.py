@@ -56,6 +56,8 @@ class MarketIngestionService:
         owner_id_factory: Callable[[], str] | None = None,
         after_artifact_staged: Callable[[], None] | None = None,
         after_parquet_published: Callable[[], None] | None = None,
+        after_checkpoint_published: Callable[[], None] | None = None,
+        after_ingestion_finalized: Callable[[], None] | None = None,
         lease_seconds: float = 300,
         lease_renewal_interval_seconds: float | None = None,
     ) -> None:
@@ -67,6 +69,8 @@ class MarketIngestionService:
         self.owner_id_factory = owner_id_factory or (lambda: uuid4().hex)
         self.after_artifact_staged = after_artifact_staged
         self.after_parquet_published = after_parquet_published
+        self.after_checkpoint_published = after_checkpoint_published
+        self.after_ingestion_finalized = after_ingestion_finalized
         if lease_seconds <= 0:
             raise ValueError("INGESTION_LEASE_INVALID")
         self.lease_seconds = lease_seconds
@@ -98,6 +102,7 @@ class MarketIngestionService:
                 self.state.record_run(run)
                 result = self._parse_checkpoint(existing, trade_date)
                 result = self._validate_checkpoint_artifacts(result, trade_date)
+                self.state.reconcile_published_ingestion(trade_date, now=self.clock())
                 if result.parquet_content_hash is not None:
                     self._publish_checkpoint(checkpoint_key, result)
                 self._finish_run(run, RunStatus.SUCCEEDED, {"checkpoint": "SUCCEEDED"})
@@ -146,17 +151,25 @@ class MarketIngestionService:
                         raise
                 else:
                     self._publish_checkpoint(checkpoint_key, result)
-                    self.state.finish_ingestion_lease(
-                        trade_date, owner_id=owner_id, lifecycle_state="SUCCEEDED"
-                    )
-                    acquired = False
-                    self._finish_run(
+                    if self.after_checkpoint_published is not None:
+                        self.after_checkpoint_published()
+                    terminal_run = self._terminal_run(
                         run,
                         RunStatus.SUCCEEDED,
                         {"lease": "SUCCEEDED", "reconcile": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
                         retry_count=1,
                     )
+                    if not self.state.finalize_ingestion_run(
+                        trade_date,
+                        owner_id=owner_id,
+                        lifecycle_state="SUCCEEDED",
+                        terminal_run=terminal_run,
+                    ):
+                        raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
+                    acquired = False
                     terminal = True
+                    if self.after_ingestion_finalized is not None:
+                        self.after_ingestion_finalized()
                     return result
 
             fetched = self.collector.fetch(trade_date)
@@ -200,29 +213,50 @@ class MarketIngestionService:
             if self.after_artifact_staged is not None:
                 self.after_artifact_staged()
             self._publish_checkpoint(checkpoint_key, result)
-            self.state.finish_ingestion_lease(
-                trade_date, owner_id=owner_id, lifecycle_state="SUCCEEDED"
-            )
-            acquired = False
-            self._finish_run(
+            if self.after_checkpoint_published is not None:
+                self.after_checkpoint_published()
+            terminal_run = self._terminal_run(
                 run,
                 RunStatus.SUCCEEDED,
                 {"collect": "SUCCEEDED", "artifacts": "SUCCEEDED", "checkpoint": "SUCCEEDED"},
             )
+            if not self.state.finalize_ingestion_run(
+                trade_date,
+                owner_id=owner_id,
+                lifecycle_state="SUCCEEDED",
+                terminal_run=terminal_run,
+            ):
+                raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
+            acquired = False
             terminal = True
+            if self.after_ingestion_finalized is not None:
+                self.after_ingestion_finalized()
             return result
         except Exception as error:
+            owned_finalize_attempted = acquired
             if acquired:
-                self.state.finish_ingestion_lease(
+                is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
+                status = RunStatus.BLOCKED if is_master_unavailable else RunStatus.FAILED
+                terminal_run = self._terminal_run(
+                    run,
+                    status,
+                    {"security_master": "BLOCKED"}
+                    if is_master_unavailable
+                    else {"ingestion": "FAILED"},
+                    error_code=self._error_code(error),
+                )
+                finalized = self.state.finalize_ingestion_run(
                     trade_date,
                     owner_id=owner_id,
-                    lifecycle_state=(
-                        "BLOCKED"
-                        if self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
-                        else "FAILED"
-                    ),
+                    lifecycle_state="BLOCKED" if is_master_unavailable else "FAILED",
+                    terminal_run=terminal_run,
                 )
-            if not terminal:
+                if finalized:
+                    acquired = False
+                    terminal = True
+                    if self.after_ingestion_finalized is not None:
+                        self.after_ingestion_finalized()
+            if not terminal and not owned_finalize_attempted:
                 is_master_unavailable = self._error_code(error) == "SECURITY_MASTER_UNAVAILABLE"
                 self._finish_run(
                     run,
@@ -261,18 +295,35 @@ class MarketIngestionService:
         error_code: str | None = None,
     ) -> None:
         self.state.record_run(
-            run.model_copy(
-                update={
-                    "finished_at": self.clock(),
-                    "run_status": status,
-                    "stage_statuses": stages,
-                    "retry_count": retry_count,
-                    "error_code": error_code,
-                    "error_summary": (
-                        "market daily ingestion failed" if error_code is not None else None
-                    ),
-                }
+            self._terminal_run(
+                run,
+                status,
+                stages,
+                retry_count=retry_count,
+                error_code=error_code,
             )
+        )
+
+    def _terminal_run(
+        self,
+        run: RunRecord,
+        status: RunStatus,
+        stages: dict[str, str],
+        *,
+        retry_count: int = 0,
+        error_code: str | None = None,
+    ) -> RunRecord:
+        return run.model_copy(
+            update={
+                "finished_at": self.clock(),
+                "run_status": status,
+                "stage_statuses": stages,
+                "retry_count": retry_count,
+                "error_code": error_code,
+                "error_summary": (
+                    "market daily ingestion failed" if error_code is not None else None
+                ),
+            }
         )
 
     @staticmethod

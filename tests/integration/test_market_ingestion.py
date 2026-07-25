@@ -484,6 +484,122 @@ def test_expired_takeover_recovers_prepublication_intent_after_hard_crash(
     assert all(run.run_status != "RUNNING" for run in runs.values())
 
 
+def test_checkpoint_fast_path_reconciles_run_after_post_checkpoint_hard_crash(
+    tmp_path: Path,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    collector = FakeCollector()
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    first = MarketIngestionService(
+        collector=collector,
+        raw_store=raw_store,
+        warehouse=warehouse,
+        state=repository,
+        owner_id_factory=lambda: "first-owner",
+        after_checkpoint_published=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        first.run(TRADE_DATE)
+
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is not None
+    assert repository.list_runs(run_type="market_daily")[0].run_status == "RUNNING"
+
+    second = MarketIngestionService(
+        collector=collector,
+        raw_store=raw_store,
+        warehouse=warehouse,
+        state=repository,
+        owner_id_factory=lambda: "second-owner",
+    )
+    second.run(TRADE_DATE)
+
+    runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
+    assert runs[f"market_daily:{TRADE_DATE.isoformat()}:first-owner"].run_status == "SUCCEEDED"
+    assert runs[f"market_daily:{TRADE_DATE.isoformat()}:second-owner"].run_status == "SUCCEEDED"
+    assert all(run.run_status != "RUNNING" for run in runs.values())
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    assert lease is not None
+    assert lease.owner_id is None
+    assert lease.active_run_id is None
+    assert collector.calls == 1
+
+
+def test_hard_crash_after_atomic_finalize_cannot_leave_running_record(
+    tmp_path: Path,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    service = MarketIngestionService(
+        collector=FakeCollector(),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        owner_id_factory=lambda: "owner",
+        after_ingestion_finalized=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        service.run(TRADE_DATE)
+
+    run = repository.list_runs(run_type="market_daily")[0]
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    assert run.run_status == "SUCCEEDED"
+    assert run.finished_at is not None
+    assert lease is not None
+    assert lease.lifecycle_state == "SUCCEEDED"
+    assert lease.owner_id is None
+    assert lease.active_run_id is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_lifecycle"),
+    [
+        (RuntimeError("collector failed"), "FAILED", "FAILED"),
+        (RuntimeError("SECURITY_MASTER_UNAVAILABLE"), "BLOCKED", "BLOCKED"),
+    ],
+)
+def test_failure_or_block_is_atomic_before_post_finalize_hard_crash(
+    tmp_path: Path,
+    error: Exception,
+    expected_status: str,
+    expected_lifecycle: str,
+) -> None:
+    from hengce.services.market_ingestion import MarketIngestionService
+
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    _seed_security_master(repository, "600000.SH")
+    service = MarketIngestionService(
+        collector=FakeCollector(error=error),
+        raw_store=CountingRawStore(tmp_path / "raw"),
+        warehouse=CountingWarehouse(tmp_path / "normalized"),
+        state=repository,
+        owner_id_factory=lambda: "owner",
+        after_ingestion_finalized=lambda: (_ for _ in ()).throw(HardCrash()),
+    )
+
+    with pytest.raises(HardCrash):
+        service.run(TRADE_DATE)
+
+    run = repository.list_runs(run_type="market_daily")[0]
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    assert run.run_status == expected_status
+    assert run.finished_at is not None
+    assert lease is not None
+    assert lease.lifecycle_state == expected_lifecycle
+    assert lease.owner_id is None
+    assert lease.active_run_id is None
+
+
 def test_legacy_checkpoint_recovers_global_raw_object_without_refetch(tmp_path: Path) -> None:
     collector = FakeCollector()
     raw_store = CountingRawStore(tmp_path / "raw")
