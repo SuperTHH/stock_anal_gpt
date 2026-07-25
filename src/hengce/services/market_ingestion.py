@@ -118,7 +118,20 @@ class MarketIngestionService:
                 terminal = True
                 return result
 
-            security_universe = self.state.get_security_master_universe()
+            try:
+                security_universe = self.state.get_security_master_universe()
+            except Exception as error:
+                if not self._is_security_master_error(error):
+                    raise
+                self._before_nonlease_terminal()
+                self._finish_run(
+                    run,
+                    RunStatus.BLOCKED,
+                    {"security_master": "BLOCKED"},
+                    error_code=self._error_code(error),
+                )
+                terminal = True
+                raise
             approved_codes = {
                 security.ts_code for security in security_universe.securities
             }
@@ -250,20 +263,16 @@ class MarketIngestionService:
         except Exception as error:
             owned_finalize_attempted = acquired
             if acquired:
-                is_security_master_error = self._is_security_master_error(error)
-                status = RunStatus.BLOCKED if is_security_master_error else RunStatus.FAILED
                 terminal_run = self._terminal_run(
                     run,
-                    status,
-                    {"security_master": "BLOCKED"}
-                    if is_security_master_error
-                    else {"ingestion": "FAILED"},
+                    RunStatus.FAILED,
+                    {"ingestion": "FAILED"},
                     error_code=self._error_code(error),
                 )
                 finalized = self.state.finalize_ingestion_run(
                     trade_date,
                     owner_id=owner_id,
-                    lifecycle_state="BLOCKED" if is_security_master_error else "FAILED",
+                    lifecycle_state="FAILED",
                     terminal_run=terminal_run,
                 )
                 if finalized:
@@ -272,14 +281,11 @@ class MarketIngestionService:
                     if self.after_ingestion_finalized is not None:
                         self.after_ingestion_finalized()
             if not terminal and not owned_finalize_attempted:
-                is_security_master_error = self._is_security_master_error(error)
                 self._before_nonlease_terminal()
                 self._finish_run(
                     run,
-                    RunStatus.BLOCKED if is_security_master_error else RunStatus.FAILED,
-                    {"security_master": "BLOCKED"}
-                    if is_security_master_error
-                    else {"ingestion": "FAILED"},
+                    RunStatus.FAILED,
+                    {"ingestion": "FAILED"},
                     error_code=self._error_code(error),
                 )
             raise

@@ -409,6 +409,35 @@ def test_failure_never_creates_checkpoint_and_retry_can_complete(
     assert repository.get_checkpoint(key) is not None
 
 
+@pytest.mark.parametrize("failure", ["collector", "warehouse"])
+def test_security_master_named_downstream_error_is_failed_after_universe_resolution(
+    tmp_path: Path, failure: str
+) -> None:
+    error = RuntimeError("SECURITY_MASTER_UNAVAILABLE")
+    collector = FakeCollector(error=error if failure == "collector" else None)
+    warehouse = CountingWarehouse(
+        tmp_path / "normalized",
+        error=error if failure == "warehouse" else None,
+    )
+    service, repository = _service(
+        tmp_path,
+        collector=collector,
+        warehouse=warehouse,
+    )
+
+    with pytest.raises(RuntimeError, match="SECURITY_MASTER_UNAVAILABLE"):
+        service.run(TRADE_DATE)
+
+    assert collector.calls == 1
+    failed_run = repository.list_runs(run_type="market_daily")[-1]
+    assert failed_run.run_status == RunStatus.FAILED
+    assert failed_run.stage_statuses == {"ingestion": "FAILED"}
+    assert failed_run.error_code == "SECURITY_MASTER_UNAVAILABLE"
+    lease = repository.get_ingestion_state(TRADE_DATE)
+    assert lease is not None
+    assert lease.lifecycle_state == "FAILED"
+
+
 def test_empty_bars_are_rejected_without_output_or_checkpoint(tmp_path: Path) -> None:
     collector = FakeCollector(bars=[])
     raw_store = CountingRawStore(tmp_path / "raw")
@@ -878,17 +907,16 @@ def test_hard_crash_after_atomic_finalize_cannot_leave_running_record(
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_lifecycle"),
+    ("error", "expected_error_code"),
     [
-        (RuntimeError("collector failed"), "FAILED", "FAILED"),
-        (RuntimeError("SECURITY_MASTER_UNAVAILABLE"), "BLOCKED", "BLOCKED"),
+        (RuntimeError("collector failed"), "MARKET_INGESTION_FAILED"),
+        (RuntimeError("SECURITY_MASTER_UNAVAILABLE"), "SECURITY_MASTER_UNAVAILABLE"),
     ],
 )
-def test_failure_or_block_is_atomic_before_post_finalize_hard_crash(
+def test_downstream_failure_is_atomic_before_post_finalize_hard_crash(
     tmp_path: Path,
     error: Exception,
-    expected_status: str,
-    expected_lifecycle: str,
+    expected_error_code: str,
 ) -> None:
     from hengce.services.market_ingestion import MarketIngestionService
 
@@ -909,10 +937,12 @@ def test_failure_or_block_is_atomic_before_post_finalize_hard_crash(
 
     run = repository.list_runs(run_type="market_daily")[0]
     lease = repository.get_ingestion_state(TRADE_DATE)
-    assert run.run_status == expected_status
+    assert run.run_status == RunStatus.FAILED
+    assert run.stage_statuses == {"ingestion": "FAILED"}
+    assert run.error_code == expected_error_code
     assert run.finished_at is not None
     assert lease is not None
-    assert lease.lifecycle_state == expected_lifecycle
+    assert lease.lifecycle_state == "FAILED"
     assert lease.owner_id is None
     assert lease.active_run_id is None
 
