@@ -290,7 +290,16 @@ class StateRepository:
                 """,
                 (row["snapshot_id"],),
             ).fetchall()
-        return self._snapshot_from_rows(row, members)
+        snapshot = self._snapshot_from_rows(row, members)
+        self._validate_security_master_snapshot(
+            snapshot.securities,
+            snapshot.source_id,
+            snapshot.source_url,
+            snapshot.collected_at,
+            snapshot.content_hash,
+            snapshot.version,
+        )
+        return snapshot
 
     def get_latest_security_master_snapshot(
         self, source_id: str

@@ -187,6 +187,46 @@ def test_security_master_snapshot_rejects_source_lineage_before_persisting(
     assert repository.get_security_master_snapshot(source_id, "9" * 64) is None
 
 
+def test_exact_security_master_snapshot_rejects_legacy_source_mismatch(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path / "legacy-mismatch.sqlite3")
+    repository.migrate()
+    legacy_security = security("000001.SZ", "MAIN_SZ")
+    with sqlite3.connect(repository.path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO security_master_snapshots(
+                source_id, source_url, collected_at, content_hash, version,
+                quality_lineage_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "sse",
+                "https://www.sse.com.cn/master.csv",
+                datetime(2026, 7, 24, tzinfo=UTC).isoformat(),
+                "8" * 64,
+                "legacy-mismatch",
+                "{}",
+                datetime(2026, 7, 24, tzinfo=UTC).isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO security_master_members(snapshot_id, ts_code, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (
+                cursor.lastrowid,
+                legacy_security.ts_code,
+                legacy_security.model_dump_json(),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="^SECURITY_MASTER_SOURCE_MISMATCH$"):
+        repository.get_security_master_snapshot("sse", "8" * 64)
+
+
 @pytest.mark.parametrize(
     ("policy_overrides", "source_url", "reason"),
     [
