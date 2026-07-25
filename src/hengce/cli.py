@@ -141,7 +141,7 @@ def import_security_master(
         raise typer.BadParameter("collected-at must be ISO-8601") from error
     if parsed_collected_at.tzinfo is None:
         raise typer.BadParameter("collected-at must include an offset")
-    records = OfficialSecurityMasterCsvImporter().parse(file)
+    records = OfficialSecurityMasterCsvImporter().parse(file, source_id=source_id)
     content_hash = hashlib.sha256(file.read_bytes()).hexdigest()
     state = bootstrap_state(Settings(data_dir=data_dir), policy_file)
     snapshot = state.save_security_master_snapshot(

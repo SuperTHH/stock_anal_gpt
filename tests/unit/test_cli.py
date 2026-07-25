@@ -1,4 +1,3 @@
-import hashlib
 import json
 import sys
 import zipfile
@@ -161,7 +160,7 @@ def test_import_security_master_persists_approved_official_file_without_network(
     assert not client_factory.mock_calls
 
 
-def test_import_security_master_audits_policy_denial_without_persisting(
+def test_import_security_master_rejects_undeclared_source_before_persisting(
     tmp_path: Path,
 ) -> None:
     runner = CliRunner()
@@ -193,11 +192,43 @@ def test_import_security_master_audits_policy_denial_without_persisting(
 
     assert result.exit_code != 0
     assert result.exception is not None
-    assert str(result.exception) == "SOURCE_POLICY_MISSING"
-    repository = StateRepository(tmp_path / "state" / "hengce.sqlite3")
-    assert repository.count_refusals() == 1
-    content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-    assert repository.get_security_master_snapshot("unknown", content_hash) is None
+    assert str(result.exception) == "SECURITY_MASTER_SOURCE_MISMATCH"
+    assert not (tmp_path / "state").exists()
+
+
+def test_import_security_master_rejects_cross_exchange_row_for_declared_source(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    source = tmp_path / "security-master.csv"
+    source.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
+        "000001.SZ,000001,Example,SZSE,MAIN_SZ,CNY,19910403,A_SHARE\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-security-master",
+            "--file",
+            str(source),
+            "--source-id",
+            "sse",
+            "--source-url",
+            "https://www.sse.com.cn/master.csv",
+            "--version",
+            "2026-07-24",
+            "--collected-at",
+            "2026-07-24T09:00:00+00:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert str(result.exception) == "SECURITY_MASTER_SOURCE_MISMATCH"
 
 
 def test_build_market_ingestion_rejects_missing_token_before_client_use(tmp_path: Path) -> None:

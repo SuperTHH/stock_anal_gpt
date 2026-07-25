@@ -7,19 +7,36 @@ from hengce.contracts.market import SecurityMaster
 
 class OfficialSecurityMasterCsvImporter:
     allowed_boards = frozenset({"MAIN_SH", "STAR", "MAIN_SZ", "CHINEXT"})
+    source_rules = {
+        "sse": ("SSE", ".SH", frozenset({"MAIN_SH", "STAR"})),
+        "szse": ("SZSE", ".SZ", frozenset({"MAIN_SZ", "CHINEXT"})),
+    }
     required_columns = frozenset(
         {"ts_code", "symbol", "name", "exchange", "board", "currency", "list_date", "security_type"}
     )
 
-    def parse(self, path: Path) -> list[SecurityMaster]:
+    def parse(self, path: Path, *, source_id: str) -> list[SecurityMaster]:
+        if source_id not in self.source_rules:
+            raise ValueError("SECURITY_MASTER_SOURCE_MISMATCH")
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None or not self.required_columns.issubset(reader.fieldnames):
                 raise ValueError("SECURITY_MASTER_COLUMNS_INVALID")
             records = [self._to_security(row) for row in reader if self._is_in_scope(row)]
+        for record in records:
+            self._validate_source(record, source_id)
         if len({record.ts_code for record in records}) != len(records):
             raise ValueError("SECURITY_MASTER_DUPLICATE_TS_CODE")
         return sorted(records, key=lambda record: record.ts_code)
+
+    def _validate_source(self, record: SecurityMaster, source_id: str) -> None:
+        exchange, suffix, boards = self.source_rules[source_id]
+        if (
+            record.exchange != exchange
+            or not record.ts_code.endswith(suffix)
+            or record.board not in boards
+        ):
+            raise ValueError("SECURITY_MASTER_SOURCE_MISMATCH")
 
     def _is_in_scope(self, row: dict[str, str | None]) -> bool:
         return (
