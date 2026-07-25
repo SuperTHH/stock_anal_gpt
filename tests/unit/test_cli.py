@@ -183,8 +183,8 @@ def test_check_security_universe_reports_composed_local_universe_without_network
     monkeypatch.setattr(cli.httpx, "Client", client_factory)
 
     for source_id, source_url, source, version in [
-        ("sse", "https://www.sse.com.cn/master.csv", sse, "2026-07-24-sse"),
         ("szse", "https://www.szse.cn/master.csv", szse, "2026-07-24-szse"),
+        ("sse", "https://www.sse.com.cn/master.csv", sse, "2026-07-24-sse"),
     ]:
         imported = runner.invoke(
             app,
@@ -206,14 +206,21 @@ def test_check_security_universe_reports_composed_local_universe_without_network
         )
         assert imported.exit_code == 0
 
-    result = runner.invoke(
+    monkeypatch.setenv("HENGCE_TUSHARE_TOKEN", "sentinel")
+    bootstrap = Mock(wraps=cli.bootstrap_state)
+    monkeypatch.setattr(cli, "bootstrap_state", bootstrap)
+    first = runner.invoke(
+        app,
+        ["check-security-universe", "--data-dir", str(tmp_path)],
+    )
+    second = runner.invoke(
         app,
         ["check-security-universe", "--data-dir", str(tmp_path)],
     )
 
-    assert result.exit_code == 0
-    output = json.loads(result.stdout)
-    assert len(output.pop("universe_hash")) == 64
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    output = json.loads(first.stdout)
     assert output == {
         "as_of": "2026-07-24T09:00:00+00:00",
         "component_count": 2,
@@ -222,7 +229,11 @@ def test_check_security_universe_reports_composed_local_universe_without_network
             {"source_id": "szse", "version": "2026-07-24-szse"},
         ],
         "security_count": 4,
+        "universe_hash": "51b567c7b97446a94d4936a3069980dd66dd18b00bf88e579a5a0486341ba1d3",
     }
+    assert json.loads(second.stdout) == output
+    assert bootstrap.call_count == 2
+    assert all(call.args[0].tushare_token is None for call in bootstrap.call_args_list)
     assert not client_factory.mock_calls
 
 

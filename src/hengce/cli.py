@@ -177,7 +177,12 @@ def check_security_universe(
     policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Report whether the locally persisted security universe is complete and approved."""
-    state = bootstrap_state(Settings(data_dir=data_dir), policy_file)
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings, policy_file)
     universe = state.get_security_master_universe()
     components = sorted(
         (
