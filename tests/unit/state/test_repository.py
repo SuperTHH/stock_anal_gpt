@@ -12,7 +12,7 @@ from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
 from hengce.policy.guard import PolicyDenied
-from hengce.state.repository import StateRepository
+from hengce.state.repository import SecurityMasterSnapshot, StateRepository
 
 
 def approved_policy() -> SourcePolicy:
@@ -91,6 +91,39 @@ def security(code: str, board: str) -> SecurityMaster:
         board=board,
         list_date=date(2020, 1, 1),
         is_in_scope=True,
+    )
+
+
+def exchange_policy(source_id: str, *, enabled: bool = True) -> SourcePolicy:
+    if source_id == "sse":
+        return security_master_policy(enabled=enabled)
+    return security_master_policy(
+        source_id="szse",
+        source_name="SZSE",
+        allowed_domains=["szse.cn", "www.szse.cn"],
+        terms_url="https://www.szse.cn/application/laws/",
+        enabled=enabled,
+    )
+
+
+def save_exchange_snapshot(
+    repository: StateRepository,
+    source_id: str,
+    *,
+    content_hash: str,
+    version: str,
+    collected_hour: int,
+    securities: list[SecurityMaster],
+) -> SecurityMasterSnapshot:
+    domain = "www.sse.com.cn" if source_id == "sse" else "www.szse.cn"
+    return repository.save_security_master_snapshot(
+        securities,
+        source_id=source_id,
+        source_url=f"https://{domain}/master.csv",
+        collected_at=datetime(2026, 7, 24, collected_hour, tzinfo=UTC),
+        content_hash=content_hash,
+        version=version,
+        quality_lineage={"filter": "a_share_cny_four_boards"},
     )
 
 
@@ -186,7 +219,8 @@ def test_disabled_policy_prevents_an_existing_snapshot_from_gating_ingestion(
     )
     repository.upsert_policy(security_master_policy(enabled=False))
 
-    assert repository.get_latest_security_master_snapshot() is None
+    with pytest.raises(ValueError, match="SECURITY_MASTER_POLICY_DENIED"):
+        repository.get_latest_security_master_snapshot("sse")
     assert repository.count_refusals() == 1
 
 
@@ -222,7 +256,148 @@ def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: P
         version="v2", quality_lineage={},
     )
 
-    assert repository.get_latest_security_master_snapshot() == newer
+    assert repository.get_latest_security_master_snapshot("sse") == newer
+
+
+def test_universe_selects_latest_snapshot_per_required_source(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    old_sse = save_exchange_snapshot(
+        repository,
+        "sse",
+        content_hash="1" * 64,
+        version="sse-old",
+        collected_hour=8,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    new_sse = save_exchange_snapshot(
+        repository,
+        "sse",
+        content_hash="2" * 64,
+        version="sse-new",
+        collected_hour=10,
+        securities=[security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR")],
+    )
+    szse = save_exchange_snapshot(
+        repository,
+        "szse",
+        content_hash="3" * 64,
+        version="szse-only",
+        collected_hour=11,
+        securities=[security("000001.SZ", "MAIN_SZ"), security("300001.SZ", "CHINEXT")],
+    )
+
+    universe = repository.get_security_master_universe()
+
+    assert [item.version for item in universe.components] == ["sse-new", "szse-only"]
+    assert [item.ts_code for item in universe.securities] == [
+        "000001.SZ",
+        "300001.SZ",
+        "600000.SH",
+        "688001.SH",
+    ]
+    assert universe.as_of == min(new_sse.collected_at, szse.collected_at)
+    assert old_sse not in universe.components
+
+
+def test_universe_requires_both_exchange_snapshots(tmp_path: Path) -> None:
+    only_sse = StateRepository(tmp_path / "only-sse.sqlite3")
+    only_sse.migrate()
+    only_sse.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    save_exchange_snapshot(
+        only_sse,
+        "sse",
+        content_hash="4" * 64,
+        version="sse-only",
+        collected_hour=9,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_SZSE_UNAVAILABLE"):
+        only_sse.get_security_master_universe()
+
+
+def test_universe_rejects_duplicate_codes_across_components(tmp_path: Path) -> None:
+    duplicate_components = StateRepository(tmp_path / "duplicate-components.sqlite3")
+    duplicate_components.migrate()
+    duplicate_components.upsert_policies(
+        [exchange_policy("sse"), exchange_policy("szse")]
+    )
+    save_exchange_snapshot(
+        duplicate_components,
+        "sse",
+        content_hash="5" * 64,
+        version="sse-duplicate",
+        collected_hour=9,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    save_exchange_snapshot(
+        duplicate_components,
+        "szse",
+        content_hash="6" * 64,
+        version="szse-duplicate",
+        collected_hour=10,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_DUPLICATE_TS_CODE"):
+        duplicate_components.get_security_master_universe()
+
+
+def test_universe_rejects_a_component_denied_by_current_policy(tmp_path: Path) -> None:
+    disabled_sse = StateRepository(tmp_path / "disabled-sse.sqlite3")
+    disabled_sse.migrate()
+    disabled_sse.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    save_exchange_snapshot(
+        disabled_sse,
+        "sse",
+        content_hash="7" * 64,
+        version="sse-disabled",
+        collected_hour=9,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    save_exchange_snapshot(
+        disabled_sse,
+        "szse",
+        content_hash="8" * 64,
+        version="szse-enabled",
+        collected_hour=10,
+        securities=[security("000001.SZ", "MAIN_SZ")],
+    )
+    disabled_sse.upsert_policy(exchange_policy("sse", enabled=False))
+
+    with pytest.raises(ValueError, match="SECURITY_MASTER_POLICY_DENIED"):
+        disabled_sse.get_security_master_universe()
+
+    assert disabled_sse.count_refusals() == 1
+
+
+def test_universe_hash_is_deterministic(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
+    save_exchange_snapshot(
+        repository,
+        "sse",
+        content_hash="9" * 64,
+        version="sse",
+        collected_hour=9,
+        securities=[security("600000.SH", "MAIN_SH")],
+    )
+    save_exchange_snapshot(
+        repository,
+        "szse",
+        content_hash="a" * 64,
+        version="szse",
+        collected_hour=10,
+        securities=[security("000001.SZ", "MAIN_SZ")],
+    )
+
+    first = repository.get_security_master_universe()
+    second = repository.get_security_master_universe()
+    assert first.universe_hash == second.universe_hash
+    assert len(first.universe_hash) == 64
 
 
 def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_path: Path) -> None:

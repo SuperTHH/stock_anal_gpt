@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -7,7 +8,7 @@ from datetime import UTC, date, datetime
 from importlib.resources import files
 from pathlib import Path
 
-from hengce.contracts.enums import RunStatus
+from hengce.contracts.enums import QualityStatus, RunStatus
 from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
@@ -35,6 +36,15 @@ class SecurityMasterSnapshot:
     version: str
     quality_lineage: dict[str, object]
     securities: list[SecurityMaster]
+
+
+@dataclass(frozen=True)
+class SecurityMasterUniverse:
+    components: tuple[SecurityMasterSnapshot, SecurityMasterSnapshot]
+    securities: list[SecurityMaster]
+    as_of: datetime
+    universe_hash: str
+    quality_status: QualityStatus
 
 
 class StateRepository:
@@ -282,14 +292,18 @@ class StateRepository:
             ).fetchall()
         return self._snapshot_from_rows(row, members)
 
-    def get_latest_security_master_snapshot(self) -> SecurityMasterSnapshot | None:
+    def get_latest_security_master_snapshot(
+        self, source_id: str
+    ) -> SecurityMasterSnapshot | None:
         """Return the newest persisted approved in-scope security-master snapshot."""
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM security_master_snapshots
+                WHERE source_id=?
                 ORDER BY collected_at DESC, snapshot_id DESC LIMIT 1
-                """
+                """,
+                (source_id,),
             ).fetchone()
             if row is None:
                 return None
@@ -301,10 +315,14 @@ class StateRepository:
                 (row["snapshot_id"],),
             ).fetchall()
         snapshot = self._snapshot_from_rows(row, members)
-        if not snapshot.securities or not all(
-            security.is_in_scope for security in snapshot.securities
-        ):
-            return None
+        self._validate_security_master_snapshot(
+            snapshot.securities,
+            snapshot.source_id,
+            snapshot.source_url,
+            snapshot.collected_at,
+            snapshot.content_hash,
+            snapshot.version,
+        )
         from hengce.policy.guard import PolicyDenied, PolicyGuard
 
         try:
@@ -314,9 +332,55 @@ class StateRepository:
                 "security_master",
                 "services.market_ingestion",
             )
-        except PolicyDenied:
-            return None
+        except PolicyDenied as error:
+            raise ValueError("SECURITY_MASTER_POLICY_DENIED") from error
         return snapshot
+
+    def get_security_master_universe(self) -> SecurityMasterUniverse:
+        """Derive one complete, deterministic universe from both required exchanges."""
+        required_sources = ("sse", "szse")
+        missing_errors = {
+            "sse": "SECURITY_MASTER_SSE_UNAVAILABLE",
+            "szse": "SECURITY_MASTER_SZSE_UNAVAILABLE",
+        }
+        resolved_components: list[SecurityMasterSnapshot] = []
+        for source_id in required_sources:
+            component = self.get_latest_security_master_snapshot(source_id)
+            if component is None:
+                raise ValueError(missing_errors[source_id])
+            resolved_components.append(component)
+
+        components = (resolved_components[0], resolved_components[1])
+        securities = sorted(
+            (
+                security
+                for component in components
+                for security in component.securities
+            ),
+            key=lambda security: security.ts_code,
+        )
+        if len({security.ts_code for security in securities}) != len(securities):
+            raise ValueError("SECURITY_MASTER_DUPLICATE_TS_CODE")
+
+        identity = [
+            {
+                "source_id": component.source_id,
+                "version": component.version,
+                "content_hash": component.content_hash,
+                "collected_at": component.collected_at.isoformat(),
+            }
+            for component in components
+        ]
+        universe_hash = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return SecurityMasterUniverse(
+            components=components,
+            securities=securities,
+            as_of=min(component.collected_at for component in components),
+            universe_hash=universe_hash,
+            quality_status=QualityStatus.VALID,
+        )
 
     @staticmethod
     def _snapshot_from_rows(
