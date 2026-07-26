@@ -205,8 +205,6 @@ class MarketIngestionService:
                     return result
 
             fetched = self.collector.fetch(trade_date)
-            if not fetched.bars:
-                raise ValueError("MARKET_DAILY_EMPTY")
             raw = self.raw_store.put(
                 source_id="tushare",
                 source_url="http://api.tushare.pro/",
@@ -214,11 +212,17 @@ class MarketIngestionService:
                 content_type=fetched.content_type,
                 payload=fetched.raw_payload,
             )
-            self._validate_bars_in_scope(fetched.bars, approved_codes)
-            parquet_path, parquet_content_hash = self.warehouse.expected_artifact(fetched.bars)
+            if not fetched.bars:
+                raise ValueError("MARKET_DAILY_EMPTY")
+            self._validate_unique_codes(fetched.bars)
+            market_bars = [bar for bar in fetched.bars if not bar.ts_code.endswith(".BJ")]
+            if not market_bars:
+                raise ValueError("MARKET_DAILY_EMPTY")
+            self._validate_bars_in_scope(market_bars, approved_codes)
+            parquet_path, parquet_content_hash = self.warehouse.expected_artifact(market_bars)
             result = MarketIngestionResult(
                 trade_date=trade_date.isoformat(),
-                bar_count=len(fetched.bars),
+                bar_count=len(market_bars),
                 raw_content_hash=raw.content_hash,
                 parquet_path=str(parquet_path),
                 parquet_content_hash=parquet_content_hash,
@@ -230,13 +234,13 @@ class MarketIngestionService:
                 staged_result_json=self._staged_json(staged),
             ):
                 raise RuntimeError("MARKET_INGESTION_LEASE_LOST")
-            published_path = self.warehouse.write_bars(fetched.bars)
+            published_path = self.warehouse.write_bars(market_bars)
             if published_path != parquet_path:
                 raise RuntimeError("MARKET_PARQUET_IDENTITY_CHANGED")
             if self.after_parquet_published is not None:
                 self.after_parquet_published()
             self.warehouse.validate_artifact(
-                parquet_path, trade_date, len(fetched.bars), parquet_content_hash
+                parquet_path, trade_date, len(market_bars), parquet_content_hash
             )
             if self.after_artifact_staged is not None:
                 self.after_artifact_staged()
@@ -380,11 +384,15 @@ class MarketIngestionService:
 
     @staticmethod
     def _validate_bars_in_scope(bars: list[MarketBar], approved_codes: set[str]) -> None:
+        MarketIngestionService._validate_unique_codes(bars)
+        if any(bar.ts_code not in approved_codes for bar in bars):
+            raise ValueError("MARKET_DAILY_OUT_OF_SCOPE_TS_CODE")
+
+    @staticmethod
+    def _validate_unique_codes(bars: list[MarketBar]) -> None:
         codes = [bar.ts_code for bar in bars]
         if len(codes) != len(set(codes)):
             raise ValueError("MARKET_DAILY_DUPLICATE_TS_CODE")
-        if any(code not in approved_codes for code in codes):
-            raise ValueError("MARKET_DAILY_OUT_OF_SCOPE_TS_CODE")
 
     def _restore_staged(self, value: str, trade_date: date) -> StagedMarketArtifact:
         try:

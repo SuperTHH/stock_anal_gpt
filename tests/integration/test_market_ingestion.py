@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -99,18 +100,23 @@ def _seed_complete_security_universe(
 
 class FakeCollector:
     def __init__(
-        self, *, bars: list[MarketBar] | None = None, error: Exception | None = None
+        self,
+        *,
+        bars: list[MarketBar] | None = None,
+        error: Exception | None = None,
+        raw_payload: bytes = b'{"fixture":true}',
     ) -> None:
         self.calls = 0
         self.bars = [_bar()] if bars is None else bars
         self.error = error
+        self.raw_payload = raw_payload
 
     def fetch(self, trade_date: date) -> DailyFetchResult:
         self.calls += 1
         if self.error:
             raise self.error
         return DailyFetchResult(
-            raw_payload=b'{"fixture":true}',
+            raw_payload=self.raw_payload,
             content_type="application/json",
             collected_at=COLLECTED_AT,
             bars=self.bars,
@@ -296,7 +302,30 @@ def test_duplicate_daily_codes_fail_before_parquet_publication(tmp_path: Path) -
     assert failed_run.error_code == "MARKET_DAILY_DUPLICATE_TS_CODE"
 
 
-@pytest.mark.parametrize("ts_code", ["000002.SZ", "430047.BJ", "900901.SH", "00700.HK"])
+def test_duplicate_bj_codes_fail_before_market_scope_filtering(tmp_path: Path) -> None:
+    bj_bar = _bar().model_copy(
+        update={
+            "record_id": "920000.BJ-20260724-first",
+            "ts_code": "920000.BJ",
+        }
+    )
+    duplicate = bj_bar.model_copy(update={"record_id": "920000.BJ-20260724-second"})
+    collector = FakeCollector(bars=[bj_bar, duplicate])
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+
+    with pytest.raises(ValueError, match="MARKET_DAILY_DUPLICATE_TS_CODE"):
+        service.run(TRADE_DATE)
+
+    assert raw_store.calls == 1
+    assert warehouse.calls == 0
+    assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+
+
+@pytest.mark.parametrize("ts_code", ["000002.SZ", "900901.SH", "00700.HK"])
 def test_out_of_scope_bar_fails_before_parquet_publication(
     tmp_path: Path, ts_code: str
 ) -> None:
@@ -313,6 +342,30 @@ def test_out_of_scope_bar_fails_before_parquet_publication(
     assert raw_store.calls == 1
     assert warehouse.calls == 0
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+
+
+def test_market_wide_bj_bars_are_excluded_from_normalized_artifact(tmp_path: Path) -> None:
+    raw_payload = b'{"codes":["600000.SH","920000.BJ"]}'
+    bj_bar = _bar().model_copy(
+        update={
+            "record_id": "920000.BJ-20260724-fixture",
+            "ts_code": "920000.BJ",
+        }
+    )
+    collector = FakeCollector(bars=[_bar(), bj_bar], raw_payload=raw_payload)
+    raw_store = CountingRawStore(tmp_path / "raw")
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, _ = _service(
+        tmp_path, collector=collector, raw_store=raw_store, warehouse=warehouse
+    )
+
+    result = service.run(TRADE_DATE)
+
+    assert raw_store.calls == 1
+    content_hash = hashlib.sha256(raw_payload).hexdigest()
+    assert raw_store.payload_path_for_hash(content_hash).read_bytes() == raw_payload
+    assert result.bar_count == 1
+    assert [row["ts_code"] for row in warehouse.read_bars(TRADE_DATE)] == ["600000.SH"]
 
 
 def test_complete_universe_persists_sh_and_sz_bars(tmp_path: Path) -> None:
@@ -449,7 +502,7 @@ def test_empty_bars_are_rejected_without_output_or_checkpoint(tmp_path: Path) ->
     with pytest.raises(ValueError, match="MARKET_DAILY_EMPTY"):
         service.run(TRADE_DATE)
 
-    assert raw_store.calls == 0
+    assert raw_store.calls == 1
     assert warehouse.calls == 0
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
 

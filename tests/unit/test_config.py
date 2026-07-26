@@ -1,6 +1,14 @@
+import tomllib
 from pathlib import Path
 
 from hengce.config import Settings
+
+
+def test_windows_runtime_declares_iana_timezone_database() -> None:
+    pyproject = Path(__file__).parents[2] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+
+    assert 'tzdata>=2025.2; platform_system == "Windows"' in project["dependencies"]
 
 
 def test_gitignore_protects_generated_data_and_capture_artifacts() -> None:

@@ -39,6 +39,10 @@ hostname 必须与 `allowed_domains` 中的一个条目精确相同。M1 的官�
 
 `hengce ingest-market --trade-date 2026-07-22 --data-dir data`
 
+Tushare `daily` 按交易日返回的全市场响应可能包含北交所 `.BJ` 记录。系统完整保存原始响应，
+但标准化 Parquet 仅保留双交易所证券池内的 `.SH` 和 `.SZ` 记录。明确的 `.BJ` 记录会被排除；
+任何不在已批准证券池内的 `.SH` 或 `.SZ` 代码仍会阻断本次摄取，防止使用过期或不完整的证券主数据。
+
 成功后，原始响应以 SHA-256 全局内容寻址方式保存于
 `data/raw/objects/<sha256>/payload.bin`；每次采集的不可变来源、时间和内容类型记录位于
 `data/raw/provenance/<event-sha256>.json`。行情 Parquet 位于

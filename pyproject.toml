@@ -12,6 +12,7 @@ dependencies = [
   "pyarrow>=16,<20",
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.3,<3",
+  "tzdata>=2025.2; platform_system == \"Windows\"",
   "typer>=0.12,<1",
 ]
 
