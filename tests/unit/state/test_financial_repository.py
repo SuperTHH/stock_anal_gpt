@@ -99,6 +99,14 @@ def test_get_taxonomies_rejects_missing_ids(tmp_path: Path) -> None:
         FinancialFilingRepository(state.path).get_taxonomies(("missing-taxonomy",))
 
 
+def test_get_empty_taxonomies_does_not_bypass_state_connection(tmp_path: Path) -> None:
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        FinancialFilingRepository(blocked_parent / "state.sqlite3").get_taxonomies(())
+
+
 def test_stage_then_publish_requires_exact_artifact_identity(tmp_path: Path) -> None:
     state = StateRepository(tmp_path / "state.sqlite3")
     state.migrate()

@@ -55,10 +55,10 @@ class FinancialFilingRepository:
                 raise ValueError("FINANCIAL_TAXONOMY_CONFLICT")
 
     def get_taxonomies(self, ids: tuple[str, ...]) -> tuple[TaxonomyPackageRef, ...]:
-        if not ids:
-            return ()
-        placeholders = ", ".join("?" for _ in ids)
         with connect(self.path) as connection:
+            if not ids:
+                return ()
+            placeholders = ", ".join("?" for _ in ids)
             rows = connection.execute(
                 "SELECT taxonomy_id, payload_json FROM taxonomy_packages "
                 f"WHERE taxonomy_id IN ({placeholders})",
