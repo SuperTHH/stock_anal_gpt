@@ -114,6 +114,8 @@ class FinancialFiling(FactBase):
             raise ValueError("published_at is required")
         if self.announcement_at != self.published_at:
             raise ValueError("announcement_at must equal published_at")
+        if self.content_hash != self.raw_object_hash:
+            raise ValueError("content_hash must equal raw_object_hash")
         return self
 
 

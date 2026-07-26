@@ -192,6 +192,8 @@ def test_financial_filing_requires_matching_identity_and_publication_time() -> N
         )
     with pytest.raises(ValidationError):
         FinancialFiling.model_validate({**payload, "published_at": datetime(2026, 7, 26, 12)})
+    with pytest.raises(ValidationError):
+        FinancialFiling.model_validate({**payload, "content_hash": "b" * 64})
 
 
 def test_taxonomy_and_conflict_require_aware_times_and_lowercase_hashes() -> None:
