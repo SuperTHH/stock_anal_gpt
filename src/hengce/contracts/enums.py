@@ -25,3 +25,38 @@ class RunStatus(StrEnum):
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
+
+
+class ReportType(StrEnum):
+    ANNUAL = "ANNUAL"
+    Q1 = "Q1"
+    HALF_YEAR = "HALF_YEAR"
+    Q3 = "Q3"
+
+
+class StatementType(StrEnum):
+    BALANCE_SHEET = "BALANCE_SHEET"
+    INCOME_STATEMENT = "INCOME_STATEMENT"
+    CASH_FLOW = "CASH_FLOW"
+    OTHER = "OTHER"
+
+
+class MappingStatus(StrEnum):
+    MAPPED = "MAPPED"
+    UNMAPPED = "UNMAPPED"
+
+
+class ConsolidationScope(StrEnum):
+    CONSOLIDATED = "CONSOLIDATED"
+    PARENT = "PARENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class DiscoveryMethod(StrEnum):
+    FIXTURE = "FIXTURE"
+    MANUAL_IMPORT = "MANUAL_IMPORT"
+
+
+class ConflictResolutionStatus(StrEnum):
+    OPEN = "OPEN"
+    SUPERSEDED = "SUPERSEDED"
