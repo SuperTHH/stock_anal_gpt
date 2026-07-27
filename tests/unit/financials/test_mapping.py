@@ -231,6 +231,34 @@ def test_normalizer_rejects_non_exact_expected_unit_shapes(
         normalizer(expected_unit_kind).normalize(financial_filing(), [raw_assets(unit=unit)])
 
 
+def test_other_expected_unit_kind_cannot_admit_a_composite_unit() -> None:
+    composite = RawXbrlUnit(
+        unit_id="currency-times-meter",
+        numerator_measures=(CNY_MEASURE, METER_MEASURE),
+        denominator_measures=(),
+        currency=None,
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_MAPPING_UNIT_KIND_INVALID$"):
+        normalizer("OTHER").normalize(
+            financial_filing(),
+            [raw_assets(unit=composite)],
+        )
+
+
+@pytest.mark.parametrize("expected_unit_kind", ["NONE", "PERCENT", "", "monetary"])
+def test_fact_mapping_rejects_other_unsupported_expected_unit_kinds(
+    expected_unit_kind: str,
+) -> None:
+    with pytest.raises(ValueError, match="^FINANCIAL_MAPPING_UNIT_KIND_INVALID$"):
+        FactMapping(
+            raw_qname=ASSETS_QNAME,
+            canonical_fact_name="assets",
+            statement_type=StatementType.BALANCE_SHEET,
+            expected_unit_kind=expected_unit_kind,
+        )
+
+
 def test_normalizer_preserves_filing_provenance_and_uses_registry_version() -> None:
     fact = normalizer().normalize(financial_filing(), [raw_assets()])[0]
 

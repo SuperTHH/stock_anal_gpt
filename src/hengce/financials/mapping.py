@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from types import MappingProxyType
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from hengce.contracts.enums import (
@@ -23,6 +24,8 @@ ISO_4217_NAMESPACE = "http://www.xbrl.org/2003/iso4217"
 XBRLI_NAMESPACE = "http://www.xbrl.org/2003/instance"
 SHARES_MEASURE = f"{{{XBRLI_NAMESPACE}}}shares"
 PURE_MEASURE = f"{{{XBRLI_NAMESPACE}}}pure"
+ExpectedUnitKind = Literal["MONETARY", "SHARES", "PURE", "PER_SHARE"]
+ALLOWED_UNIT_KINDS = frozenset({"MONETARY", "SHARES", "PURE", "PER_SHARE"})
 
 
 @dataclass(frozen=True)
@@ -30,7 +33,11 @@ class FactMapping:
     raw_qname: str
     canonical_fact_name: str
     statement_type: StatementType
-    expected_unit_kind: str
+    expected_unit_kind: ExpectedUnitKind
+
+    def __post_init__(self) -> None:
+        if self.expected_unit_kind not in ALLOWED_UNIT_KINDS:
+            raise ValueError("FINANCIAL_MAPPING_UNIT_KIND_INVALID")
 
 
 @dataclass(frozen=True)
