@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
@@ -59,6 +60,16 @@ class FinancialFactWarehouse:
             table = table.replace_schema_metadata(metadata)
             pq.write_table(table, temporary, compression="zstd")
             self._flush(temporary)
+            self._validate_contents(
+                temporary,
+                filing_id=filing.filing_id,
+                expected_count=artifact.fact_count,
+                expected_content_hash=artifact.content_hash,
+                expected_report_period=filing.report_period.isoformat(),
+                expected_report_year=str(filing.report_period.year),
+                expected_report_type=filing.report_type.value,
+                expected_exchange=filing.exchange,
+            )
             try:
                 os.link(temporary, artifact.path)
             except FileExistsError:
@@ -71,7 +82,42 @@ class FinancialFactWarehouse:
 
     def validate_artifact(self, artifact: FinancialArtifact, filing_id: str) -> str:
         try:
-            with pq.ParquetFile(artifact.path) as parquet:
+            report_year = self._partition_value(
+                artifact.path.parent.parent.parent.name, "report_year="
+            )
+            report_type = self._partition_value(artifact.path.parent.parent.name, "report_type=")
+            exchange = self._partition_value(artifact.path.parent.name, "exchange=")
+        except ValueError as error:
+            raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR") from error
+
+        content_hash = self._validate_contents(
+            artifact.path,
+            filing_id=filing_id,
+            expected_count=artifact.fact_count,
+            expected_content_hash=artifact.content_hash,
+            expected_report_period=None,
+            expected_report_year=report_year,
+            expected_report_type=report_type,
+            expected_exchange=exchange,
+        )
+        if artifact.path.name != f"filing-{filing_id}-{content_hash}.parquet":
+            raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR")
+        return content_hash
+
+    def _validate_contents(
+        self,
+        path: Path,
+        *,
+        filing_id: str,
+        expected_count: int,
+        expected_content_hash: str,
+        expected_report_period: str | None,
+        expected_report_year: str,
+        expected_report_type: str,
+        expected_exchange: str,
+    ) -> str:
+        try:
+            with pq.ParquetFile(path) as parquet:
                 raw_metadata = parquet.schema_arrow.metadata or {}
                 metadata = {
                     key: raw_metadata[key].decode("utf-8")
@@ -85,6 +131,7 @@ class FinancialFactWarehouse:
                 rows = self._logical_rows(parquet.read().to_pylist())
             rows.sort(key=self._canonical_row_key)
             content_hash = self._content_hash(rows)
+            report_periods = [date.fromisoformat(str(row["report_period"])) for row in rows]
         except (
             KeyError,
             OSError,
@@ -95,30 +142,27 @@ class FinancialFactWarehouse:
         ) as error:
             raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR") from error
 
-        report_year = metadata[_METADATA_REPORT_YEAR]
-        report_type = metadata[_METADATA_REPORT_TYPE]
-        exchange = metadata[_METADATA_EXCHANGE]
-        partition_matches = (
-            artifact.path.parent.name == f"exchange={exchange}"
-            and artifact.path.parent.parent.name == f"report_type={report_type}"
-            and artifact.path.parent.parent.parent.name == f"report_year={report_year}"
-        )
-        rows_match_partition = all(
-            str(row.get("report_period", ""))[:4] == report_year
-            and row.get("report_type") == report_type
-            for row in rows
-        )
         if (
             metadata[_METADATA_FILING_ID] != filing_id
+            or metadata[_METADATA_REPORT_YEAR] != expected_report_year
+            or metadata[_METADATA_REPORT_TYPE] != expected_report_type
+            or metadata[_METADATA_EXCHANGE] != expected_exchange
             or any(row.get("filing_id") != filing_id for row in rows)
-            or not partition_matches
-            or not rows_match_partition
-            or len(rows) != artifact.fact_count
-            or content_hash != artifact.content_hash
-            or artifact.path.name != f"filing-{filing_id}-{content_hash}.parquet"
+            or any(str(period.year) != expected_report_year for period in report_periods)
+            or expected_report_period is not None
+            and any(period.isoformat() != expected_report_period for period in report_periods)
+            or any(row.get("report_type") != expected_report_type for row in rows)
+            or len(rows) != expected_count
+            or content_hash != expected_content_hash
         ):
             raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR")
         return content_hash
+
+    @staticmethod
+    def _partition_value(component: str, prefix: str) -> str:
+        if not component.startswith(prefix) or component == prefix:
+            raise ValueError("invalid financial artifact partition")
+        return component.removeprefix(prefix)
 
     @staticmethod
     def read_artifact(path: Path) -> list[dict[str, object]]:

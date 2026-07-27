@@ -179,6 +179,47 @@ def test_artifact_rejects_mixed_filing_ids(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("report_period", date(2025, 9, 30)),
+        ("report_type", ReportType.Q1),
+    ],
+)
+def test_invalid_fact_partition_is_rejected_before_canonical_target_is_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    """Catches linking a canonical target before validating logical row partitions."""
+    warehouse = FinancialFactWarehouse(tmp_path)
+    filing = financial_filing()
+    facts = [mapped_fact("assets", Decimal("1000")).model_copy(update={field: value})]
+    expected = warehouse.expected_artifact(filing, facts)
+    real_link = os.link
+    link_calls = 0
+
+    def record_link(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal link_calls
+        link_calls += 1
+        real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(financial_module.os, "link", record_link)
+
+    with pytest.raises(ValueError, match="^FINANCIAL_PARQUET_INTEGRITY_ERROR$"):
+        warehouse.write_facts(filing, facts)
+
+    assert link_calls == 0
+    assert not expected.path.exists()
+    assert not list(expected.path.parent.glob(".*.tmp"))
+
+
 def test_parquet_uses_zstandard_and_records_partition_metadata(tmp_path: Path) -> None:
     """Catches wrong compression and files whose embedded partition identity is absent."""
     warehouse = FinancialFactWarehouse(tmp_path)
