@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -41,6 +42,8 @@ def filing(
     valid_from: datetime = OLD_VALID_FROM,
     quality_status: QualityStatus = QualityStatus.VALID,
     supersedes_id: str | None = None,
+    ts_code: str = "600001.SH",
+    report_period: date = REPORT_PERIOD,
 ) -> FinancialFiling:
     raw_hash = ("1" if filing_id == "old" else "2") * 64
     return FinancialFiling(
@@ -56,9 +59,9 @@ def filing(
         license_policy="sse-personal-research",
         quality_status=quality_status,
         valid_from=valid_from,
-        ts_code="600001.SH",
+        ts_code=ts_code,
         exchange="SSE",
-        report_period=REPORT_PERIOD,
+        report_period=report_period,
         report_type=ReportType.ANNUAL,
         announcement_at=published_at,
         taxonomy=("test-gaap-2025",),
@@ -145,19 +148,21 @@ def register_artifact(
     *,
     publish: bool = True,
     warehouse: FinancialFactWarehouse | None = None,
+    manifest_path: str | None = None,
 ) -> FinancialArtifact:
     target_warehouse = warehouse or prepared.warehouse
     artifact = target_warehouse.write_facts(owner, facts)
+    registered_path = str(artifact.path) if manifest_path is None else manifest_path
     prepared.repository.stage_filing(
         owner,
-        str(artifact.path),
+        registered_path,
         artifact.content_hash,
         artifact.fact_count,
     )
     if publish:
         assert prepared.repository.publish_filing(
             owner.filing_id,
-            str(artifact.path),
+            registered_path,
             artifact.content_hash,
             artifact.fact_count,
         )
@@ -191,6 +196,35 @@ def prepared_old_and_corrected_query(
         publish=publish_correction,
     )
     return prepared, old, new
+
+
+def assert_graph_blocked_without_duckdb(
+    prepared: PreparedQuery,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    as_of: datetime,
+    known_at: datetime,
+) -> None:
+    real_connect = query_module.duckdb.connect
+    connect_calls = 0
+
+    def tracking_connect(*args: object, **kwargs: object) -> object:
+        nonlocal connect_calls
+        connect_calls += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(query_module.duckdb, "connect", tracking_connect)
+    result = prepared.query.query_financial_facts(
+        ts_code="600001.SH",
+        report_period=REPORT_PERIOD,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=as_of,
+        known_at=known_at,
+    )
+
+    assert connect_calls == 0
+    assert result.facts == ()
+    assert result.blocked_reasons == ("FINANCIAL_RESTATEMENT_UNUSABLE",)
 
 
 @pytest.mark.parametrize(
@@ -374,6 +408,218 @@ def test_public_bad_quality_correction_blocks_instead_of_falling_back(
     assert result.blocked_reasons == ("FINANCIAL_RESTATEMENT_UNUSABLE",)
 
 
+def test_self_referencing_visible_filing_graph_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches treating a self-loop as an empty selected set and silently returning no data."""
+    prepared = prepared_query(tmp_path)
+    owner = filing("self-loop", supersedes_id="self-loop")
+    register_artifact(
+        prepared,
+        owner,
+        [fact(owner, fact_id="assets", canonical_name="assets", value="1000")],
+    )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=owner.published_at,
+        known_at=owner.valid_from,
+    )
+
+
+def test_two_node_visible_cycle_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a rootless two-node cycle collapsing to an apparently valid empty result."""
+    prepared = prepared_query(tmp_path)
+    first = filing("cycle-a")
+    second = filing(
+        "cycle-b",
+        published_at=NEW_PUBLISHED_AT,
+        valid_from=NEW_VALID_FROM,
+        supersedes_id=first.filing_id,
+    )
+    register_artifact(
+        prepared,
+        first,
+        [fact(first, fact_id="cycle-a-assets", canonical_name="assets", value="1000")],
+    )
+    register_artifact(
+        prepared,
+        second,
+        [fact(second, fact_id="cycle-b-assets", canonical_name="assets", value="1100")],
+    )
+    cyclic_first = first.model_copy(update={"supersedes_id": second.filing_id, "is_restated": True})
+    with sqlite3.connect(prepared.repository.path) as connection:
+        connection.execute(
+            """
+            UPDATE financial_filings
+            SET supersedes_id=?, payload_json=?
+            WHERE filing_id=?
+            """,
+            (
+                second.filing_id,
+                cyclic_first.model_dump_json(),
+                first.filing_id,
+            ),
+        )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=second.published_at,
+        known_at=second.valid_from,
+    )
+
+
+@pytest.mark.parametrize("same_leaf_time", [False, True], ids=["different-time", "same-time"])
+def test_visible_forked_corrections_block_without_opening_duckdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_leaf_time: bool,
+) -> None:
+    """Catches sorting or combining two correction leaves instead of rejecting the fork."""
+    prepared = prepared_query(tmp_path)
+    parent = filing("fork-parent")
+    left = filing(
+        "fork-left",
+        published_at=NEW_PUBLISHED_AT,
+        valid_from=NEW_VALID_FROM,
+        supersedes_id=parent.filing_id,
+    )
+    right = filing(
+        "fork-right",
+        published_at=(NEW_PUBLISHED_AT if same_leaf_time else NEW_PUBLISHED_AT + timedelta(days=1)),
+        valid_from=(NEW_VALID_FROM if same_leaf_time else NEW_VALID_FROM + timedelta(days=1)),
+        supersedes_id=parent.filing_id,
+    )
+    for owner, value in ((parent, "1000"), (left, "1100"), (right, "1200")):
+        register_artifact(
+            prepared,
+            owner,
+            [
+                fact(
+                    owner,
+                    fact_id=f"{owner.filing_id}-assets",
+                    canonical_name="assets",
+                    value=value,
+                )
+            ],
+        )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=max(left.published_at, right.published_at),
+        known_at=max(left.valid_from, right.valid_from),
+    )
+
+
+def test_multiple_visible_root_filings_block_without_opening_duckdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches mixing independent roots merely because neither is superseded."""
+    prepared = prepared_query(tmp_path)
+    for filing_id, value in (("root-a", "1000"), ("root-b", "2000")):
+        owner = filing(filing_id)
+        register_artifact(
+            prepared,
+            owner,
+            [
+                fact(
+                    owner,
+                    fact_id=f"{filing_id}-assets",
+                    canonical_name="assets",
+                    value=value,
+                )
+            ],
+        )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=OLD_PUBLISHED_AT,
+        known_at=OLD_VALID_FROM,
+    )
+
+
+def test_visible_correction_with_time_filtered_parent_blocks_without_duckdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches accepting a child whose parent is absent from the bitemporal visible graph."""
+    prepared = prepared_query(tmp_path)
+    parent = filing(
+        "future-known-parent",
+        published_at=OLD_PUBLISHED_AT,
+        valid_from=NEW_VALID_FROM + timedelta(days=10),
+    )
+    child = filing(
+        "visible-child",
+        published_at=NEW_PUBLISHED_AT,
+        valid_from=NEW_VALID_FROM,
+        supersedes_id=parent.filing_id,
+    )
+    register_artifact(
+        prepared,
+        parent,
+        [fact(parent, fact_id="parent-assets", canonical_name="assets", value="1000")],
+    )
+    register_artifact(
+        prepared,
+        child,
+        [fact(child, fact_id="child-assets", canonical_name="assets", value="1100")],
+    )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=child.published_at,
+        known_at=child.valid_from,
+    )
+
+
+@pytest.mark.parametrize(
+    "parent_identity",
+    [
+        {"ts_code": "000001.SZ"},
+        {"report_period": date(2024, 12, 31)},
+    ],
+    ids=["cross-ts-code", "cross-report-period"],
+)
+def test_visible_correction_with_cross_identity_parent_blocks_without_duckdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_identity: dict[str, object],
+) -> None:
+    """Catches accepting a parent reference outside the requested filing identity."""
+    prepared = prepared_query(tmp_path)
+    parent = filing("foreign-parent", **parent_identity)
+    prepared.repository.stage_filing(parent, "unused.parquet", "d" * 64, 0)
+    child = filing(
+        "visible-child",
+        published_at=NEW_PUBLISHED_AT,
+        valid_from=NEW_VALID_FROM,
+        supersedes_id=parent.filing_id,
+    )
+    register_artifact(
+        prepared,
+        child,
+        [fact(child, fact_id="child-assets", canonical_name="assets", value="1100")],
+    )
+
+    assert_graph_blocked_without_duckdb(
+        prepared,
+        monkeypatch,
+        as_of=child.published_at,
+        known_at=child.valid_from,
+    )
+
+
 def test_unpublished_original_manifest_is_not_read(tmp_path: Path) -> None:
     """Catches reading expected paths without requiring manifest publication."""
     prepared = prepared_query(tmp_path)
@@ -483,6 +729,73 @@ def test_unregistered_parquet_below_warehouse_root_is_never_discovered(tmp_path:
 
     assert result.facts == ()
     assert result.filing_ids == ("old",)
+
+
+def test_cwd_relative_root_prefixed_manifest_path_is_resolved_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches prepending warehouse_root to a producer path that already includes that root."""
+    monkeypatch.chdir(tmp_path)
+    state = StateRepository(tmp_path / "state.sqlite3")
+    state.migrate()
+    repository = FinancialFilingRepository(state.path)
+    warehouse = FinancialFactWarehouse(Path("data") / "warehouse")
+    prepared = PreparedQuery(
+        query=AsOfFinancialQuery(repository=repository, warehouse_root=warehouse.root),
+        repository=repository,
+        warehouse=warehouse,
+    )
+    owner = filing("old")
+    artifact = register_artifact(
+        prepared,
+        owner,
+        [fact(owner, fact_id="assets", canonical_name="assets", value="1000")],
+    )
+
+    assert not artifact.path.is_absolute()
+    result = prepared.query.query_financial_facts(
+        ts_code=owner.ts_code,
+        report_period=owner.report_period,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=owner.published_at,
+        known_at=owner.valid_from,
+    )
+
+    assert result.facts[0]["fact_value"] == Decimal("1000")
+
+
+def test_manifest_path_relative_to_warehouse_root_is_supported(tmp_path: Path) -> None:
+    """Catches resolving every relative manifest path only against the process CWD."""
+    prepared = prepared_query(tmp_path)
+    owner = filing("old")
+    artifact = prepared.warehouse.write_facts(
+        owner,
+        [fact(owner, fact_id="assets", canonical_name="assets", value="1000")],
+    )
+    relative_path = artifact.path.relative_to(prepared.warehouse.root)
+    prepared.repository.stage_filing(
+        owner,
+        str(relative_path),
+        artifact.content_hash,
+        artifact.fact_count,
+    )
+    assert prepared.repository.publish_filing(
+        owner.filing_id,
+        str(relative_path),
+        artifact.content_hash,
+        artifact.fact_count,
+    )
+
+    result = prepared.query.query_financial_facts(
+        ts_code=owner.ts_code,
+        report_period=owner.report_period,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=owner.published_at,
+        known_at=owner.valid_from,
+    )
+
+    assert result.facts[0]["fact_value"] == Decimal("1000")
 
 
 def test_published_manifest_path_must_resolve_below_warehouse_root(tmp_path: Path) -> None:

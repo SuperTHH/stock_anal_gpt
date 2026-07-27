@@ -56,33 +56,30 @@ class AsOfFinancialQuery:
             and record.filing.published_at <= as_of
             and record.filing.valid_from <= known_at
         ]
-        selected = self._latest_chain_records(eligible)
-        filing_ids = tuple(record.filing.filing_id for record in selected)
-
-        if any(
-            record.filing.supersedes_id is not None
-            and (
-                record.artifact_status != "PUBLISHED"
-                or record.filing.quality_status in _UNUSABLE_QUALITY_STATUSES
-            )
-            for record in selected
-        ):
+        if not eligible:
+            return FinancialQueryResult((), (), ())
+        selected = self._latest_chain_record(eligible)
+        if selected is None:
             return FinancialQueryResult(
                 (),
                 ("FINANCIAL_RESTATEMENT_UNUSABLE",),
-                filing_ids,
+                tuple(sorted(record.filing.filing_id for record in eligible)),
             )
 
-        usable = [
-            record
-            for record in selected
-            if record.artifact_status == "PUBLISHED"
-            and record.filing.quality_status not in _UNUSABLE_QUALITY_STATUSES
-        ]
-        if not usable:
+        filing_ids = (selected.filing.filing_id,)
+        if (
+            selected.artifact_status != "PUBLISHED"
+            or selected.filing.quality_status in _UNUSABLE_QUALITY_STATUSES
+        ):
+            if selected.filing.supersedes_id is not None:
+                return FinancialQueryResult(
+                    (),
+                    ("FINANCIAL_RESTATEMENT_UNUSABLE",),
+                    filing_ids,
+                )
             return FinancialQueryResult((), (), ())
 
-        paths = [str(self._approved_path(record)) for record in usable]
+        paths = [str(self._approved_path(selected))]
         names = sorted(canonical_fact_names)
         placeholders = ", ".join("?" for _ in names)
         connection = duckdb.connect()
@@ -112,7 +109,7 @@ class AsOfFinancialQuery:
         return FinancialQueryResult(
             facts,
             (),
-            tuple(record.filing.filing_id for record in usable),
+            filing_ids,
         )
 
     @staticmethod
@@ -126,27 +123,51 @@ class AsOfFinancialQuery:
             raise ValueError("FINANCIAL_QUERY_CUTOFF_INVALID")
 
     @staticmethod
-    def _latest_chain_records(
+    def _latest_chain_record(
         records: list[FinancialArtifactRecord],
-    ) -> list[FinancialArtifactRecord]:
-        superseded_ids = {
-            record.filing.supersedes_id
-            for record in records
-            if record.filing.supersedes_id is not None
-        }
-        return sorted(
-            (record for record in records if record.filing.filing_id not in superseded_ids),
-            key=lambda record: (
-                record.filing.published_at,
-                record.filing.valid_from,
-                record.filing.filing_id,
-            ),
-        )
+    ) -> FinancialArtifactRecord | None:
+        records_by_id = {record.filing.filing_id: record for record in records}
+        if len(records_by_id) != len(records):
+            return None
+
+        roots: list[str] = []
+        children = {filing_id: [] for filing_id in records_by_id}
+        for filing_id, record in records_by_id.items():
+            parent_id = record.filing.supersedes_id
+            if parent_id is None:
+                roots.append(filing_id)
+            elif parent_id not in records_by_id:
+                return None
+            else:
+                children[parent_id].append(filing_id)
+
+        if len(roots) != 1 or any(len(child_ids) > 1 for child_ids in children.values()):
+            return None
+
+        seen: set[str] = set()
+        current_id = roots[0]
+        while True:
+            if current_id in seen:
+                return None
+            seen.add(current_id)
+            child_ids = children[current_id]
+            if not child_ids:
+                break
+            current_id = child_ids[0]
+
+        if len(seen) != len(records_by_id):
+            return None
+        return records_by_id[current_id]
 
     def _approved_path(self, record: FinancialArtifactRecord) -> Path:
         root = self._warehouse_root.resolve()
         path = Path(record.expected_path)
-        resolved = (path if path.is_absolute() else root / path).resolve()
-        if resolved == root or root not in resolved.parents:
+        candidates = (path,) if path.is_absolute() else (path, root / path)
+        approved = [
+            resolved
+            for candidate in candidates
+            if (resolved := candidate.resolve()) != root and root in resolved.parents
+        ]
+        if not approved:
             raise ValueError("FINANCIAL_QUERY_PATH_INVALID")
-        return resolved
+        return next((candidate for candidate in approved if candidate.is_file()), approved[0])
