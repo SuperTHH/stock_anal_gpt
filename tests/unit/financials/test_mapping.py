@@ -64,11 +64,12 @@ def raw_assets(
     dimensions: tuple[tuple[str, str], ...] = (),
     unit: RawXbrlUnit | None = None,
     entity_scheme: str = "https://example.test/entity",
+    value: Decimal = Decimal("1000.25"),
 ) -> RawXbrlFact:
     return RawXbrlFact(
         raw_qname=ASSETS_QNAME,
         fact_name="Assets",
-        value=Decimal("1000.25"),
+        value=value,
         decimals="-2",
         context=RawXbrlContext(
             context_id="context-1",
@@ -122,6 +123,17 @@ def test_normalizer_maps_fixture_qname_and_builds_stable_identities() -> None:
     assert left[0].fact_identity_hash == right[0].fact_identity_hash
     assert left[0].fact_value == Decimal("1000.25")
     assert left[0].dimensions == {"a": "1", "b": "2"}
+
+
+def test_normalizer_gives_distinct_observation_ids_to_different_values() -> None:
+    facts = normalizer().normalize(
+        financial_filing(),
+        [raw_assets(value=Decimal("1000")), raw_assets(value=Decimal("1100"))],
+    )
+
+    assert facts[0].fact_identity_hash == facts[1].fact_identity_hash
+    assert facts[0].fact_id != facts[1].fact_id
+    assert all(fact.record_id == fact.fact_id for fact in facts)
 
 
 def test_unmapped_fact_is_preserved_but_unverified() -> None:

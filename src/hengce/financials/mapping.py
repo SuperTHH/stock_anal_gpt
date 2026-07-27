@@ -109,7 +109,14 @@ class FinancialFactNormalizer:
                 "consolidation_scope": consolidation_scope.value,
             }
         )
-        fact_id = f"fact-{fact_identity_hash}"
+        observation_hash = stable_hash(
+            {
+                "fact_identity_hash": fact_identity_hash,
+                "fact_value": str(raw_fact.value),
+                "decimals": raw_fact.decimals,
+            }
+        )
+        fact_id = f"fact-{observation_hash}"
 
         return FinancialFact(
             record_id=fact_id,

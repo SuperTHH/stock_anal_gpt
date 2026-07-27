@@ -118,6 +118,50 @@ def mapped_fact(
     )
 
 
+def normalized_assets(*values: Decimal) -> list[FinancialFact]:
+    raw_qname = "{urn:hengce:test-gaap}Assets"
+    normalizer = FinancialFactNormalizer(
+        FactMappingRegistry(
+            mapping_version="fixture-v1",
+            mappings={
+                raw_qname: FactMapping(
+                    raw_qname=raw_qname,
+                    canonical_fact_name="assets",
+                    statement_type=StatementType.BALANCE_SHEET,
+                    expected_unit_kind="MONETARY",
+                )
+            },
+        )
+    )
+    return normalizer.normalize(
+        financial_filing(),
+        [
+            RawXbrlFact(
+                raw_qname=raw_qname,
+                fact_name="Assets",
+                value=value,
+                decimals="0",
+                context=RawXbrlContext(
+                    context_id="context-1",
+                    entity_scheme="https://example.test/entity",
+                    entity_identifier="600001.SH",
+                    period_start=None,
+                    period_end=None,
+                    instant=date(2025, 12, 31),
+                    dimensions=(),
+                ),
+                unit=RawXbrlUnit(
+                    unit_id="unit-1",
+                    numerator_measures=(CNY_MEASURE,),
+                    denominator_measures=(),
+                    currency="CNY",
+                ),
+            )
+            for value in values
+        ],
+    )
+
+
 def test_identical_duplicate_is_collapsed_without_conflict() -> None:
     fact = mapped_fact("assets", Decimal("1000"))
 
@@ -125,25 +169,20 @@ def test_identical_duplicate_is_collapsed_without_conflict() -> None:
 
     assert result.facts == (fact,)
     assert result.conflicts == ()
-    assert [issue.code for issue in result.issues] == ["FINANCIAL_FACT_DUPLICATE"]
+    assert "FINANCIAL_FACT_DUPLICATE" in {issue.code for issue in result.issues}
 
 
 def test_different_values_for_one_identity_create_open_conflict() -> None:
-    left = mapped_fact("assets", Decimal("1000"), fact_id="left")
-    right = mapped_fact("assets", Decimal("1100"), fact_id="right")
-    right = right.model_copy(
-        update={
-            "fact_identity_hash": left.fact_identity_hash,
-            "comparison_identity_hash": left.comparison_identity_hash,
-        }
-    )
+    left, right = normalized_assets(Decimal("1000"), Decimal("1100"))
 
     result = FinancialQualityValidator().validate(financial_filing(), [right, left])
 
     assert result.filing_quality_status is QualityStatus.CONFLICT
-    assert result.conflicts[0].competing_fact_ids == ("left", "right")
-    assert [fact.fact_id for fact in result.facts] == ["left", "right"]
+    assert result.conflicts[0].competing_fact_ids == tuple(sorted((left.fact_id, right.fact_id)))
+    assert left.fact_id != right.fact_id
+    assert [fact.fact_id for fact in result.facts] == sorted((left.fact_id, right.fact_id))
     assert all(fact.quality_status is QualityStatus.CONFLICT for fact in result.facts)
+    assert "FINANCIAL_FACT_CONFLICT" in {issue.code for issue in result.issues}
 
 
 def test_balance_sheet_uses_decimals_derived_tolerance() -> None:
@@ -194,6 +233,26 @@ def test_missing_balance_component_is_partial_not_fabricated() -> None:
     }
 
 
+def test_empty_facts_are_partial_with_numeric_facts_missing_issue() -> None:
+    result = FinancialQualityValidator().validate(financial_filing(), [])
+
+    assert result.facts == ()
+    assert result.filing_quality_status is QualityStatus.PARTIAL
+    assert [issue.code for issue in result.issues] == ["FINANCIAL_NUMERIC_FACTS_MISSING"]
+
+
+def test_single_assets_component_is_partial_without_fabricating_facts() -> None:
+    fact = mapped_fact("assets", Decimal("1000"))
+
+    result = FinancialQualityValidator().validate(financial_filing(), [fact])
+
+    assert result.facts == (fact,)
+    assert result.filing_quality_status is QualityStatus.PARTIAL
+    assert "FINANCIAL_BALANCE_COMPONENT_MISSING" in {
+        issue.code for issue in result.issues
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -237,4 +296,4 @@ def test_unmapped_fact_remains_unverified_and_makes_filing_partial() -> None:
 
     assert result.facts == (fact,)
     assert result.filing_quality_status is QualityStatus.PARTIAL
-    assert [issue.code for issue in result.issues] == ["FINANCIAL_MAPPING_UNMAPPED"]
+    assert [issue.code for issue in result.issues] == ["FINANCIAL_FACT_UNMAPPED"]

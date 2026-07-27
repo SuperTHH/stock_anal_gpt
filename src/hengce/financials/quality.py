@@ -46,6 +46,16 @@ class FinancialQualityValidator:
         conflicts: list[FactConflict] = []
         retained_facts: list[FinancialFact] = []
         conflicting_fact_ids: set[str] = set()
+        has_no_facts = not facts
+
+        if has_no_facts:
+            issues.append(
+                QualityIssue(
+                    code="FINANCIAL_NUMERIC_FACTS_MISSING",
+                    fact_ids=(),
+                    detail="filing contains no numeric facts",
+                )
+            )
 
         facts_by_identity: dict[str, list[FinancialFact]] = defaultdict(list)
         for fact in facts:
@@ -83,6 +93,13 @@ class FinancialQualityValidator:
                     detected_at=filing.collected_at,
                 )
             )
+            issues.append(
+                QualityIssue(
+                    code="FINANCIAL_FACT_CONFLICT",
+                    fact_ids=fact_ids,
+                    detail="facts with one identity have different values",
+                )
+            )
 
         unmapped_fact_ids = tuple(
             fact.fact_id
@@ -92,7 +109,7 @@ class FinancialQualityValidator:
         if unmapped_fact_ids:
             issues.append(
                 QualityIssue(
-                    code="FINANCIAL_MAPPING_UNMAPPED",
+                    code="FINANCIAL_FACT_UNMAPPED",
                     fact_ids=unmapped_fact_ids,
                     detail="unmapped facts cannot be fully validated",
                 )
@@ -130,8 +147,6 @@ class FinancialQualityValidator:
                 for name in ("assets", "liabilities", "equity")
             }
             if any(not component_facts for component_facts in components.values()):
-                if sum(bool(component_facts) for component_facts in components.values()) < 2:
-                    continue
                 has_missing_component = True
                 issues.append(
                     QualityIssue(
@@ -181,7 +196,7 @@ class FinancialQualityValidator:
             ]
 
         has_conflict = bool(conflicts or equation_conflict_fact_ids)
-        has_partial = bool(unmapped_fact_ids or has_missing_component)
+        has_partial = bool(has_no_facts or unmapped_fact_ids or has_missing_component)
         filing_quality_status = (
             QualityStatus.CONFLICT
             if has_conflict
