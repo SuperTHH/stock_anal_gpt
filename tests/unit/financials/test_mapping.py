@@ -22,6 +22,9 @@ NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
 HASH = "a" * 64
 ASSETS_QNAME = "{urn:hengce:test-gaap}Assets"
 CNY_MEASURE = "{http://www.xbrl.org/2003/iso4217}CNY"
+METER_MEASURE = "{urn:hengce:test-unit}meter"
+PURE_MEASURE = "{http://www.xbrl.org/2003/instance}pure"
+SHARES_MEASURE = "{http://www.xbrl.org/2003/instance}shares"
 
 
 def financial_filing(filing_id: str = "filing-1") -> FinancialFiling:
@@ -60,6 +63,7 @@ def financial_filing(filing_id: str = "filing-1") -> FinancialFiling:
 def raw_assets(
     dimensions: tuple[tuple[str, str], ...] = (),
     unit: RawXbrlUnit | None = None,
+    entity_scheme: str = "https://example.test/entity",
 ) -> RawXbrlFact:
     return RawXbrlFact(
         raw_qname=ASSETS_QNAME,
@@ -68,7 +72,7 @@ def raw_assets(
         decimals="-2",
         context=RawXbrlContext(
             context_id="context-1",
-            entity_scheme="https://example.test/entity",
+            entity_scheme=entity_scheme,
             entity_identifier="600001.SH",
             period_start=None,
             period_end=None,
@@ -85,7 +89,7 @@ def raw_assets(
     )
 
 
-def normalizer() -> FinancialFactNormalizer:
+def normalizer(expected_unit_kind: str = "MONETARY") -> FinancialFactNormalizer:
     return FinancialFactNormalizer(
         FactMappingRegistry(
             mapping_version="fixture-v1",
@@ -94,7 +98,7 @@ def normalizer() -> FinancialFactNormalizer:
                     raw_qname=ASSETS_QNAME,
                     canonical_fact_name="assets",
                     statement_type=StatementType.BALANCE_SHEET,
-                    expected_unit_kind="MONETARY",
+                    expected_unit_kind=expected_unit_kind,
                 )
             },
         )
@@ -140,6 +144,23 @@ def test_comparison_identity_ignores_filing_id_but_fact_identity_does_not() -> N
     assert old.comparison_identity_hash == new.comparison_identity_hash
 
 
+def test_entity_scheme_participates_in_all_context_derived_identities() -> None:
+    left = normalizer().normalize(
+        financial_filing(),
+        [raw_assets(entity_scheme="https://example.test/entity-a")],
+    )[0]
+    right = normalizer().normalize(
+        financial_filing(),
+        [raw_assets(entity_scheme="https://example.test/entity-b")],
+    )[0]
+
+    assert left.entity_scheme == "https://example.test/entity-a"
+    assert left.context_signature != right.context_signature
+    assert left.fact_identity_hash != right.fact_identity_hash
+    assert left.comparison_identity_hash != right.comparison_identity_hash
+    assert left.fact_id != right.fact_id
+
+
 def test_normalizer_rejects_mapped_fact_with_wrong_unit_kind() -> None:
     shares = RawXbrlUnit(
         unit_id="unit-shares",
@@ -150,6 +171,64 @@ def test_normalizer_rejects_mapped_fact_with_wrong_unit_kind() -> None:
 
     with pytest.raises(ValueError, match="^FINANCIAL_UNIT_KIND_MISMATCH$"):
         normalizer().normalize(financial_filing(), [raw_assets(unit=shares)])
+
+
+@pytest.mark.parametrize(
+    ("expected_unit_kind", "unit"),
+    [
+        (
+            "SHARES",
+            RawXbrlUnit(
+                unit_id="shares-per-meter",
+                numerator_measures=(SHARES_MEASURE,),
+                denominator_measures=(METER_MEASURE,),
+                currency=None,
+            ),
+        ),
+        (
+            "PURE",
+            RawXbrlUnit(
+                unit_id="pure-per-meter",
+                numerator_measures=(PURE_MEASURE,),
+                denominator_measures=(METER_MEASURE,),
+                currency=None,
+            ),
+        ),
+        (
+            "MONETARY",
+            RawXbrlUnit(
+                unit_id="currency-times-meter",
+                numerator_measures=(CNY_MEASURE, METER_MEASURE),
+                denominator_measures=(),
+                currency=None,
+            ),
+        ),
+        (
+            "PER_SHARE",
+            RawXbrlUnit(
+                unit_id="pure-per-share",
+                numerator_measures=(PURE_MEASURE,),
+                denominator_measures=(SHARES_MEASURE,),
+                currency=None,
+            ),
+        ),
+        (
+            "PER_SHARE",
+            RawXbrlUnit(
+                unit_id="currency-per-shares-meter",
+                numerator_measures=(CNY_MEASURE,),
+                denominator_measures=(SHARES_MEASURE, METER_MEASURE),
+                currency=None,
+            ),
+        ),
+    ],
+)
+def test_normalizer_rejects_non_exact_expected_unit_shapes(
+    expected_unit_kind: str,
+    unit: RawXbrlUnit,
+) -> None:
+    with pytest.raises(ValueError, match="^FINANCIAL_UNIT_KIND_MISMATCH$"):
+        normalizer(expected_unit_kind).normalize(financial_filing(), [raw_assets(unit=unit)])
 
 
 def test_normalizer_preserves_filing_provenance_and_uses_registry_version() -> None:

@@ -138,6 +138,7 @@ class FinancialFact(FactBase):
     currency: str | None
     filing_id: str
     context_signature: str
+    entity_scheme: str
     entity_identifier: str
     period_start: date | None
     period_end: date | None

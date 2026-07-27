@@ -75,6 +75,7 @@ def financial_fact_payload() -> dict[str, object]:
         "currency": "CNY",
         "filing_id": "filing-1",
         "context_signature": "context-hash",
+        "entity_scheme": "https://example.test/entity",
         "entity_identifier": "600001.SH",
         "period_start": None,
         "period_end": None,
@@ -108,6 +109,10 @@ def test_financial_fact_enforces_identity_and_period_shape() -> None:
         FinancialFact.model_validate({**payload, "fact_id": "other"})
     with pytest.raises(ValidationError):
         FinancialFact.model_validate({**payload, "period_start": date(2025, 1, 1)})
+    with pytest.raises(ValidationError):
+        FinancialFact.model_validate(
+            {key: value for key, value in payload.items() if key != "entity_scheme"}
+        )
 
 
 def test_unmapped_fact_cannot_claim_canonical_name() -> None:

@@ -19,6 +19,10 @@ from hengce.contracts.financial import FinancialFact, FinancialFiling
 from .xbrl import RawXbrlContext, RawXbrlFact, RawXbrlUnit
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+ISO_4217_NAMESPACE = "http://www.xbrl.org/2003/iso4217"
+XBRLI_NAMESPACE = "http://www.xbrl.org/2003/instance"
+SHARES_MEASURE = f"{{{XBRLI_NAMESPACE}}}shares"
+PURE_MEASURE = f"{{{XBRLI_NAMESPACE}}}pure"
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ class FinancialFactNormalizer:
             {
                 "filing_id": filing.filing_id,
                 "raw_qname": raw_fact.raw_qname,
+                "entity_scheme": raw_fact.context.entity_scheme,
                 "entity_identifier": raw_fact.context.entity_identifier,
                 "period": context_payload["period"],
                 "unit_signature": unit_signature,
@@ -87,6 +92,7 @@ class FinancialFactNormalizer:
         comparison_identity_hash = stable_hash(
             {
                 "raw_qname": raw_fact.raw_qname,
+                "entity_scheme": raw_fact.context.entity_scheme,
                 "entity_identifier": raw_fact.context.entity_identifier,
                 "period": context_payload["period"],
                 "unit_signature": unit_signature,
@@ -134,6 +140,7 @@ class FinancialFactNormalizer:
             currency=raw_fact.unit.currency if raw_fact.unit is not None else None,
             filing_id=filing.filing_id,
             context_signature=stable_hash(context_payload),
+            entity_scheme=raw_fact.context.entity_scheme,
             entity_identifier=raw_fact.context.entity_identifier,
             period_start=raw_fact.context.period_start,
             period_end=raw_fact.context.period_end,
@@ -159,6 +166,7 @@ def stable_hash(payload: dict[str, object]) -> str:
 
 def _context_payload(context: RawXbrlContext) -> dict[str, object]:
     return {
+        "entity_scheme": context.entity_scheme,
         "entity_identifier": context.entity_identifier,
         "period": {
             "period_start": _date_value(context.period_start),
@@ -196,23 +204,29 @@ def _unit_text(unit: RawXbrlUnit | None) -> str | None:
 def _unit_kind(unit: RawXbrlUnit | None) -> str:
     if unit is None:
         return "NONE"
-    if unit.currency is not None:
+    if (
+        len(unit.numerator_measures) == 1
+        and not unit.denominator_measures
+        and _is_iso_4217_measure(unit.numerator_measures[0])
+    ):
         return "MONETARY"
-    if any(_measure_local_name(measure) == "shares" for measure in unit.denominator_measures):
+    if (
+        len(unit.numerator_measures) == 1
+        and len(unit.denominator_measures) == 1
+        and _is_iso_4217_measure(unit.numerator_measures[0])
+        and unit.denominator_measures[0] == SHARES_MEASURE
+    ):
         return "PER_SHARE"
-    if len(unit.numerator_measures) == 1 and _measure_local_name(
-        unit.numerator_measures[0]
-    ) == "shares":
+    if unit.numerator_measures == (SHARES_MEASURE,) and not unit.denominator_measures:
         return "SHARES"
-    if len(unit.numerator_measures) == 1 and _measure_local_name(
-        unit.numerator_measures[0]
-    ) == "pure":
+    if unit.numerator_measures == (PURE_MEASURE,) and not unit.denominator_measures:
         return "PURE"
     return "OTHER"
 
 
-def _measure_local_name(measure: str) -> str:
-    return measure.rsplit("}", maxsplit=1)[-1]
+def _is_iso_4217_measure(measure: str) -> bool:
+    namespace_prefix = f"{{{ISO_4217_NAMESPACE}}}"
+    return measure.startswith(namespace_prefix) and len(measure) > len(namespace_prefix)
 
 
 __all__ = [
