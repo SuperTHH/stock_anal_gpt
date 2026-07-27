@@ -6,13 +6,14 @@ import os
 import re
 import stat
 import struct
+import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
-from zipfile import ZipFile, ZipInfo
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
 if os.name == "nt":
     import msvcrt
@@ -264,10 +265,13 @@ def _open_windows_path(path: Path, *, directory: bool, create: bool) -> int:
     flags = _FILE_FLAG_OPEN_REPARSE_POINT
     if directory:
         flags |= _FILE_FLAG_BACKUP_SEMANTICS
+    share_mode = _FILE_SHARE_READ
+    if not directory:
+        share_mode |= _FILE_SHARE_WRITE
     handle = _CREATE_FILE(
         str(path),
         _GENERIC_READ | (_GENERIC_WRITE if create else 0),
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        share_mode,
         None,
         _CREATE_NEW if create else _OPEN_EXISTING,
         flags,
@@ -612,6 +616,13 @@ def _validate_raw_records(
                     raise _error("FINANCIAL_ARCHIVE_INVALID")
                 if len(raw.read(extra_size)) != extra_size:
                     raise _error("FINANCIAL_ARCHIVE_INVALID")
+                data_offset = raw.tell()
+                _validate_compressed_stream(
+                    raw,
+                    data_offset,
+                    member,
+                    AttachmentLimits(),
+                )
 
                 if flags & _DATA_DESCRIPTOR_FLAG:
                     if crc not in {0, member.CRC}:
@@ -620,7 +631,7 @@ def _validate_raw_records(
                         raise _error("FINANCIAL_ARCHIVE_INVALID")
                     if file_size not in {0, member.file_size}:
                         raise _error("FINANCIAL_ARCHIVE_INVALID")
-                    raw.seek(member.compress_size, os.SEEK_CUR)
+                    raw.seek(data_offset + member.compress_size)
                     descriptor = raw.read(16)
                     if descriptor.startswith(_DESCRIPTOR_SIGNATURE):
                         descriptor = descriptor[4:]
@@ -644,12 +655,75 @@ def _validate_raw_records(
                         member.file_size,
                     ):
                         raise _error("FINANCIAL_ARCHIVE_INVALID")
-                    record_end = raw.tell() + member.compress_size
+                    record_end = data_offset + member.compress_size
 
                 if record_end != next_offset:
                     raise _error("FINANCIAL_ARCHIVE_INVALID")
     except (OSError, UnicodeError, struct.error):
         raise _error("FINANCIAL_ARCHIVE_INVALID") from None
+
+
+def _validate_compressed_stream(
+    raw: BinaryIO,
+    data_offset: int,
+    member: ZipInfo,
+    limits: AttachmentLimits,
+) -> int:
+    if member.compress_type == ZIP_STORED:
+        if member.compress_size != member.file_size:
+            raise _error("FINANCIAL_ARCHIVE_INVALID")
+        return member.compress_size
+    if member.compress_type != ZIP_DEFLATED:
+        raise _error("FINANCIAL_ARCHIVE_INVALID")
+
+    raw.seek(data_offset)
+    decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+    remaining = member.compress_size
+    pending = b""
+    consumed = 0
+    expanded = 0
+    checksum = 0
+    while remaining or pending:
+        if not pending:
+            pending = raw.read(min(_COPY_CHUNK_BYTES, remaining))
+            if not pending:
+                raise _error("FINANCIAL_ARCHIVE_INVALID")
+            remaining -= len(pending)
+
+        before = len(pending)
+        output = decompressor.decompress(pending, _COPY_CHUNK_BYTES)
+        consumed_now = (
+            before
+            - len(decompressor.unconsumed_tail)
+            - len(decompressor.unused_data)
+        )
+        consumed += consumed_now
+        pending = decompressor.unconsumed_tail
+        expanded += len(output)
+        checksum = zlib.crc32(output, checksum)
+        if expanded > limits.max_file_bytes:
+            raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+        if decompressor.unused_data or (
+            decompressor.eof and (remaining or pending)
+        ):
+            raise _error("FINANCIAL_ARCHIVE_INVALID")
+        if decompressor.eof:
+            break
+        if consumed_now == 0 and not output:
+            raise _error("FINANCIAL_ARCHIVE_INVALID")
+
+    if (
+        not decompressor.eof
+        or consumed != member.compress_size
+        or expanded != member.file_size
+        or checksum != member.CRC
+    ):
+        raise _error("FINANCIAL_ARCHIVE_INVALID")
+    if expanded and (
+        consumed == 0 or expanded > consumed * limits.max_compression_ratio
+    ):
+        raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+    return consumed
 
 
 def _resolve_entrypoint(directory: Path, declared: str, root: Path) -> Path:

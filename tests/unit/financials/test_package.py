@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import os
 import stat
 import struct
 import subprocess
 import zlib
 from datetime import UTC, date, datetime
 from pathlib import Path
-from zipfile import ZipFile, ZipInfo
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
@@ -155,6 +156,30 @@ def write_descriptor_zip(path: Path, name: str, payload: bytes) -> None:
     with ZipFile(output, "w") as handle:
         handle.writestr(name, payload)
     path.write_bytes(output.getvalue())
+
+
+def append_declared_deflate_padding(path: Path, padding: bytes) -> None:
+    content = bytearray(path.read_bytes())
+    local_header = content.index(b"PK\x03\x04")
+    central_header = content.index(b"PK\x01\x02")
+    compressed_size = struct.unpack_from("<I", content, central_header + 20)[0]
+    content[central_header:central_header] = padding
+    moved_central_header = central_header + len(padding)
+    struct.pack_into(
+        "<I",
+        content,
+        local_header + 18,
+        compressed_size + len(padding),
+    )
+    struct.pack_into(
+        "<I",
+        content,
+        moved_central_header + 20,
+        compressed_size + len(padding),
+    )
+    end_record = content.rindex(b"PK\x05\x06")
+    struct.pack_into("<I", content, end_record + 16, moved_central_header)
+    path.write_bytes(content)
 
 
 def test_inspector_rejects_mime_extension_mismatch_and_doctype(tmp_path: Path) -> None:
@@ -381,6 +406,63 @@ def test_materializer_does_not_follow_junction_during_direct_copy(
     assert not (outside / "instance" / "instance.xml").exists()
 
 
+def test_windows_locked_directory_denies_write_handle_before_child_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows directory sharing semantics")
+
+    store, descriptor, taxonomy = stored_valid_fixture(tmp_path)
+    original_open = package_module._open_windows_path
+    probe_attempted = False
+    write_handle_denied = False
+
+    def open_with_defensive_probe(
+        path: Path,
+        *,
+        directory: bool,
+        create: bool,
+    ) -> int:
+        nonlocal probe_attempted, write_handle_denied
+        if not directory and create and not probe_attempted:
+            probe_attempted = True
+            probe = package_module._CREATE_FILE(
+                str(path.parent),
+                package_module._GENERIC_WRITE,
+                (
+                    package_module._FILE_SHARE_READ
+                    | package_module._FILE_SHARE_WRITE
+                    | 0x00000004
+                ),
+                None,
+                package_module._OPEN_EXISTING,
+                (
+                    package_module._FILE_FLAG_OPEN_REPARSE_POINT
+                    | package_module._FILE_FLAG_BACKUP_SEMANTICS
+                ),
+                None,
+            )
+            write_handle_denied = probe == package_module._INVALID_HANDLE_VALUE
+            if not write_handle_denied:
+                package_module._CLOSE_HANDLE(probe)
+        return original_open(path, directory=directory, create=create)
+
+    monkeypatch.setattr(
+        package_module,
+        "_open_windows_path",
+        open_with_defensive_probe,
+    )
+
+    with SafePackageMaterializer(store).materialize(
+        descriptor,
+        (taxonomy,),
+    ) as materialized:
+        assert materialized.entrypoint_path.is_file()
+    assert probe_attempted
+    assert write_handle_denied
+
+
 def test_materializer_rejects_duplicate_normalized_output_paths(tmp_path: Path) -> None:
     archive = tmp_path / "taxonomy.zip"
     write_zip(
@@ -462,6 +544,20 @@ def test_materializer_rejects_data_descriptor_crc_mismatch(tmp_path: Path) -> No
     descriptor_offset = content.index(b"PK\x07\x08")
     struct.pack_into("<I", content, descriptor_offset + 4, 0)
     archive.write_bytes(content)
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_INVALID"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
+def test_materializer_rejects_declared_padding_after_deflate_eof(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    with ZipFile(archive, "w", compression=ZIP_DEFLATED) as handle:
+        handle.writestr("entry.xsd", b"0" * 4096)
+    append_declared_deflate_padding(archive, b"padding-after-deflate")
     store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
 
     with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_INVALID"):
