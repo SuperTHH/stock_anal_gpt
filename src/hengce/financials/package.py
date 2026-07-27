@@ -8,7 +8,7 @@ import stat
 import struct
 import zlib
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
@@ -261,12 +261,18 @@ def _locked_windows_directory_chain(root: Path, target: Path) -> Iterator[None]:
             _CLOSE_HANDLE(handle)
 
 
-def _open_windows_path(path: Path, *, directory: bool, create: bool) -> int:
+def _open_windows_path(
+    path: Path,
+    *,
+    directory: bool,
+    create: bool,
+    deny_write: bool = False,
+) -> int:
     flags = _FILE_FLAG_OPEN_REPARSE_POINT
     if directory:
         flags |= _FILE_FLAG_BACKUP_SEMANTICS
     share_mode = _FILE_SHARE_READ
-    if not directory:
+    if not directory and not deny_write:
         share_mode |= _FILE_SHARE_WRITE
     handle = _CREATE_FILE(
         str(path),
@@ -298,6 +304,66 @@ def _open_windows_path(path: Path, *, directory: bool, create: bool) -> int:
         _CLOSE_HANDLE(handle)
         raise OSError("unsafe filesystem object")
     return handle
+
+
+@contextmanager
+def _hold_materialized_tree_for_parser(
+    materialized: MaterializedFiling,
+) -> Iterator[None]:
+    """Keep parser path inputs stable for the duration of a path-based reopen."""
+    root = materialized.root.absolute()
+    required_paths = (
+        materialized.entrypoint_path.absolute(),
+        *(path.absolute() for path in materialized.taxonomy_package_paths),
+    )
+    try:
+        for path in required_paths:
+            path.relative_to(root)
+    except ValueError:
+        raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH") from None
+
+    if os.name != "nt":
+        with ExitStack() as stack:
+            for path in required_paths:
+                stack.enter_context(_safe_input_file(root, path))
+            yield
+        return
+
+    handles: list[int] = []
+    try:
+        handles.append(
+            _open_windows_path(
+                root,
+                directory=True,
+                create=False,
+                deny_write=True,
+            )
+        )
+        _hold_windows_tree(root, handles)
+        yield
+    except OSError:
+        raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH") from None
+    finally:
+        for handle in reversed(handles):
+            _CLOSE_HANDLE(handle)
+
+
+def _hold_windows_tree(directory: Path, handles: list[int]) -> None:
+    with os.scandir(directory) as entries:
+        children = sorted(entries, key=lambda entry: entry.name)
+    for child in children:
+        child_path = Path(child.path)
+        is_directory = child.is_dir(follow_symlinks=False)
+        handles.append(
+            _open_windows_path(
+                child_path,
+                directory=is_directory,
+                create=False,
+                deny_write=True,
+            )
+        )
+        if is_directory:
+            _hold_windows_tree(child_path, handles)
 
 
 @contextmanager

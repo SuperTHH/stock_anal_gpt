@@ -5,6 +5,7 @@ import os
 import stat
 import struct
 import subprocess
+import sys
 import zlib
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -15,7 +16,12 @@ import pytest
 import hengce.financials.package as package_module
 from hengce.contracts.enums import DiscoveryMethod, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
-from hengce.financials.package import LocalAttachmentInspector, SafePackageMaterializer
+from hengce.financials.package import (
+    LocalAttachmentInspector,
+    MaterializedFiling,
+    SafePackageMaterializer,
+    _hold_materialized_tree_for_parser,
+)
 from hengce.raw_store import RawObjectStore
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
@@ -690,6 +696,85 @@ def test_materializer_cleans_temporary_tree_when_consumer_raises(tmp_path: Path)
 
     assert root is not None
     assert not root.exists()
+
+
+def test_windows_parser_guard_denies_replacement_until_release(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows deny-write/delete handle semantics")
+
+    root = tmp_path / "materialized"
+    root.mkdir()
+    entrypoint = root / "instance.xml"
+    taxonomy_root = root / "taxonomy" / "nested"
+    taxonomy_root.mkdir(parents=True)
+    taxonomy = taxonomy_root / "taxonomy.xsd"
+    imported_schema = taxonomy_root / "imported.xsd"
+    empty_directory = root / "empty"
+    empty_directory.mkdir()
+    entrypoint.write_text("<x/>", encoding="utf-8")
+    taxonomy.write_text("<schema/>", encoding="utf-8")
+    imported_schema.write_text("<schema/>", encoding="utf-8")
+    materialized = MaterializedFiling(
+        entrypoint_path=entrypoint,
+        taxonomy_package_paths=(taxonomy,),
+        root=root,
+    )
+    files = (entrypoint, taxonomy, imported_schema)
+
+    def run_probe(statement: str, target: Path) -> int:
+        return subprocess.run(
+            [sys.executable, "-c", statement, str(target)],
+            check=False,
+        ).returncode
+
+    with _hold_materialized_tree_for_parser(materialized):
+        for path in files:
+            assert (
+                run_probe(
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text('replaced')",
+                    path,
+                )
+                != 0
+            )
+            assert (
+                run_probe(
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).unlink()",
+                    path,
+                )
+                != 0
+            )
+        assert (
+            run_probe(
+                "from pathlib import Path; import sys; Path(sys.argv[1]).rmdir()",
+                empty_directory,
+            )
+            != 0
+        )
+
+    for path in files:
+        assert (
+            run_probe(
+                "from pathlib import Path; import sys; "
+                "Path(sys.argv[1]).write_text('replaced')",
+                path,
+            )
+            == 0
+        )
+        assert (
+            run_probe(
+                "from pathlib import Path; import sys; Path(sys.argv[1]).unlink()",
+                path,
+            )
+            == 0
+        )
+    assert (
+        run_probe(
+            "from pathlib import Path; import sys; Path(sys.argv[1]).rmdir()",
+            empty_directory,
+        )
+        == 0
+    )
 
 
 def test_materializer_extracts_instance_zip_entrypoint(tmp_path: Path) -> None:

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xbrli="http://www.xbrl.org/2003/instance"
+  xmlns:t="urn:hengce:test-gaap"
+  targetNamespace="urn:hengce:test-gaap"
+  elementFormDefault="qualified">
+  <xsd:annotation>
+    <xsd:documentation>FIXTURE DATA - NOT A REAL ISSUER</xsd:documentation>
+  </xsd:annotation>
+  <xsd:import namespace="http://www.xbrl.org/2003/instance"
+    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <xsd:element name="Assets" id="t_Assets" type="xbrli:monetaryItemType" nillable="true"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="Liabilities" id="t_Liabilities" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="Equity" id="t_Equity" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="Revenue" id="t_Revenue" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="DisclosureNote" id="t_DisclosureNote" type="xbrli:stringItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="FactTuple" id="t_FactTuple" substitutionGroup="xbrli:tuple">
+    <xsd:complexType>
+      <xsd:sequence>
+        <xsd:any namespace="##targetNamespace" processContents="strict"
+          minOccurs="0" maxOccurs="unbounded"/>
+      </xsd:sequence>
+      <xsd:attributeGroup ref="xbrli:tupleAttrs"/>
+    </xsd:complexType>
+  </xsd:element>
+</xsd:schema>
