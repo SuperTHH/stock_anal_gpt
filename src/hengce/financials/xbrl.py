@@ -19,10 +19,13 @@ from .package import MaterializedFiling, _hold_materialized_tree_for_parser
 _ARELLE_SESSION_LOCK = Lock()
 _LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 _XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
+_XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
 _ISO_4217_NAMESPACE = "http://www.xbrl.org/2003/iso4217"
 _FATAL_DTS_ERROR_CODES = frozenset(
     {
         "IOerror",
+        "xmlSchema:syntax",
+        "xmlSyntax:xmlDeclarationError",
         "xbrl:schemaDefinitionMissing",
         "xbrl:schemaImportMissing",
     }
@@ -121,28 +124,80 @@ def _require_local_schema_refs(materialized: MaterializedFiling) -> None:
     if not schema_refs:
         raise ValueError("FINANCIAL_XBRL_PARSE_ERROR")
     root = materialized.root.resolve()
+    approved_files = frozenset(
+        path.resolve() for path in materialized.taxonomy_package_paths
+    )
+    approved_directories = (
+        root,
+        *(path for path in approved_files if path.is_dir()),
+    )
+    pending: list[Path] = []
     for schema_ref in schema_refs:
         href = schema_ref.get(f"{{{_XLINK_NAMESPACE}}}href")
         if not href:
             raise ValueError("FINANCIAL_TAXONOMY_MISSING")
-        parsed = urlsplit(href)
-        if parsed.scheme not in {"", "file"}:
+        referenced = _resolve_local_schema_reference(
+            materialized.entrypoint_path,
+            href,
+            approved_files,
+            approved_directories,
+        )
+        if referenced is not None:
+            pending.append(referenced)
+
+    visited: set[Path] = set()
+    while pending:
+        schema_path = pending.pop()
+        if schema_path in visited:
             continue
-        if parsed.scheme == "file":
-            if parsed.netloc not in {"", "localhost"}:
-                raise ValueError("FINANCIAL_XBRL_PARSE_ERROR")
-            file_path = unquote(parsed.path)
-            if os.name == "nt" and len(file_path) >= 3 and file_path[0] == "/":
-                file_path = file_path[1:]
-            referenced = Path(file_path).resolve()
-        else:
-            referenced = (
-                materialized.entrypoint_path.parent / unquote(parsed.path)
-            ).resolve()
-        if referenced != root and root not in referenced.parents:
+        visited.add(schema_path)
+        try:
+            schema = ElementTree.parse(schema_path)
+        except ElementTree.ParseError:
+            continue
+        except OSError:
+            raise ValueError("FINANCIAL_XBRL_PARSE_ERROR") from None
+        for tag_name in ("import", "include", "redefine"):
+            for reference in schema.findall(f".//{{{_XSD_NAMESPACE}}}{tag_name}"):
+                location = reference.get("schemaLocation")
+                if not location:
+                    continue
+                referenced = _resolve_local_schema_reference(
+                    schema_path,
+                    location,
+                    approved_files,
+                    approved_directories,
+                )
+                if referenced is not None and referenced not in visited:
+                    pending.append(referenced)
+
+
+def _resolve_local_schema_reference(
+    source_path: Path,
+    reference: str,
+    approved_files: frozenset[Path],
+    approved_directories: tuple[Path, ...],
+) -> Path | None:
+    parsed = urlsplit(reference)
+    if parsed.scheme not in {"", "file"}:
+        return None
+    if parsed.scheme == "file":
+        if parsed.netloc not in {"", "localhost"}:
             raise ValueError("FINANCIAL_XBRL_PARSE_ERROR")
-        if not referenced.is_file():
-            raise ValueError("FINANCIAL_TAXONOMY_MISSING")
+        file_path = unquote(parsed.path)
+        if os.name == "nt" and len(file_path) >= 3 and file_path[0] == "/":
+            file_path = file_path[1:]
+        referenced = Path(file_path).resolve()
+    else:
+        referenced = (source_path.parent / unquote(parsed.path)).resolve()
+    if referenced not in approved_files and not any(
+        referenced == directory or directory in referenced.parents
+        for directory in approved_directories
+    ):
+        raise ValueError("FINANCIAL_XBRL_PARSE_ERROR")
+    if not referenced.is_file():
+        raise ValueError("FINANCIAL_TAXONOMY_MISSING")
+    return referenced
 
 
 def _copy_model(model: Any) -> XbrlParseResult:

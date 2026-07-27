@@ -209,6 +209,134 @@ def test_arelle_rejects_model_with_unresolved_taxonomy_import(tmp_path: Path) ->
         root=tmp_path,
     )
 
+    with pytest.raises(ValueError, match="^FINANCIAL_TAXONOMY_MISSING$"):
+        ArelleXbrlProcessor().parse(materialized)
+
+
+@pytest.mark.parametrize(
+    ("tag_name", "use_file_uri"),
+    [("include", False), ("redefine", True)],
+)
+def test_arelle_maps_missing_recursive_schema_to_taxonomy_missing(
+    tmp_path: Path,
+    tag_name: str,
+    use_file_uri: bool,
+) -> None:
+    entrypoint = tmp_path / "instance.xml"
+    schema = tmp_path / "test-gaap.xsd"
+    missing = tmp_path / "missing-nested.xsd"
+    location = missing.as_uri() if use_file_uri else missing.name
+    shutil.copyfile(FIXTURE_ROOT / "instance.xml", entrypoint)
+    schema.write_text(
+        (FIXTURE_ROOT / "test-gaap.xsd")
+        .read_text(encoding="utf-8")
+        .replace(
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>\n'
+            f'  <xsd:{tag_name} schemaLocation="{location}"/>',
+        ),
+        encoding="utf-8",
+    )
+    materialized = MaterializedFiling(
+        entrypoint_path=entrypoint,
+        taxonomy_package_paths=(schema,),
+        root=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_TAXONOMY_MISSING$"):
+        ArelleXbrlProcessor().parse(materialized)
+
+
+def test_arelle_rejects_recursive_schema_reference_outside_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "materialized"
+    root.mkdir()
+    entrypoint = root / "instance.xml"
+    schema = root / "test-gaap.xsd"
+    outside = tmp_path / "outside.xsd"
+    shutil.copyfile(FIXTURE_ROOT / "instance.xml", entrypoint)
+    outside.write_text(
+        '<?xml version="1.0"?>\n'
+        '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>\n',
+        encoding="utf-8",
+    )
+    schema.write_text(
+        (FIXTURE_ROOT / "test-gaap.xsd")
+        .read_text(encoding="utf-8")
+        .replace(
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>\n'
+            '  <xsd:include schemaLocation="../outside.xsd"/>',
+        ),
+        encoding="utf-8",
+    )
+    materialized = MaterializedFiling(
+        entrypoint_path=entrypoint,
+        taxonomy_package_paths=(schema,),
+        root=root,
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_XBRL_PARSE_ERROR$"):
+        ArelleXbrlProcessor().parse(materialized)
+
+
+def test_arelle_local_schema_preflight_deduplicates_include_cycles(
+    tmp_path: Path,
+) -> None:
+    entrypoint = tmp_path / "instance.xml"
+    schema = tmp_path / "test-gaap.xsd"
+    cycle = tmp_path / "cycle.xsd"
+    shutil.copyfile(FIXTURE_ROOT / "instance.xml", entrypoint)
+    schema.write_text(
+        (FIXTURE_ROOT / "test-gaap.xsd")
+        .read_text(encoding="utf-8")
+        .replace(
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/'
+            'xbrl-instance-2003-12-31.xsd"/>\n'
+            '  <xsd:include schemaLocation="cycle.xsd"/>',
+        ),
+        encoding="utf-8",
+    )
+    cycle.write_text(
+        '<?xml version="1.0"?>\n'
+        '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"\n'
+        '  targetNamespace="urn:hengce:test-gaap">\n'
+        '  <xsd:include schemaLocation="test-gaap.xsd"/>\n'
+        "</xsd:schema>\n",
+        encoding="utf-8",
+    )
+    materialized = MaterializedFiling(
+        entrypoint_path=entrypoint,
+        taxonomy_package_paths=(schema,),
+        root=tmp_path,
+    )
+
+    assert len(ArelleXbrlProcessor().parse(materialized).facts) == 4
+
+
+def test_arelle_rejects_recoverable_malformed_taxonomy(tmp_path: Path) -> None:
+    entrypoint = tmp_path / "instance.xml"
+    schema = tmp_path / "test-gaap.xsd"
+    shutil.copyfile(FIXTURE_ROOT / "instance.xml", entrypoint)
+    schema.write_text(
+        (FIXTURE_ROOT / "test-gaap.xsd")
+        .read_text(encoding="utf-8")
+        .replace("</xsd:schema>", "</xsd:schem>"),
+        encoding="utf-8",
+    )
+    materialized = MaterializedFiling(
+        entrypoint_path=entrypoint,
+        taxonomy_package_paths=(schema,),
+        root=tmp_path,
+    )
+
     with pytest.raises(ValueError, match="^FINANCIAL_XBRL_PARSE_ERROR$"):
         ArelleXbrlProcessor().parse(materialized)
 
