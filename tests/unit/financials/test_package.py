@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import io
 import stat
 import struct
+import subprocess
+import zlib
 from datetime import UTC, date, datetime
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo
 
 import pytest
 
+import hengce.financials.package as package_module
 from hengce.contracts.enums import DiscoveryMethod, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
 from hengce.financials.package import LocalAttachmentInspector, SafePackageMaterializer
@@ -129,6 +133,30 @@ def patch_central_sizes(
     path.write_bytes(content)
 
 
+def underdeclare_first_central_member(path: Path, declared_payload: bytes) -> None:
+    content = bytearray(path.read_bytes())
+    central_header = content.index(b"PK\x01\x02")
+    struct.pack_into("<I", content, central_header + 16, zlib.crc32(declared_payload))
+    struct.pack_into("<I", content, central_header + 20, len(declared_payload))
+    struct.pack_into("<I", content, central_header + 24, len(declared_payload))
+    path.write_bytes(content)
+
+
+class NonSeekableBuffer(io.BytesIO):
+    def seekable(self) -> bool:
+        return False
+
+    def seek(self, *args: object, **kwargs: object) -> int:
+        raise OSError("not seekable")
+
+
+def write_descriptor_zip(path: Path, name: str, payload: bytes) -> None:
+    output = NonSeekableBuffer()
+    with ZipFile(output, "w") as handle:
+        handle.writestr(name, payload)
+    path.write_bytes(output.getvalue())
+
+
 def test_inspector_rejects_mime_extension_mismatch_and_doctype(tmp_path: Path) -> None:
     xml = tmp_path / "filing.xml"
     xml.write_bytes(b"<!DOCTYPE x [<!ENTITY x SYSTEM 'file:///secret'>]><x/>")
@@ -215,6 +243,30 @@ def test_materializer_rejects_unsafe_archive_member_names(
             pass
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "folder/C:/nested-drive.xsd",
+        "entry.xsd:alternate-stream",
+        "CON",
+        "AUX.xml",
+        "folder/trailing.",
+        "folder/trailing ",
+    ],
+)
+def test_materializer_rejects_windows_unsafe_path_components(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(archive, [(member_name, b"<x/>")])
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_UNSAFE_PATH"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
 def test_materializer_rejects_nul_in_raw_archive_member_name(tmp_path: Path) -> None:
     archive = tmp_path / "taxonomy.zip"
     write_zip(archive, [("nul!.xsd", b"<x/>")])
@@ -238,6 +290,95 @@ def test_materializer_rejects_symlink_members(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_UNSAFE_PATH"):
         with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
             pass
+
+
+def test_materializer_does_not_follow_junction_inserted_after_path_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(archive, [("nested/entry.xsd", b"<schema/>")])
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+    taxonomy = taxonomy.model_copy(update={"entrypoint": "nested/entry.xsd"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_validate = SafePackageMaterializer._validate_central_directory
+
+    def validate_then_insert_junction(
+        materializer: SafePackageMaterializer,
+        members: list[ZipInfo],
+        destination: Path,
+        root: Path,
+    ) -> list[tuple[ZipInfo, Path]]:
+        planned = original_validate(materializer, members, destination, root)
+        destination.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(destination / "nested"),
+                str(outside),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return planned
+
+    monkeypatch.setattr(
+        SafePackageMaterializer,
+        "_validate_central_directory",
+        validate_then_insert_junction,
+    )
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_UNSAFE_PATH"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+    assert not (outside / "entry.xsd").exists()
+
+
+def test_materializer_does_not_follow_junction_during_direct_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, descriptor, taxonomy = stored_valid_fixture(tmp_path)
+    outside = tmp_path / "outside-copy"
+    outside.mkdir()
+    original_contained_target = package_module._contained_target
+    inserted = False
+
+    def validate_then_insert_junction(root: Path, target: Path) -> Path:
+        nonlocal inserted
+        validated = original_contained_target(root, target)
+        if not inserted and "attachments" in target.parts:
+            subprocess.run(
+                [
+                    "cmd",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(root / "attachments"),
+                    str(outside),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            inserted = True
+        return validated
+
+    monkeypatch.setattr(
+        package_module,
+        "_contained_target",
+        validate_then_insert_junction,
+    )
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_UNSAFE_PATH"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+    assert not (outside / "instance" / "instance.xml").exists()
 
 
 def test_materializer_rejects_duplicate_normalized_output_paths(tmp_path: Path) -> None:
@@ -287,6 +428,47 @@ def test_materializer_rejects_declared_archive_limits(tmp_path: Path, case: str)
             pass
 
 
+def test_materializer_rejects_central_directory_under_declaration(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(archive, [("entry.xsd", b"<schema/>")])
+    underdeclare_first_central_member(archive, b"<")
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_INVALID"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
+def test_materializer_rejects_local_header_crc_mismatch(tmp_path: Path) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(archive, [("entry.xsd", b"<schema/>")])
+    content = bytearray(archive.read_bytes())
+    local_header = content.index(b"PK\x03\x04")
+    struct.pack_into("<I", content, local_header + 14, 0)
+    archive.write_bytes(content)
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_INVALID"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
+def test_materializer_rejects_data_descriptor_crc_mismatch(tmp_path: Path) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_descriptor_zip(archive, "entry.xsd", b"<schema/>")
+    content = bytearray(archive.read_bytes())
+    descriptor_offset = content.index(b"PK\x07\x08")
+    struct.pack_into("<I", content, descriptor_offset + 4, 0)
+    archive.write_bytes(content)
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_ARCHIVE_INVALID"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
 def test_materializer_rejects_corrupt_zip_with_stable_error(tmp_path: Path) -> None:
     store = RawObjectStore(tmp_path / "raw")
     instance_hash = store_payload(store, "instance.xml", "application/xml", b"<x/>")
@@ -305,9 +487,76 @@ def test_materializer_rejects_corrupt_zip_with_stable_error(tmp_path: Path) -> N
             pass
 
 
+def test_materializer_maps_invalid_utf8_zip_name_to_stable_error(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(archive, [("bad!.xsd", b"<schema/>")])
+    content = bytearray(archive.read_bytes().replace(b"bad!.xsd", b"bad\xff.xsd"))
+    local_header = content.index(b"PK\x03\x04")
+    central_header = content.index(b"PK\x01\x02")
+    local_flags = struct.unpack_from("<H", content, local_header + 6)[0]
+    central_flags = struct.unpack_from("<H", content, central_header + 8)[0]
+    struct.pack_into("<H", content, local_header + 6, local_flags | 0x800)
+    struct.pack_into("<H", content, central_header + 8, central_flags | 0x800)
+    archive.write_bytes(content)
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="^FINANCIAL_ARCHIVE_INVALID$"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
 def test_materializer_rejects_unsafe_xml_inside_zip(tmp_path: Path) -> None:
     archive = tmp_path / "taxonomy.zip"
     write_zip(archive, [("entry.xsd", b"<!ENTITY x SYSTEM 'file:///secret'><schema/>")])
+    store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
+
+    with pytest.raises(ValueError, match="FINANCIAL_XML_UNSAFE"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass
+
+
+def test_materializer_scans_instance_entrypoint_without_xml_suffix(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "instance.zip"
+    write_zip(
+        archive,
+        [("reports/instance.dat", b"<!DOCTYPE x><x/>")],
+    )
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "instance.zip",
+        "application/zip",
+        archive.read_bytes(),
+    )
+
+    with pytest.raises(ValueError, match="FINANCIAL_XML_UNSAFE"):
+        with SafePackageMaterializer(store).materialize(
+            descriptor_for(
+                instance_hash,
+                attachment_name="instance.zip",
+                content_type="application/zip",
+                instance_entrypoint="reports/instance.dat",
+            ),
+            (),
+        ):
+            pass
+
+
+def test_materializer_scans_xml_signature_members_without_xml_suffix(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(
+        archive,
+        [
+            ("entry.xsd", b"<schema/>"),
+            ("imports/hidden.bin", b"<!ENTITY x SYSTEM 'file:///secret'><schema/>"),
+        ],
+    )
     store, descriptor, taxonomy = stored_fixture(tmp_path, archive)
 
     with pytest.raises(ValueError, match="FINANCIAL_XML_UNSAFE"):
@@ -423,6 +672,32 @@ def test_instance_zip_requires_valid_file_entrypoint(
             pass
 
 
+def test_instance_entrypoint_rejects_windows_trailing_dot_alias(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "instance.zip"
+    write_zip(archive, [("reports/instance.xml", b"<x/>")])
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "instance.zip",
+        "application/zip",
+        archive.read_bytes(),
+    )
+
+    with pytest.raises(ValueError, match="FINANCIAL_ENTRYPOINT_INVALID"):
+        with SafePackageMaterializer(store).materialize(
+            descriptor_for(
+                instance_hash,
+                attachment_name="instance.zip",
+                content_type="application/zip",
+                instance_entrypoint="reports/instance.xml.",
+            ),
+            (),
+        ):
+            pass
+
+
 def test_direct_instance_rejects_instance_entrypoint(tmp_path: Path) -> None:
     store = RawObjectStore(tmp_path / "raw")
     instance_hash = store_payload(store, "instance.xml", "application/xml", b"<x/>")
@@ -431,6 +706,38 @@ def test_direct_instance_rejects_instance_entrypoint(tmp_path: Path) -> None:
         with SafePackageMaterializer(store).materialize(
             descriptor_for(instance_hash, instance_entrypoint="instance.xml"),
             (),
+        ):
+            pass
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["missing.xsd", "../taxonomy.xsd", "nested/taxonomy.xsd"],
+)
+def test_direct_taxonomy_requires_entrypoint_to_identify_copied_file(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(store, "instance.xml", "application/xml", b"<x/>")
+    taxonomy_hash = store_payload(
+        store,
+        "taxonomy.xsd",
+        "application/xml-schema",
+        b"<schema/>",
+    )
+
+    with pytest.raises(ValueError, match="FINANCIAL_ENTRYPOINT_INVALID"):
+        with SafePackageMaterializer(store).materialize(
+            descriptor_for(instance_hash),
+            (
+                taxonomy_for(
+                    taxonomy_hash,
+                    package_name="taxonomy.xsd",
+                    entrypoint=entrypoint,
+                    content_type="application/xml-schema",
+                ),
+            ),
         ):
             pass
 
