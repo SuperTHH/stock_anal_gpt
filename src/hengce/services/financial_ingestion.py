@@ -33,6 +33,7 @@ from hengce.warehouse.financial import FinancialArtifact, FinancialFactWarehouse
 
 ERROR_STATUS = {
     "RAW_PAYLOAD_INTEGRITY_ERROR": RunStatus.FAILED,
+    "FINANCIAL_OVERLAY_CONFLICT": RunStatus.FAILED,
     "FINANCIAL_TAXONOMY_MISSING": RunStatus.BLOCKED,
     "FINANCIAL_XBRL_PARSE_ERROR": RunStatus.FAILED,
     "FINANCIAL_PARQUET_INTEGRITY_ERROR": RunStatus.FAILED,

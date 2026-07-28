@@ -624,6 +624,24 @@ def test_unknown_processor_exception_is_not_disguised_as_financial_status(
     assert run.error_code is None
 
 
+def test_unknown_value_error_is_not_disguised_as_declared_financial_status(
+    tmp_path: Path,
+) -> None:
+    processor = FakeProcessor(
+        valid_raw_facts(),
+        error=ValueError("UNDECLARED_FINANCIAL_ERROR"),
+    )
+    built = build_service(tmp_path, processor=processor)
+
+    with pytest.raises(ValueError, match="^UNDECLARED_FINANCIAL_ERROR$"):
+        built.service.run(built.descriptor)
+
+    run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert run.run_status is RunStatus.RUNNING
+    assert run.finished_at is None
+    assert run.error_code is None
+
+
 def test_typed_parser_failure_terminalizes_with_declared_failed_mapping(
     tmp_path: Path,
 ) -> None:
@@ -642,9 +660,45 @@ def test_typed_parser_failure_terminalizes_with_declared_failed_mapping(
     assert run.finished_at == NOW
 
 
+def test_overlay_conflict_terminalizes_failed_run_without_parser_call(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path, register_taxonomy=False)
+    taxonomy_raw = built.raw_store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/filing.xml",
+        collected_at=NOW,
+        content_type="application/xml",
+        payload=b"<schema/>",
+    )
+    built.repository.register_taxonomy(
+        TaxonomyPackageRef(
+            taxonomy_id=TAXONOMY_ID,
+            source_id="sse",
+            source_url="https://www.sse.com.cn/filing.xml",
+            raw_object_hash=taxonomy_raw.content_hash,
+            package_name="filing.xml",
+            entrypoint="filing.xml",
+            content_type="application/xml",
+            collected_at=NOW,
+        )
+    )
+
+    result = built.service.run(built.descriptor)
+
+    assert result.run_status is RunStatus.FAILED
+    assert result.error_code == "FINANCIAL_OVERLAY_CONFLICT"
+    assert built.processor.calls == 0
+    run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert run.run_status is RunStatus.FAILED
+    assert run.error_code == "FINANCIAL_OVERLAY_CONFLICT"
+    assert run.finished_at == NOW
+
+
 def test_error_status_is_explicit_and_does_not_guess_unknown_exceptions() -> None:
     assert ERROR_STATUS == {
         "RAW_PAYLOAD_INTEGRITY_ERROR": RunStatus.FAILED,
+        "FINANCIAL_OVERLAY_CONFLICT": RunStatus.FAILED,
         "FINANCIAL_TAXONOMY_MISSING": RunStatus.BLOCKED,
         "FINANCIAL_XBRL_PARSE_ERROR": RunStatus.FAILED,
         "FINANCIAL_PARQUET_INTEGRITY_ERROR": RunStatus.FAILED,

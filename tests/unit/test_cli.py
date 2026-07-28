@@ -683,6 +683,51 @@ def test_real_cli_materialization_keeps_registered_relative_taxonomy_reachable_o
     assert output["fact_count"] == 4
 
 
+def test_real_cli_overlay_collision_returns_terminal_sorted_json_without_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        payload=VALID_TAXONOMY,
+        content_type="application/xml",
+        file_name="filing.xml",
+        entrypoint="filing.xml",
+        source_url="https://www.sse.com.cn/filing.xml",
+    )
+    assert registered.exit_code == 0
+    secret = "private-overlay-instance-body"
+    monkeypatch.setenv("HENGCE_TUSHARE_TOKEN", "private-overlay-environment")
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=(
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                + f"<!--{secret}-->".encode()
+                + b'<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"/>'
+            ),
+        ),
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["run_status"] == "FAILED"
+    assert output["error_code"] == "FINANCIAL_OVERLAY_CONFLICT"
+    assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
+    assert result.stderr == ""
+    assert secret not in result.stdout
+    assert "private-overlay-environment" not in result.stdout
+    assert "parser" not in result.stdout.casefold()
+    state = StateRepository(tmp_path / "data" / "state" / "hengce.sqlite3")
+    runs = state.list_runs(run_type="financial_xbrl")
+    assert len(runs) == 1
+    assert runs[0].run_status is RunStatus.FAILED
+    assert runs[0].error_code == "FINANCIAL_OVERLAY_CONFLICT"
+    assert runs[0].finished_at is not None
+
+
 def test_import_financial_xbrl_uses_injected_local_composition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
