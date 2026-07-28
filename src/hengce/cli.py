@@ -99,16 +99,22 @@ def parse_offset_datetime(value: str, option_name: str) -> datetime:
 
 def validate_financial_identity(source_id: str, ts_code: str, exchange: str) -> None:
     """Require the exchange and Tushare suffix declared by the source."""
+    validate_financial_source(source_id)
     expected = {
         "sse": ("SSE", ".SH"),
         "szse": ("SZSE", ".SZ"),
-    }.get(source_id)
+    }[source_id]
     if (
-        expected is None
-        or exchange != expected[0]
+        exchange != expected[0]
         or not re.fullmatch(r"[0-9]{6}\.(?:SH|SZ)", ts_code)
         or not ts_code.endswith(expected[1])
     ):
+        raise ValueError("FINANCIAL_SOURCE_MISMATCH")
+
+
+def validate_financial_source(source_id: str) -> None:
+    """Restrict financial XBRL commands to the two exchange policy identities."""
+    if source_id not in {"sse", "szse"}:
         raise ValueError("FINANCIAL_SOURCE_MISMATCH")
 
 
@@ -299,6 +305,7 @@ def register_xbrl_taxonomy(
         "xbrl",
         "cli.register_taxonomy",
     )
+    validate_financial_source(source_id)
     LocalAttachmentInspector().validate(file, content_type, taxonomy=True)
     validate_taxonomy_entrypoint(file, entrypoint)
     raw_ref = RawObjectStore(settings.data_dir / "raw").put(

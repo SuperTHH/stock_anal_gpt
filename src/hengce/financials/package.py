@@ -38,6 +38,13 @@ class MaterializedFiling:
     root: Path
 
 
+@dataclass(frozen=True)
+class _MaterializedResource:
+    resource_root: Path
+    entrypoint_path: Path
+    files: tuple[Path, ...]
+
+
 ALLOWED_INSTANCE_TYPES = {
     ".xml": {"application/xml", "text/xml", "application/xbrl+xml"},
     ".xbrl": {"application/xml", "text/xml", "application/xbrl+xml"},
@@ -99,9 +106,9 @@ if os.name == "nt":
         wintypes.HANDLE,
     ]
     _CREATE_FILE.restype = wintypes.HANDLE
-    _GET_FILE_INFORMATION = (
-        ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandleEx
-    )
+    _GET_FILE_INFORMATION = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    ).GetFileInformationByHandleEx
     _GET_FILE_INFORMATION.argtypes = [
         wintypes.HANDLE,
         ctypes.c_int,
@@ -297,9 +304,7 @@ def _open_windows_path(
         _CLOSE_HANDLE(handle)
         raise error
     is_directory = bool(information.file_attributes & _FILE_ATTRIBUTE_DIRECTORY)
-    is_reparse_point = bool(
-        information.file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT
-    )
+    is_reparse_point = bool(information.file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
     if is_reparse_point or is_directory != directory:
         _CLOSE_HANDLE(handle)
         raise OSError("unsafe filesystem object")
@@ -422,31 +427,26 @@ class SafePackageMaterializer:
     ) -> Iterator[MaterializedFiling]:
         instance_source = self._store.validate_content_hash(descriptor.raw_object_hash)
         taxonomy_sources = tuple(
-            self._store.validate_content_hash(taxonomy.raw_object_hash)
-            for taxonomy in taxonomies
+            self._store.validate_content_hash(taxonomy.raw_object_hash) for taxonomy in taxonomies
         )
 
         with TemporaryDirectory(prefix="hengce-xbrl-") as temporary_name:
             root = Path(temporary_name).resolve()
-            entrypoint_path = self._materialize_instance(root, instance_source, descriptor)
-            taxonomy_paths = tuple(
+            instance = self._materialize_instance(root, instance_source, descriptor)
+            taxonomy_resources = tuple(
                 self._materialize_taxonomy(root, source, taxonomy, index)
                 for index, (source, taxonomy) in enumerate(
                     zip(taxonomy_sources, taxonomies, strict=True)
                 )
             )
-            yield MaterializedFiling(
-                entrypoint_path=entrypoint_path,
-                taxonomy_package_paths=taxonomy_paths,
-                root=root,
-            )
+            yield self._compose_parser_space(root, instance, taxonomy_resources)
 
     def _materialize_instance(
         self,
         root: Path,
         source: Path,
         descriptor: FilingDescriptor,
-    ) -> Path:
+    ) -> _MaterializedResource:
         declared_name = _sanitized_declared_name(descriptor.attachment_name)
         suffix = Path(declared_name).suffix.lower()
         if suffix != ".zip" and descriptor.instance_entrypoint is not None:
@@ -459,16 +459,25 @@ class SafePackageMaterializer:
         )
         self._inspector.validate(attachment, descriptor.content_type, taxonomy=False)
         if suffix != ".zip":
-            return attachment
+            return _MaterializedResource(
+                resource_root=attachment.parent,
+                entrypoint_path=attachment,
+                files=(attachment,),
+            )
         if descriptor.instance_entrypoint is None:
             raise _error("FINANCIAL_ENTRYPOINT_INVALID")
 
         extracted = root / "instance"
-        self._extract_zip(attachment, extracted, root)
-        return _resolve_entrypoint(
+        files = self._extract_zip(attachment, extracted, root)
+        entrypoint = _resolve_entrypoint(
             extracted,
             descriptor.instance_entrypoint,
             root,
+        )
+        return _MaterializedResource(
+            resource_root=extracted,
+            entrypoint_path=entrypoint,
+            files=files,
         )
 
     def _materialize_taxonomy(
@@ -477,7 +486,7 @@ class SafePackageMaterializer:
         source: Path,
         taxonomy: TaxonomyPackageRef,
         index: int,
-    ) -> Path:
+    ) -> _MaterializedResource:
         declared_name = _sanitized_declared_name(taxonomy.package_name)
         attachment = self._copy_attachment(
             root,
@@ -494,24 +503,107 @@ class SafePackageMaterializer:
                     pass
             except (OSError, _PackageError):
                 raise _error("FINANCIAL_ENTRYPOINT_INVALID") from None
-            return attachment
+            return _MaterializedResource(
+                resource_root=attachment.parent,
+                entrypoint_path=attachment,
+                files=(attachment,),
+            )
 
         extracted = root / f"taxonomy-{index}"
-        self._extract_zip(attachment, extracted, root)
-        return _resolve_entrypoint(extracted, taxonomy.entrypoint, root)
+        files = self._extract_zip(attachment, extracted, root)
+        entrypoint = _resolve_entrypoint(extracted, taxonomy.entrypoint, root)
+        return _MaterializedResource(
+            resource_root=extracted,
+            entrypoint_path=entrypoint,
+            files=files,
+        )
+
+    def _compose_parser_space(
+        self,
+        root: Path,
+        instance: _MaterializedResource,
+        taxonomies: tuple[_MaterializedResource, ...],
+    ) -> MaterializedFiling:
+        parser_root = _contained_target(root, root / "parser")
+        instance_entrypoint_relative = instance.entrypoint_path.relative_to(instance.resource_root)
+        taxonomy_base = instance_entrypoint_relative.parent
+        planned: list[tuple[Path, Path]] = [
+            (
+                source,
+                source.relative_to(instance.resource_root),
+            )
+            for source in instance.files
+        ]
+        for taxonomy in taxonomies:
+            planned.extend(
+                (
+                    source,
+                    taxonomy_base / source.relative_to(taxonomy.resource_root),
+                )
+                for source in taxonomy.files
+            )
+
+        targets_by_source = self._copy_parser_overlay(root, parser_root, planned)
+        return MaterializedFiling(
+            entrypoint_path=targets_by_source[instance.entrypoint_path],
+            taxonomy_package_paths=tuple(
+                targets_by_source[taxonomy.entrypoint_path] for taxonomy in taxonomies
+            ),
+            root=root,
+        )
+
+    @staticmethod
+    def _copy_parser_overlay(
+        root: Path,
+        parser_root: Path,
+        planned: list[tuple[Path, Path]],
+    ) -> dict[Path, Path]:
+        landing_keys: list[tuple[str, ...]] = []
+        targets_by_source: dict[Path, Path] = {}
+        for source, relative in planned:
+            landing_key = _windows_landing_key(PurePosixPath(*relative.parts))
+            if any(_landing_keys_conflict(landing_key, existing) for existing in landing_keys):
+                raise _error("FINANCIAL_OVERLAY_CONFLICT")
+            landing_keys.append(landing_key)
+            target = _contained_target(
+                root,
+                parser_root.joinpath(*relative.parts),
+            )
+            try:
+                with (
+                    _safe_input_file(root, source) as input_stream,
+                    _safe_output_file(
+                        root,
+                        target,
+                    ) as output,
+                ):
+                    while chunk := input_stream.read(_COPY_CHUNK_BYTES):
+                        output.write(chunk)
+            except OSError:
+                raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH") from None
+            targets_by_source[source] = target
+        return targets_by_source
 
     @staticmethod
     def _copy_attachment(root: Path, source: Path, relative_target: Path) -> Path:
         target = _contained_target(root, root / relative_target)
-        with source.open("rb") as input_stream, _safe_output_file(
-            root,
-            target,
-        ) as output:
+        with (
+            source.open("rb") as input_stream,
+            _safe_output_file(
+                root,
+                target,
+            ) as output,
+        ):
             while chunk := input_stream.read(_COPY_CHUNK_BYTES):
                 output.write(chunk)
         return target
 
-    def _extract_zip(self, archive: Path, destination: Path, root: Path) -> None:
+    def _extract_zip(
+        self,
+        archive: Path,
+        destination: Path,
+        root: Path,
+    ) -> tuple[Path, ...]:
         try:
             with ZipFile(archive) as handle:
                 members = handle.infolist()
@@ -519,6 +611,7 @@ class SafePackageMaterializer:
                 _validate_raw_records(archive, handle, members)
                 _ensure_safe_directory(root, destination)
                 self._stream_members(handle, planned, root)
+                return tuple(target for member, target in planned if not member.is_dir())
         except _PackageError:
             raise
         except Exception:
@@ -555,8 +648,7 @@ class SafePackageMaterializer:
                 raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
             if member.file_size and (
                 member.compress_size == 0
-                or member.file_size
-                > member.compress_size * self._limits.max_compression_ratio
+                or member.file_size > member.compress_size * self._limits.max_compression_ratio
             ):
                 raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
             planned.append((member, target))
@@ -575,10 +667,13 @@ class SafePackageMaterializer:
                 continue
 
             actual_member = 0
-            with archive.open(member, "r") as source, _safe_output_file(
-                root,
-                target,
-            ) as output:
+            with (
+                archive.open(member, "r") as source,
+                _safe_output_file(
+                    root,
+                    target,
+                ) as output,
+            ):
                 while chunk := source.read(_COPY_CHUNK_BYTES):
                     actual_member += len(chunk)
                     actual_total += len(chunk)
@@ -758,20 +853,14 @@ def _validate_compressed_stream(
 
         before = len(pending)
         output = decompressor.decompress(pending, _COPY_CHUNK_BYTES)
-        consumed_now = (
-            before
-            - len(decompressor.unconsumed_tail)
-            - len(decompressor.unused_data)
-        )
+        consumed_now = before - len(decompressor.unconsumed_tail) - len(decompressor.unused_data)
         consumed += consumed_now
         pending = decompressor.unconsumed_tail
         expanded += len(output)
         checksum = zlib.crc32(output, checksum)
         if expanded > limits.max_file_bytes:
             raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-        if decompressor.unused_data or (
-            decompressor.eof and (remaining or pending)
-        ):
+        if decompressor.unused_data or (decompressor.eof and (remaining or pending)):
             raise _error("FINANCIAL_ARCHIVE_INVALID")
         if decompressor.eof:
             break
@@ -785,9 +874,7 @@ def _validate_compressed_stream(
         or checksum != member.CRC
     ):
         raise _error("FINANCIAL_ARCHIVE_INVALID")
-    if expanded and (
-        consumed == 0 or expanded > consumed * limits.max_compression_ratio
-    ):
+    if expanded and (consumed == 0 or expanded > consumed * limits.max_compression_ratio):
         raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
     return consumed
 
@@ -842,3 +929,11 @@ def _has_unsafe_windows_component(parts: tuple[str, ...]) -> bool:
 
 def _windows_landing_key(path: PurePosixPath) -> tuple[str, ...]:
     return tuple(component.casefold() for component in path.parts)
+
+
+def _landing_keys_conflict(
+    first: tuple[str, ...],
+    second: tuple[str, ...],
+) -> bool:
+    shared_length = min(len(first), len(second))
+    return first[:shared_length] == second[:shared_length]

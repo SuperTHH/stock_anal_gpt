@@ -26,6 +26,7 @@ from hengce.raw_store import RawObjectStore
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
 MIB = 1024 * 1024
+FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "xbrl" / "minimal"
 
 
 def store_payload(store: RawObjectStore, name: str, content_type: str, payload: bytes) -> str:
@@ -256,9 +257,7 @@ def test_materializer_rejects_unsafe_archive_member_names(
     member_name: str,
 ) -> None:
     archive = tmp_path / "taxonomy.zip"
-    archive_name = (
-        member_name.replace("\\", "!") if "\\" in member_name else member_name
-    )
+    archive_name = member_name.replace("\\", "!") if "\\" in member_name else member_name
     write_zip(archive, [(archive_name, b"<x/>")])
     if "\\" in member_name:
         archive.write_bytes(
@@ -436,11 +435,7 @@ def test_windows_locked_directory_denies_write_handle_before_child_creation(
             probe = package_module._CREATE_FILE(
                 str(path.parent),
                 package_module._GENERIC_WRITE,
-                (
-                    package_module._FILE_SHARE_READ
-                    | package_module._FILE_SHARE_WRITE
-                    | 0x00000004
-                ),
+                (package_module._FILE_SHARE_READ | package_module._FILE_SHARE_WRITE | 0x00000004),
                 None,
                 package_module._OPEN_EXISTING,
                 (
@@ -668,19 +663,177 @@ def test_materializer_scans_xml_signature_members_without_xml_suffix(
 
 def test_materializer_cleans_temporary_tree_and_preserves_safe_names(tmp_path: Path) -> None:
     store, descriptor, taxonomy = stored_valid_fixture(tmp_path)
-    with SafePackageMaterializer(store).materialize(
-        descriptor, (taxonomy,)
-    ) as materialized:
+    with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)) as materialized:
         root = materialized.root
         assert materialized.entrypoint_path.name == "instance.xml"
         assert materialized.entrypoint_path.is_file()
         assert all(path.is_file() for path in materialized.taxonomy_package_paths)
         assert materialized.taxonomy_package_paths[0].name == "taxonomy.xsd"
         assert all(
-            root.resolve() in path.resolve().parents
-            for path in materialized.taxonomy_package_paths
+            root.resolve() in path.resolve().parents for path in materialized.taxonomy_package_paths
         )
     assert not root.exists()
+
+
+def test_materializer_places_direct_taxonomy_at_instance_relative_schema_ref(
+    tmp_path: Path,
+) -> None:
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "instance.xml",
+        "application/xml",
+        (FIXTURE_ROOT / "instance.xml").read_bytes(),
+    )
+    taxonomy_hash = store_payload(
+        store,
+        "test-gaap.xsd",
+        "application/xml-schema",
+        (FIXTURE_ROOT / "test-gaap.xsd").read_bytes(),
+    )
+
+    with SafePackageMaterializer(store).materialize(
+        descriptor_for(instance_hash),
+        (
+            taxonomy_for(
+                taxonomy_hash,
+                package_name="test-gaap.xsd",
+                entrypoint="test-gaap.xsd",
+                content_type="application/xml-schema",
+            ),
+        ),
+    ) as materialized:
+        referenced = materialized.entrypoint_path.parent / "test-gaap.xsd"
+        assert referenced == materialized.taxonomy_package_paths[0]
+        assert referenced.read_bytes() == (FIXTURE_ROOT / "test-gaap.xsd").read_bytes()
+
+
+def test_materializer_preserves_zip_taxonomy_entrypoint_relative_dependencies(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "taxonomy.zip"
+    write_zip(
+        archive,
+        [
+            (
+                "schemas/main.xsd",
+                (
+                    b'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    b'<xs:include schemaLocation="common/base.xsd"/>'
+                    b"</xs:schema>"
+                ),
+            ),
+            (
+                "schemas/common/base.xsd",
+                b'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            ),
+        ],
+    )
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "instance.xml",
+        "application/xml",
+        (
+            b'<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+            b'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+            b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b'<link:schemaRef xlink:type="simple" xlink:href="schemas/main.xsd"/>'
+            b"</xbrli:xbrl>"
+        ),
+    )
+    taxonomy_hash = store_payload(
+        store,
+        "taxonomy.zip",
+        "application/zip",
+        archive.read_bytes(),
+    )
+
+    with SafePackageMaterializer(store).materialize(
+        descriptor_for(instance_hash),
+        (taxonomy_for(taxonomy_hash, entrypoint="schemas/main.xsd"),),
+    ) as materialized:
+        entrypoint = materialized.entrypoint_path.parent / "schemas" / "main.xsd"
+        dependency = materialized.entrypoint_path.parent / "schemas" / "common" / "base.xsd"
+        assert materialized.taxonomy_package_paths == (entrypoint,)
+        assert entrypoint.is_file()
+        assert dependency.is_file()
+
+
+def test_materializer_rejects_instance_taxonomy_overlay_name_collision(
+    tmp_path: Path,
+) -> None:
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "shared.xml",
+        "application/xml",
+        b"<x/>",
+    )
+    taxonomy_hash = store_payload(
+        store,
+        "shared.xml",
+        "application/xml",
+        b"<schema/>",
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_OVERLAY_CONFLICT$"):
+        with SafePackageMaterializer(store).materialize(
+            descriptor_for(instance_hash, attachment_name="shared.xml"),
+            (
+                taxonomy_for(
+                    taxonomy_hash,
+                    package_name="shared.xml",
+                    entrypoint="shared.xml",
+                    content_type="application/xml",
+                ),
+            ),
+        ):
+            pass
+
+
+def test_materializer_rejects_duplicate_taxonomy_overlay_entrypoints(
+    tmp_path: Path,
+) -> None:
+    store = RawObjectStore(tmp_path / "raw")
+    instance_hash = store_payload(
+        store,
+        "instance.xml",
+        "application/xml",
+        b"<x/>",
+    )
+    first_hash = store_payload(
+        store,
+        "shared.xsd",
+        "application/xml-schema",
+        b"<schema id='first'/>",
+    )
+    second_hash = store_payload(
+        store,
+        "shared.xsd",
+        "application/xml-schema",
+        b"<schema id='second'/>",
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_OVERLAY_CONFLICT$"):
+        with SafePackageMaterializer(store).materialize(
+            descriptor_for(instance_hash),
+            (
+                taxonomy_for(
+                    first_hash,
+                    package_name="shared.xsd",
+                    entrypoint="shared.xsd",
+                    content_type="application/xml-schema",
+                ),
+                taxonomy_for(
+                    second_hash,
+                    package_name="shared.xsd",
+                    entrypoint="shared.xsd",
+                    content_type="application/xml-schema",
+                ).model_copy(update={"taxonomy_id": "second-taxonomy"}),
+            ),
+        ):
+            pass
 
 
 def test_materializer_cleans_temporary_tree_when_consumer_raises(tmp_path: Path) -> None:
@@ -688,9 +841,7 @@ def test_materializer_cleans_temporary_tree_when_consumer_raises(tmp_path: Path)
     root: Path | None = None
 
     with pytest.raises(RuntimeError, match="consumer failed"):
-        with SafePackageMaterializer(store).materialize(
-            descriptor, (taxonomy,)
-        ) as materialized:
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)) as materialized:
             root = materialized.root
             raise RuntimeError("consumer failed")
 
@@ -755,8 +906,7 @@ def test_windows_parser_guard_denies_replacement_until_release(tmp_path: Path) -
     for path in files:
         assert (
             run_probe(
-                "from pathlib import Path; import sys; "
-                "Path(sys.argv[1]).write_text('replaced')",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('replaced')",
                 path,
             )
             == 0
@@ -810,8 +960,10 @@ def test_materializer_extracts_instance_zip_entrypoint(tmp_path: Path) -> None:
             ),
         ),
     ) as materialized:
-        assert materialized.entrypoint_path.relative_to(materialized.root).as_posix().endswith(
-            "reports/instance.xml"
+        assert (
+            materialized.entrypoint_path.relative_to(materialized.root)
+            .as_posix()
+            .endswith("reports/instance.xml")
         )
         assert materialized.entrypoint_path.read_bytes() == b"<x/>"
 

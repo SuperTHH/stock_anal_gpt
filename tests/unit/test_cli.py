@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import socket
 import sys
 import zipfile
 from datetime import date
@@ -30,6 +31,7 @@ from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.repository import StateRepository
 
 POLICY_FILE = Path(__file__).parents[2] / "config" / "source_policies.json"
+XBRL_FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "xbrl" / "minimal"
 VALID_INSTANCE = (
     b'<?xml version="1.0" encoding="UTF-8"?>'
     b'<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"/>'
@@ -595,6 +597,90 @@ def test_register_taxonomy_persists_approved_local_object(tmp_path: Path) -> Non
         tmp_path / "data" / "state" / "hengce.sqlite3"
     ).get_taxonomies(("test-gaap-2025",))
     assert references[0].raw_object_hash == payload["raw_object_hash"]
+
+
+def test_register_taxonomy_rejects_custom_approved_non_exchange_source_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    policies = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+    sse_policy = next(policy for policy in policies if policy["source_id"] == "sse")
+    policy_file = tmp_path / "custom-policies.json"
+    policy_file.write_text(
+        json.dumps(
+            [
+                *policies,
+                {
+                    **sse_policy,
+                    "source_id": "other",
+                    "source_name": "Other approved source",
+                    "allowed_domains": ["example.com"],
+                    "terms_url": "https://example.com/terms",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    taxonomy = tmp_path / "test-gaap.xsd"
+    taxonomy.write_bytes(VALID_TAXONOMY)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "register-xbrl-taxonomy",
+            "--file",
+            str(taxonomy),
+            "--taxonomy-id",
+            "test-gaap-2025",
+            "--source-id",
+            "other",
+            "--source-url",
+            "https://example.com/test-gaap.xsd",
+            "--entrypoint",
+            "test-gaap.xsd",
+            "--content-type",
+            "application/xml-schema",
+            "--collected-at",
+            "2026-07-26T12:00:00+08:00",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--policy-file",
+            str(policy_file),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_SOURCE_MISMATCH"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_real_cli_materialization_keeps_registered_relative_taxonomy_reachable_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        payload=(XBRL_FIXTURE_ROOT / "test-gaap.xsd").read_bytes(),
+    )
+    assert registered.exit_code == 0
+
+    def blocked_connect(*args: object, **kwargs: object) -> None:
+        raise AssertionError("network access is forbidden")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked_connect)
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=(XBRL_FIXTURE_ROOT / "instance.xml").read_bytes(),
+        ),
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["run_status"] == "PARTIAL"
+    assert output["error_code"] == "FINANCIAL_FACT_UNMAPPED"
+    assert output["fact_count"] == 4
 
 
 def test_import_financial_xbrl_uses_injected_local_composition(

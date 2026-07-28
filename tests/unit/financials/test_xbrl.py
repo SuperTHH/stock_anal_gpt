@@ -4,7 +4,7 @@ import shutil
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
@@ -14,8 +14,11 @@ from typing import Any
 import pytest
 from arelle.api.Session import Session as RealSession
 
-from hengce.financials.package import MaterializedFiling
+from hengce.contracts.enums import DiscoveryMethod, ReportType
+from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
+from hengce.financials.package import MaterializedFiling, SafePackageMaterializer
 from hengce.financials.xbrl import ArelleXbrlProcessor
+from hengce.raw_store import RawObjectStore
 
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "xbrl" / "minimal"
 
@@ -101,6 +104,67 @@ def test_arelle_parses_numeric_facts_without_any_socket(
     assert revenue.context.period_end == date(2025, 12, 31)
 
 
+def test_arelle_parses_safely_materialized_relative_taxonomy_without_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 26, 12, tzinfo=UTC)
+    store = RawObjectStore(tmp_path / "raw")
+    instance = store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/instance.xml",
+        collected_at=now,
+        content_type="application/xml",
+        payload=(FIXTURE_ROOT / "instance.xml").read_bytes(),
+    )
+    taxonomy = store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/test-gaap.xsd",
+        collected_at=now,
+        content_type="application/xml-schema",
+        payload=(FIXTURE_ROOT / "test-gaap.xsd").read_bytes(),
+    )
+    descriptor = FilingDescriptor(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/instance.xml",
+        ts_code="600001.SH",
+        exchange="SSE",
+        report_period=date(2025, 12, 31),
+        report_type=ReportType.ANNUAL,
+        published_at=now,
+        collected_at=now,
+        attachment_name="instance.xml",
+        content_type="application/xml",
+        raw_object_hash=instance.content_hash,
+        taxonomy_refs=("test-gaap-2025",),
+        discovery_method=DiscoveryMethod.FIXTURE,
+        instance_entrypoint=None,
+    )
+    taxonomy_ref = TaxonomyPackageRef(
+        taxonomy_id="test-gaap-2025",
+        source_id="sse",
+        source_url="https://www.sse.com.cn/test-gaap.xsd",
+        raw_object_hash=taxonomy.content_hash,
+        package_name="test-gaap.xsd",
+        entrypoint="test-gaap.xsd",
+        content_type="application/xml-schema",
+        collected_at=now,
+    )
+
+    def blocked_connect(*args: object, **kwargs: object) -> None:
+        raise AssertionError("network access is forbidden")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked_connect)
+    with SafePackageMaterializer(store).materialize(
+        descriptor,
+        (taxonomy_ref,),
+    ) as materialized:
+        result = ArelleXbrlProcessor().parse(materialized)
+
+    assert len(result.facts) == 4
+
+
 def test_arelle_copies_neutral_frozen_data_before_session_closes(
     materialized_fixture: MaterializedFiling,
 ) -> None:
@@ -137,9 +201,7 @@ def test_arelle_sessions_are_serialized_across_threads(
     monkeypatch.setattr("hengce.financials.xbrl.Session", spy.session_type)
     processor = ArelleXbrlProcessor()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(
-            pool.map(processor.parse, [materialized_fixture, materialized_fixture])
-        )
+        results = list(pool.map(processor.parse, [materialized_fixture, materialized_fixture]))
 
     assert all(len(result.facts) == 4 for result in results)
     assert spy.maximum_active_sessions == 1
@@ -231,8 +293,7 @@ def test_arelle_maps_missing_recursive_schema_to_taxonomy_missing(
         (FIXTURE_ROOT / "test-gaap.xsd")
         .read_text(encoding="utf-8")
         .replace(
-            '    schemaLocation="http://www.xbrl.org/2003/'
-            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>',
             '    schemaLocation="http://www.xbrl.org/2003/'
             'xbrl-instance-2003-12-31.xsd"/>\n'
             f'  <xsd:{tag_name} schemaLocation="{location}"/>',
@@ -259,16 +320,14 @@ def test_arelle_rejects_recursive_schema_reference_outside_root(
     outside = tmp_path / "outside.xsd"
     shutil.copyfile(FIXTURE_ROOT / "instance.xml", entrypoint)
     outside.write_text(
-        '<?xml version="1.0"?>\n'
-        '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>\n',
+        '<?xml version="1.0"?>\n<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>\n',
         encoding="utf-8",
     )
     schema.write_text(
         (FIXTURE_ROOT / "test-gaap.xsd")
         .read_text(encoding="utf-8")
         .replace(
-            '    schemaLocation="http://www.xbrl.org/2003/'
-            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>',
             '    schemaLocation="http://www.xbrl.org/2003/'
             'xbrl-instance-2003-12-31.xsd"/>\n'
             '  <xsd:include schemaLocation="../outside.xsd"/>',
@@ -296,8 +355,7 @@ def test_arelle_local_schema_preflight_deduplicates_include_cycles(
         (FIXTURE_ROOT / "test-gaap.xsd")
         .read_text(encoding="utf-8")
         .replace(
-            '    schemaLocation="http://www.xbrl.org/2003/'
-            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>',
             '    schemaLocation="http://www.xbrl.org/2003/'
             'xbrl-instance-2003-12-31.xsd"/>\n'
             '  <xsd:include schemaLocation="cycle.xsd"/>',
@@ -351,12 +409,10 @@ def test_arelle_rejects_typed_dimensions_instead_of_silently_dropping_them(
         .read_text(encoding="utf-8")
         .replace(
             'xmlns:t="urn:hengce:test-gaap"',
-            'xmlns:t="urn:hengce:test-gaap"\n'
-            '  xmlns:xbrldt="http://xbrl.org/2005/xbrldt"',
+            'xmlns:t="urn:hengce:test-gaap"\n  xmlns:xbrldt="http://xbrl.org/2005/xbrldt"',
         )
         .replace(
-            '    schemaLocation="http://www.xbrl.org/2003/'
-            'xbrl-instance-2003-12-31.xsd"/>',
+            '    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>',
             '    schemaLocation="http://www.xbrl.org/2003/'
             'xbrl-instance-2003-12-31.xsd"/>\n'
             '  <xsd:import namespace="http://xbrl.org/2005/xbrldt"\n'
@@ -384,8 +440,7 @@ def test_arelle_rejects_typed_dimensions_instead_of_silently_dropping_them(
             '  xmlns:xbrldi="http://xbrl.org/2006/xbrldi"',
         )
         .replace(
-            "      <xbrli:instant>2025-12-31</xbrli:instant>\n"
-            "    </xbrli:period>",
+            "      <xbrli:instant>2025-12-31</xbrli:instant>\n    </xbrli:period>",
             "      <xbrli:instant>2025-12-31</xbrli:instant>\n"
             "    </xbrli:period>\n"
             "    <xbrli:scenario>\n"
