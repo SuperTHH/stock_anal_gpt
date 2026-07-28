@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import sys
 import zipfile
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from subprocess import run
 from unittest.mock import Mock
@@ -13,9 +15,29 @@ from typer.testing import CliRunner
 from hengce import cli
 from hengce.cli import app, build_market_ingestion, load_trade_dates
 from hengce.config import Settings
+from hengce.contracts.enums import DiscoveryMethod, ReportType, RunStatus
+from hengce.financials.xbrl import (
+    RawXbrlContext,
+    RawXbrlFact,
+    RawXbrlUnit,
+    XbrlParseDiagnostics,
+    XbrlParseResult,
+)
+from hengce.services.financial_ingestion import FinancialIngestionResult
 from hengce.services.initializer import InitializationResult
 from hengce.services.market_ingestion import MarketIngestionResult
+from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.repository import StateRepository
+
+POLICY_FILE = Path(__file__).parents[2] / "config" / "source_policies.json"
+VALID_INSTANCE = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"/>'
+)
+VALID_TAXONOMY = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>'
+)
 
 
 class ClosingClient:
@@ -28,6 +50,181 @@ class ClosingClient:
     def __exit__(self, *args: object) -> bool:
         self.closed = True
         return False
+
+
+class FakeFinancialIngestion:
+    def __init__(self, result: FinancialIngestionResult) -> None:
+        self.result = result
+        self.descriptors: list[object] = []
+
+    def run(self, descriptor: object) -> FinancialIngestionResult:
+        self.descriptors.append(descriptor)
+        return self.result
+
+
+class NoisyFinancialIngestion(FakeFinancialIngestion):
+    def run(self, descriptor: object) -> FinancialIngestionResult:
+        print("parser-stdout-log")
+        print("parser-stderr-log", file=sys.stderr)
+        return super().run(descriptor)
+
+
+class FakeLocalXbrlProcessor:
+    def parse(self, materialized: object) -> XbrlParseResult:
+        context = RawXbrlContext(
+            context_id="context-1",
+            entity_scheme="https://www.sse.com.cn/entity",
+            entity_identifier="600001.SH",
+            period_start=None,
+            period_end=None,
+            instant=date(2025, 12, 31),
+            dimensions=(),
+        )
+        unit = RawXbrlUnit(
+            unit_id="unit-cny",
+            numerator_measures=("{http://www.xbrl.org/2003/iso4217}CNY",),
+            denominator_measures=(),
+            currency="CNY",
+        )
+        return XbrlParseResult(
+            parser_name="local-fixture-parser",
+            parser_version="1.0",
+            contexts=(context,),
+            units=(unit,),
+            facts=(
+                RawXbrlFact(
+                    raw_qname="{urn:hengce:unmapped}Assets",
+                    fact_name="Assets",
+                    value=Decimal("100"),
+                    decimals="0",
+                    context=context,
+                    unit=unit,
+                ),
+            ),
+            diagnostics=XbrlParseDiagnostics(
+                nil_fact_count=0,
+                text_fact_count=0,
+                error_codes=(),
+            ),
+        )
+
+
+def successful_financial_ingestion() -> FakeFinancialIngestion:
+    return FakeFinancialIngestion(
+        FinancialIngestionResult(
+            filing_id="filing-1",
+            run_id="run-1",
+            run_status=RunStatus.SUCCEEDED,
+            fact_count=4,
+            conflict_count=0,
+            artifact_path="facts.parquet",
+            artifact_hash="a" * 64,
+            error_code=None,
+        )
+    )
+
+
+def xbrl_zip_payload() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("instance.xml", VALID_INSTANCE)
+    return output.getvalue()
+
+
+def invoke_fixture_taxonomy_registration(
+    tmp_path: Path,
+    *,
+    payload: bytes = VALID_TAXONOMY,
+    content_type: str = "application/xml-schema",
+    file_name: str = "test-gaap.xsd",
+    entrypoint: str = "test-gaap.xsd",
+    collected_at: str = "2026-07-26T12:00:00+08:00",
+    source_id: str = "sse",
+    source_url: str = "https://www.sse.com.cn/test-gaap.xsd",
+) -> object:
+    taxonomy = tmp_path / file_name
+    taxonomy.write_bytes(payload)
+    return CliRunner().invoke(
+        app,
+        [
+            "register-xbrl-taxonomy",
+            "--file",
+            str(taxonomy),
+            "--taxonomy-id",
+            "test-gaap-2025",
+            "--source-id",
+            source_id,
+            "--source-url",
+            source_url,
+            "--entrypoint",
+            entrypoint,
+            "--content-type",
+            content_type,
+            "--collected-at",
+            collected_at,
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--policy-file",
+            str(POLICY_FILE),
+        ],
+    )
+
+
+def financial_import_args(
+    tmp_path: Path,
+    *,
+    payload: bytes = VALID_INSTANCE,
+    source_id: str = "sse",
+    source_url: str = "https://www.sse.com.cn/filing.xml",
+    ts_code: str = "600001.SH",
+    exchange: str = "SSE",
+    report_period: str = "2025-12-31",
+    published_at: str = "2026-04-30T09:00:00+08:00",
+    collected_at: str = "2026-07-26T12:00:00+08:00",
+    content_type: str = "application/xbrl+xml",
+    suffix: str = ".xml",
+    taxonomy_ids: tuple[str, ...] = ("test-gaap-2025",),
+    instance_entrypoint: str | None = None,
+    policy_file: Path = POLICY_FILE,
+) -> list[str]:
+    filing = tmp_path / f"filing{suffix}"
+    filing.write_bytes(payload)
+    arguments = [
+        "import-financial-xbrl",
+        "--file",
+        str(filing),
+        "--source-id",
+        source_id,
+        "--source-url",
+        source_url,
+        "--ts-code",
+        ts_code,
+        "--exchange",
+        exchange,
+        "--report-period",
+        report_period,
+        "--report-type",
+        "ANNUAL",
+        "--published-at",
+        published_at,
+        "--collected-at",
+        collected_at,
+        "--content-type",
+        content_type,
+    ]
+    for taxonomy_id in taxonomy_ids:
+        arguments.extend(["--taxonomy-id", taxonomy_id])
+    if instance_entrypoint is not None:
+        arguments.extend(["--instance-entrypoint", instance_entrypoint])
+    arguments.extend(
+        [
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--policy-file",
+            str(policy_file),
+        ]
+    )
+    return arguments
 
 
 def test_init_state_creates_sqlite_database_idempotently(tmp_path: Path) -> None:
@@ -139,18 +336,30 @@ def test_import_security_master_persists_approved_official_file_without_network(
     runner = CliRunner()
     source = tmp_path / "security-master.csv"
     source.write_text(
-        "ts_code,symbol,name,exchange,board,currency,list_date,security_type\n"
-        f"{row}\n",
+        f"ts_code,symbol,name,exchange,board,currency,list_date,security_type\n{row}\n",
         encoding="utf-8",
     )
     client_factory = Mock()
     monkeypatch.setattr(cli.httpx, "Client", client_factory)
 
-    result = runner.invoke(app, [
-        "import-security-master", "--file", str(source), "--source-id", source_id,
-        "--source-url", source_url, "--version", "2026-07-24",
-        "--collected-at", "2026-07-24T09:00:00+00:00", "--data-dir", str(tmp_path),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "import-security-master",
+            "--file",
+            str(source),
+            "--source-id",
+            source_id,
+            "--source-url",
+            source_url,
+            "--version",
+            "2026-07-24",
+            "--collected-at",
+            "2026-07-24T09:00:00+00:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
 
     assert result.exit_code == 0
     output = json.loads(result.stdout)
@@ -355,6 +564,460 @@ def test_import_security_master_rejects_cross_exchange_row_for_declared_source(
     assert result.exit_code != 0
     assert isinstance(result.exception, ValueError)
     assert str(result.exception) == "SECURITY_MASTER_SOURCE_MISMATCH"
+
+
+def test_register_taxonomy_rejects_policy_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    result = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        payload=(b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY secret "body">]><xsd:schema/>'),
+        source_id="unknown",
+        source_url="https://example.com/test-gaap.xsd",
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "SOURCE_POLICY_MISSING"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_register_taxonomy_persists_approved_local_object(tmp_path: Path) -> None:
+    result = invoke_fixture_taxonomy_registration(tmp_path)
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["taxonomy_id"] == "test-gaap-2025"
+    assert len(payload["raw_object_hash"]) == 64
+    assert result.stdout == f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n"
+    assert "<xsd:schema" not in result.stdout
+    references = FinancialFilingRepository(
+        tmp_path / "data" / "state" / "hengce.sqlite3"
+    ).get_taxonomies(("test-gaap-2025",))
+    assert references[0].raw_object_hash == payload["raw_object_hash"]
+
+
+def test_import_financial_xbrl_uses_injected_local_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = successful_financial_ingestion()
+    monkeypatch.setattr(cli, "build_financial_ingestion", lambda *args: fake, raising=False)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            taxonomy_ids=("test-gaap-2025", "exchange-common-2025"),
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["filing_id"] == "filing-1"
+    descriptor = fake.descriptors[0]
+    assert descriptor.discovery_method is DiscoveryMethod.MANUAL_IMPORT
+    assert descriptor.taxonomy_refs == ("test-gaap-2025", "exchange-common-2025")
+    assert descriptor.report_type is ReportType.ANNUAL
+    output = json.loads(result.stdout)
+    assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
+    assert "<xbrli:xbrl" not in result.stdout
+
+
+def test_import_financial_xbrl_suppresses_parser_logs_around_sorted_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    successful = successful_financial_ingestion()
+    noisy = NoisyFinancialIngestion(successful.result)
+    monkeypatch.setattr(cli, "build_financial_ingestion", lambda *args: noisy)
+
+    result = CliRunner().invoke(app, financial_import_args(tmp_path))
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
+    assert "parser-stdout-log" not in result.stdout
+    assert "parser-stderr-log" not in result.stderr
+
+
+def test_register_taxonomy_rejects_unsafe_xml_before_raw_persist(tmp_path: Path) -> None:
+    secret = "private-taxonomy-body"
+    result = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        payload=(
+            f'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY secret "{secret}">]><xsd:schema/>'
+        ).encode(),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_XML_UNSAFE"
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_register_taxonomy_rejects_naive_collected_at_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    result = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        collected_at="2026-07-26T12:00:00",
+    )
+
+    assert result.exit_code != 0
+    assert "collected-at must include an offset" in result.stderr
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_register_taxonomy_rejects_non_relative_zip_entrypoint_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    result = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        payload=xbrl_zip_payload(),
+        content_type="application/zip",
+        file_name="taxonomy.zip",
+        entrypoint="../test-gaap.xsd",
+        source_url="https://www.sse.com.cn/taxonomy.zip",
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ENTRYPOINT_INVALID"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_register_taxonomy_rejects_mismatched_direct_entrypoint_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    result = invoke_fixture_taxonomy_registration(
+        tmp_path,
+        entrypoint="other.xsd",
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ENTRYPOINT_INVALID"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_policy_before_inspecting_or_persisting(
+    tmp_path: Path,
+) -> None:
+    secret = "private-filing-body"
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=(
+                f'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY secret "{secret}">]><xbrl/>'
+            ).encode(),
+            source_id="unknown",
+            source_url="https://example.com/filing.xml",
+        ),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "SOURCE_POLICY_MISSING"
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_unsupported_mime_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(tmp_path, content_type="application/pdf"),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ATTACHMENT_TYPE_INVALID"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_unsafe_xml_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    secret = "private-instance-body"
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=(
+                f'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY secret "{secret}">]><xbrl/>'
+            ).encode(),
+        ),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_XML_UNSAFE"
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_non_iso_report_period_before_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(tmp_path, report_period="2025-1-1"),
+    )
+
+    assert result.exit_code != 0
+    assert "report-period must use YYYY-MM-DD" in result.stderr
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_naive_published_at_before_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(tmp_path, published_at="2026-04-30T09:00:00"),
+    )
+
+    assert result.exit_code != 0
+    assert "published-at must include an offset" in result.stderr
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_naive_collected_at_before_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(tmp_path, collected_at="2026-07-26T12:00:00"),
+    )
+
+    assert result.exit_code != 0
+    assert "collected-at must include an offset" in result.stderr
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+@pytest.mark.parametrize(
+    ("source_id", "source_url", "ts_code", "exchange"),
+    [
+        ("sse", "https://www.sse.com.cn/filing.xml", "600001.SH", "SZSE"),
+        ("sse", "https://www.sse.com.cn/filing.xml", "300001.SZ", "SSE"),
+        ("szse", "https://www.szse.cn/filing.xml", "300001.SZ", "SSE"),
+        ("szse", "https://www.szse.cn/filing.xml", "600001.SH", "SZSE"),
+    ],
+)
+def test_import_financial_xbrl_rejects_exchange_or_ts_code_source_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+    source_url: str,
+    ts_code: str,
+    exchange: str,
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            source_id=source_id,
+            source_url=source_url,
+            ts_code=ts_code,
+            exchange=exchange,
+        ),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_SOURCE_MISMATCH"
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_direct_xml_entrypoint_before_raw_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(tmp_path, instance_entrypoint="instance.xml"),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ENTRYPOINT_INVALID"
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_zip_without_entrypoint_before_raw_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=xbrl_zip_payload(),
+            suffix=".zip",
+            content_type="application/zip",
+        ),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ENTRYPOINT_INVALID"
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_rejects_non_relative_zip_entrypoint_before_raw_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition = Mock()
+    monkeypatch.setattr(cli, "build_financial_ingestion", composition)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=xbrl_zip_payload(),
+            suffix=".zip",
+            content_type="application/zip",
+            instance_entrypoint="../instance.xml",
+        ),
+    )
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ENTRYPOINT_INVALID"
+    assert not composition.mock_calls
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_accepts_szse_code_and_relative_zip_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = successful_financial_ingestion()
+    monkeypatch.setattr(cli, "build_financial_ingestion", lambda *args: fake)
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=xbrl_zip_payload(),
+            source_id="szse",
+            source_url="https://www.szse.cn/filing.zip",
+            ts_code="300001.SZ",
+            exchange="SZSE",
+            suffix=".zip",
+            content_type="application/zip",
+            instance_entrypoint="instance.xml",
+        ),
+    )
+
+    assert result.exit_code == 0
+    descriptor = fake.descriptors[0]
+    assert descriptor.source_id == "szse"
+    assert descriptor.ts_code == "300001.SZ"
+    assert descriptor.exchange == "SZSE"
+    assert descriptor.instance_entrypoint == "instance.xml"
+
+
+def test_import_financial_xbrl_rejects_lowercase_report_type_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    arguments = financial_import_args(tmp_path)
+    arguments[arguments.index("ANNUAL")] = "annual"
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code != 0
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_import_financial_xbrl_missing_taxonomy_returns_sorted_local_result(
+    tmp_path: Path,
+) -> None:
+    result = CliRunner().invoke(app, financial_import_args(tmp_path))
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["run_status"] == "BLOCKED"
+    assert output["error_code"] == "FINANCIAL_TAXONOMY_MISSING"
+    assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
+    assert list((tmp_path / "data" / "raw").rglob("payload.bin"))
+
+
+def test_build_financial_ingestion_uses_empty_mapping_and_single_layer_dataset(
+    tmp_path: Path,
+) -> None:
+    service = cli.build_financial_ingestion(Settings(data_dir=tmp_path / "data"))
+
+    assert service.normalizer._registry.mapping_version == "empty-v1"
+    assert not service.normalizer._registry.mappings
+    assert service.warehouse.dataset == tmp_path / "data" / "warehouse" / "financial_facts"
+
+
+def test_real_default_policy_import_reaches_unmapped_quality_without_secret_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = invoke_fixture_taxonomy_registration(tmp_path)
+    assert registered.exit_code == 0
+    monkeypatch.setattr(
+        cli,
+        "ArelleXbrlProcessor",
+        Mock(return_value=FakeLocalXbrlProcessor()),
+    )
+    monkeypatch.setenv("HENGCE_TUSHARE_TOKEN", "private-environment-token")
+
+    result = CliRunner().invoke(app, financial_import_args(tmp_path))
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["run_status"] == "PARTIAL"
+    assert output["error_code"] == "FINANCIAL_FACT_UNMAPPED"
+    assert "private-environment-token" not in result.stdout
+    assert "<xbrli:xbrl" not in result.stdout
+    artifact_path = Path(output["artifact_path"])
+    assert artifact_path.is_file()
+    assert artifact_path.is_relative_to(tmp_path / "data" / "warehouse" / "financial_facts")
+    assert "financial_facts/financial_facts" not in artifact_path.as_posix()
+
+
+def test_local_xbrl_commands_never_construct_http_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client_factory = Mock()
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+    registered = invoke_fixture_taxonomy_registration(tmp_path)
+    fake = successful_financial_ingestion()
+    monkeypatch.setattr(cli, "build_financial_ingestion", lambda *args: fake)
+
+    imported = CliRunner().invoke(app, financial_import_args(tmp_path))
+
+    assert registered.exit_code == 0
+    assert imported.exit_code == 0
+    assert not client_factory.mock_calls
 
 
 def test_build_market_ingestion_rejects_missing_token_before_client_use(tmp_path: Path) -> None:

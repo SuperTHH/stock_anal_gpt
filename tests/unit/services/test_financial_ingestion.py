@@ -7,6 +7,8 @@ from typing import cast
 
 import pytest
 
+from hengce.bootstrap import bootstrap_state
+from hengce.config import Settings
 from hengce.contracts.enums import (
     ConflictResolutionStatus,
     DiscoveryMethod,
@@ -208,7 +210,7 @@ def approved_policy() -> SourcePolicy:
         source_name="Shanghai Stock Exchange",
         allowed_domains=["www.sse.com.cn"],
         allowed_schemes=["https"],
-        allowed_purposes=["financial_xbrl"],
+        allowed_purposes=["xbrl"],
         fetch_frequency="manual",
         full_text_rule="metadata-only",
         attachment_rule="fixture-research-only",
@@ -366,6 +368,44 @@ def test_ingestion_publishes_valid_filing_and_terminal_run(tmp_path: Path) -> No
     assert run.run_status is RunStatus.SUCCEEDED
     assert run.finished_at == NOW
     assert run.published_report_id == result.filing_id
+
+
+@pytest.mark.parametrize(
+    ("source_id", "source_url", "ts_code", "exchange"),
+    [
+        ("sse", "https://www.sse.com.cn/disclosure/filing.xml", "600001.SH", "SSE"),
+        ("szse", "https://www.szse.cn/disclosure/filing.xml", "300001.SZ", "SZSE"),
+    ],
+)
+def test_default_exchange_xbrl_policy_allows_ingestion_without_purpose_denial(
+    tmp_path: Path,
+    source_id: str,
+    source_url: str,
+    ts_code: str,
+    exchange: str,
+) -> None:
+    defaults = bootstrap_state(Settings(data_dir=tmp_path / "defaults"))
+    policy = defaults.get_policy(source_id)
+    assert policy is not None
+    assert "xbrl" in policy.allowed_purposes
+    assert "financial_xbrl" not in policy.allowed_purposes
+    built = build_service(tmp_path / "service")
+    built.state.upsert_policy(policy)
+    descriptor = built.descriptor.model_copy(
+        update={
+            "source_id": source_id,
+            "source_url": source_url,
+            "ts_code": ts_code,
+            "exchange": exchange,
+        }
+    )
+
+    result = built.service.run(descriptor)
+
+    assert result.run_status is RunStatus.SUCCEEDED
+    assert result.error_code is None
+    assert built.state.count_refusals() == 0
+    assert built.state.list_runs(run_type="financial_xbrl")[0].run_status is RunStatus.SUCCEEDED
 
 
 def test_repeating_same_descriptor_reuses_terminal_result_without_new_parse(

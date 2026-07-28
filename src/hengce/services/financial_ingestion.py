@@ -112,7 +112,7 @@ class FinancialIngestionService:
             policy = self.guard.validate(
                 descriptor.source_id,
                 str(descriptor.source_url),
-                "financial_xbrl",
+                "xbrl",
                 "services.financial_ingestion",
             )
             taxonomies = self.repository.get_taxonomies(descriptor.taxonomy_refs)
