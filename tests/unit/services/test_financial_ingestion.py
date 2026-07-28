@@ -227,21 +227,23 @@ def add_descriptor(
     payload: bytes,
     *,
     collected_at: datetime = NOW,
+    source_id: str = "sse",
+    report_type: ReportType = ReportType.ANNUAL,
 ) -> FilingDescriptor:
     raw = raw_store.put(
-        source_id="sse",
+        source_id=source_id,
         source_url=SOURCE_URL,
         collected_at=collected_at,
         content_type="application/xml",
         payload=payload,
     )
     return FilingDescriptor(
-        source_id="sse",
+        source_id=source_id,
         source_url=SOURCE_URL,
         ts_code="600001.SH",
         exchange="SSE",
         report_period=REPORT_PERIOD,
-        report_type=ReportType.ANNUAL,
+        report_type=report_type,
         published_at=NOW,
         collected_at=collected_at,
         attachment_name="filing.xml",
@@ -487,6 +489,52 @@ def test_correction_links_matching_fact_observations_without_overwriting_old(
     )
     assert all(fact.fact_id != fact.supersedes_id for fact in new_facts)
     assert Path(old_record.expected_path).read_bytes() == old_bytes
+
+
+def test_different_source_does_not_create_correction_chain(tmp_path: Path) -> None:
+    built = build_service(tmp_path)
+    built.service.run(built.descriptor)
+    built.state.upsert_policy(
+        approved_policy().model_copy(
+            update={
+                "source_id": "alternate-sse",
+                "source_name": "Alternate SSE",
+            }
+        )
+    )
+    other_source = add_descriptor(
+        built.raw_store,
+        INSTANCE_TWO,
+        collected_at=NOW.replace(minute=1),
+        source_id="alternate-sse",
+    )
+
+    result = built.service.run(other_source)
+
+    filing = built.repository.get_filing(result.filing_id)
+    assert filing is not None
+    assert not filing.filing.is_restated
+    assert filing.filing.supersedes_id is None
+    assert all(fact.supersedes_id is None for fact in artifact_facts(built, result.filing_id))
+
+
+def test_different_report_type_does_not_create_correction_chain(tmp_path: Path) -> None:
+    built = build_service(tmp_path)
+    built.service.run(built.descriptor)
+    other_report_type = add_descriptor(
+        built.raw_store,
+        INSTANCE_TWO,
+        collected_at=NOW.replace(minute=1),
+        report_type=ReportType.Q1,
+    )
+
+    result = built.service.run(other_report_type)
+
+    filing = built.repository.get_filing(result.filing_id)
+    assert filing is not None
+    assert not filing.filing.is_restated
+    assert filing.filing.supersedes_id is None
+    assert all(fact.supersedes_id is None for fact in artifact_facts(built, result.filing_id))
 
 
 def test_crash_after_artifact_write_recovers_without_duplicate_publication(

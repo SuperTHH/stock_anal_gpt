@@ -252,7 +252,12 @@ class FinancialIngestionService:
                 descriptor.ts_code,
                 descriptor.report_period,
             )
-            if record.filing.filing_id != filing_id and record.artifact_status == "PUBLISHED"
+            if record.filing.source_id == descriptor.source_id
+            and record.filing.ts_code == descriptor.ts_code
+            and record.filing.report_period == descriptor.report_period
+            and record.filing.report_type == descriptor.report_type
+            and record.filing.filing_id != filing_id
+            and record.artifact_status == "PUBLISHED"
         ]
         predecessor = predecessors[-1].filing if predecessors else None
         mapping_version = self.normalizer._registry.mapping_version
