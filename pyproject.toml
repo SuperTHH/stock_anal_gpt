@@ -9,7 +9,9 @@ requires-python = ">=3.12"
 dependencies = [
   "arelle-release>=2.42.1,<2.43",
   "duckdb>=1.0,<2",
+  "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "pypdf>=5,<7",
   "pyarrow>=16,<20",
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.3,<3",
@@ -35,6 +37,9 @@ include = ["src/hengce/data/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py312"

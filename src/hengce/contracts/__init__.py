@@ -1,3 +1,4 @@
+from .derived import DerivedFinancialMetric
 from .financial import (
     FactConflict,
     FilingDescriptor,
@@ -5,12 +6,18 @@ from .financial import (
     FinancialFiling,
     TaxonomyPackageRef,
 )
-from .market import MarketBar, SecurityMaster, TradingStatus
+from .market import CorporateAction, MarketBar, SecurityMaster, TradingStatus
+from .official_event import OfficialEvent, ReportSource
 from .policy import SourcePolicy
 from .run import RefusalRecord, RunRecord
+from .strategy import FactorDetail, ReportSnapshot, StrategyCandidate, StrategyRunEvidence
 
 __all__ = [
     "MarketBar",
+    "CorporateAction",
+    "OfficialEvent",
+    "ReportSource",
+    "DerivedFinancialMetric",
     "FactConflict",
     "FilingDescriptor",
     "FinancialFact",
@@ -21,4 +28,8 @@ __all__ = [
     "SourcePolicy",
     "TradingStatus",
     "TaxonomyPackageRef",
+    "FactorDetail",
+    "ReportSnapshot",
+    "StrategyCandidate",
+    "StrategyRunEvidence",
 ]

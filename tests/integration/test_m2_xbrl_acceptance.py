@@ -682,6 +682,8 @@ def test_repository_contains_only_marked_fictional_xbrl_fixtures() -> None:
         ".ruff_cache",
         ".venv",
         "__pycache__",
+        "dist",
+        "node_modules",
     }
     fixture_files = sorted(
         path.relative_to(REPOSITORY_ROOT).as_posix()

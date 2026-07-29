@@ -1,9 +1,10 @@
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
 from .base import FactBase
+from .enums import ActionStatus, ActionType
 
 
 class SecurityMaster(BaseModel):
@@ -56,4 +57,42 @@ class MarketBar(FactBase):
             raise ValueError("low is above another price")
         if self.volume < 0 or self.amount < 0:
             raise ValueError("volume and amount must be non-negative")
+        return self
+
+
+class CorporateAction(FactBase):
+    ts_code: str
+    action_type: ActionType
+    record_date: date
+    ex_date: date
+    pay_date: date | None = None
+    cash_dividend_per_share: Decimal | None = None
+    stock_dividend_ratio: Decimal | None = None
+    split_ratio: Decimal | None = None
+    rights_ratio: Decimal | None = None
+    rights_price: Decimal | None = None
+    action_status: ActionStatus
+
+    @field_validator("published_at")
+    @classmethod
+    def publication_is_required(cls, value: object, info: ValidationInfo) -> object:
+        if value is None:
+            raise ValueError(f"{info.field_name} is required")
+        return value
+
+    @model_validator(mode="after")
+    def validate_action_terms(self) -> "CorporateAction":
+        if self.record_date > self.ex_date:
+            raise ValueError("record_date must not follow ex_date")
+        if self.pay_date is not None and self.pay_date < self.ex_date:
+            raise ValueError("pay_date must not precede ex_date")
+
+        required_terms = {
+            ActionType.CASH_DIVIDEND: (self.cash_dividend_per_share,),
+            ActionType.STOCK_DIVIDEND: (self.stock_dividend_ratio,),
+            ActionType.SPLIT: (self.split_ratio,),
+            ActionType.RIGHTS_ISSUE: (self.rights_ratio, self.rights_price),
+        }[self.action_type]
+        if any(value is None or value <= 0 for value in required_terms):
+            raise ValueError("action terms must be positive and complete")
         return self
