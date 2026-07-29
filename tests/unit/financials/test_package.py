@@ -29,6 +29,25 @@ MIB = 1024 * 1024
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "xbrl" / "minimal"
 
 
+def create_directory_link(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(link),
+                str(target),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return
+    link.symlink_to(target, target_is_directory=True)
+
+
 def store_payload(store: RawObjectStore, name: str, content_type: str, payload: bytes) -> str:
     return store.put(
         source_id="sse",
@@ -342,19 +361,7 @@ def test_materializer_does_not_follow_junction_inserted_after_path_validation(
     ) -> list[tuple[ZipInfo, Path]]:
         planned = original_validate(materializer, members, destination, root)
         destination.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                "cmd",
-                "/c",
-                "mklink",
-                "/J",
-                str(destination / "nested"),
-                str(outside),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        create_directory_link(destination / "nested", outside)
         return planned
 
     monkeypatch.setattr(
@@ -383,19 +390,7 @@ def test_materializer_does_not_follow_junction_during_direct_copy(
         nonlocal inserted
         validated = original_contained_target(root, target)
         if not inserted and "attachments" in target.parts:
-            subprocess.run(
-                [
-                    "cmd",
-                    "/c",
-                    "mklink",
-                    "/J",
-                    str(root / "attachments"),
-                    str(outside),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            create_directory_link(root / "attachments", outside)
             inserted = True
         return validated
 

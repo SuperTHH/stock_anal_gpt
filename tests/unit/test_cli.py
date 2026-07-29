@@ -1,8 +1,10 @@
 import hashlib
 import io
 import json
+import os
 import socket
 import sys
+import sysconfig
 import zipfile
 from datetime import date
 from decimal import Decimal
@@ -297,14 +299,17 @@ def test_wheel_contains_default_seed_and_installed_cli_initializes_state(tmp_pat
         check=False,
     )
     assert install.returncode == 0, install.stderr
-    wrapper = target / "Scripts" / "hengce.exe"
+    prefix_vars = {"base": str(target), "platbase": str(target)}
+    scripts = Path(sysconfig.get_path("scripts", vars=prefix_vars))
+    site_packages = Path(sysconfig.get_path("purelib", vars=prefix_vars))
+    wrapper = scripts / ("hengce.exe" if os.name == "nt" else "hengce")
     assert wrapper.is_file()
     command = run(
         [str(wrapper), "init-state", "--data-dir", str(data_dir)],
         cwd=tmp_path,
         env={
-            **__import__("os").environ,
-            "PYTHONPATH": str(target / "Lib" / "site-packages"),
+            **os.environ,
+            "PYTHONPATH": str(site_packages),
         },
         capture_output=True,
         text=True,
