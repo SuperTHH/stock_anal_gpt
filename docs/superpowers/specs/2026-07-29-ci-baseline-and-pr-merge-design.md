@@ -81,10 +81,14 @@ Ubuntu + Python 3.12，安装 `.[dev]` 后执行：
 
 ```text
 python -m ruff check .
-git diff --check
+git diff --check "$(git merge-base HEAD "origin/${{ github.base_ref }}")"...HEAD
+git diff --check HEAD^ HEAD
 ```
 
-`git diff --check` 用于阻止尾随空格和冲突标记进入基线。
+第一条命令用于 Pull Request 事件，以目标分支的 merge base 为检查基线；第二条命令
+用于 push 和手动事件，检查 `HEAD^..HEAD`。静态检查任务必须使用完整 Git 历史，以确保
+`git diff --check` 实际覆盖本次变更，而不是对干净工作树执行空检查。该检查用于阻止
+尾随空格和冲突标记进入基线。
 
 ### 4.3 前端任务
 
