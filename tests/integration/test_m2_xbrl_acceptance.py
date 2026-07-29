@@ -1,6 +1,7 @@
 import io
 import socket
 import sqlite3
+import subprocess
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -675,22 +676,16 @@ def test_unmapped_qname_is_auditable_but_not_canonical(tmp_path: Path) -> None:
 def test_repository_contains_only_marked_fictional_xbrl_fixtures() -> None:
     """AC-XF09/10: the full-suite gate uses only marked fictional XBRL fixtures."""
     prohibited_suffixes = {".xbrl", ".xml", ".xsd", ".zip", ".parquet"}
-    local_only_directories = {
-        ".git",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "dist",
-        "node_modules",
-    }
+    tracked_files = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.decode("utf-8").split("\0")
     fixture_files = sorted(
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in REPOSITORY_ROOT.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in prohibited_suffixes
-        and not local_only_directories.intersection(path.relative_to(REPOSITORY_ROOT).parts)
+        path
+        for path in tracked_files
+        if path and Path(path).suffix.lower() in prohibited_suffixes
     )
     assert fixture_files == [
         "tests/fixtures/xbrl/minimal/instance.xml",
