@@ -133,7 +133,7 @@ def descriptor() -> FilingDescriptor:
     return FilingDescriptor(
         source_id="sse",
         source_url="https://www.sse.com.cn/disclosure/test.xml",
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=date(2025, 12, 31),
         report_type=ReportType.ANNUAL,
@@ -163,7 +163,7 @@ def financial_fact_payload() -> dict[str, object]:
         "license_policy": "sse-personal-research",
         "quality_status": QualityStatus.VALID,
         "valid_from": NOW,
-        "ts_code": "600001.SH",
+        "ts_code": "699999.SH",
         "report_period": date(2025, 12, 31),
         "report_type": ReportType.ANNUAL,
         "statement_type": StatementType.BALANCE_SHEET,
@@ -177,7 +177,7 @@ def financial_fact_payload() -> dict[str, object]:
         "currency": "CNY",
         "filing_id": "filing-1",
         "context_signature": "context-hash",
-        "entity_identifier": "600001.SH",
+        "entity_identifier": "699999.SH",
         "period_start": None,
         "period_end": None,
         "instant": date(2025, 12, 31),
@@ -843,7 +843,7 @@ Create `test-gaap.xsd`:
 </xsd:schema>
 ```
 
-Create `instance.xml` with entity `600001.SH`, instant `2025-12-31`, duration
+Create `instance.xml` with entity `699999.SH`, instant `2025-12-31`, duration
 `2025-01-01` through `2025-12-31`, CNY unit, and fictional values:
 Assets `1000`, Liabilities `400`, Equity `600`, Revenue `2000`. Add a schemaRef
 to `test-gaap.xsd`.
@@ -1373,7 +1373,7 @@ def test_query_requires_both_timezone_aware_cutoffs(tmp_path: Path) -> None:
     query = prepared_query(tmp_path)
     with pytest.raises(ValueError, match="FINANCIAL_QUERY_CUTOFF_INVALID"):
         query.query_financial_facts(
-            ts_code="600001.SH",
+            ts_code="699999.SH",
             report_period=date(2025, 12, 31),
             canonical_fact_names=frozenset({"assets"}),
             as_of=datetime(2026, 4, 30),
@@ -1384,14 +1384,14 @@ def test_query_requires_both_timezone_aware_cutoffs(tmp_path: Path) -> None:
 def test_correction_is_invisible_before_publication_and_visible_after(tmp_path: Path) -> None:
     query, old, new = prepared_old_and_corrected_query(tmp_path)
     before = query.query_financial_facts(
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         report_period=date(2025, 12, 31),
         canonical_fact_names=frozenset({"assets"}),
         as_of=new.filing.published_at - timedelta(seconds=1),
         known_at=new.filing.valid_from,
     )
     after = query.query_financial_facts(
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         report_period=date(2025, 12, 31),
         canonical_fact_names=frozenset({"assets"}),
         as_of=new.filing.published_at,
@@ -1404,7 +1404,7 @@ def test_correction_is_invisible_before_publication_and_visible_after(tmp_path: 
 def test_public_unusable_correction_blocks_instead_of_falling_back(tmp_path: Path) -> None:
     query, correction = prepared_unusable_correction(tmp_path)
     result = query.query_financial_facts(
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         report_period=date(2025, 12, 31),
         canonical_fact_names=frozenset({"assets"}),
         as_of=correction.filing.published_at,
@@ -1537,7 +1537,7 @@ def test_repeating_same_descriptor_is_idempotent(tmp_path: Path) -> None:
     second = service.run(filing_descriptor())
 
     assert first == second
-    assert len(repository.list_filing_versions("600001.SH", date(2025, 12, 31))) == 1
+    assert len(repository.list_filing_versions("699999.SH", date(2025, 12, 31))) == 1
 ```
 
 - [ ] **Step 2: Write failing block, conflict, correction, and recovery tests**
@@ -1562,7 +1562,7 @@ def test_crash_after_artifact_write_recovers_without_duplicate(tmp_path: Path) -
     recovered, _, _ = build_service(tmp_path)
     result = recovered.run(filing_descriptor())
     assert result.run_status is RunStatus.SUCCEEDED
-    assert len(repository.list_filing_versions("600001.SH", date(2025, 12, 31))) == 1
+    assert len(repository.list_filing_versions("699999.SH", date(2025, 12, 31))) == 1
 
 
 def test_correction_links_matching_facts_and_never_overwrites_old(tmp_path: Path) -> None:
@@ -1575,7 +1575,7 @@ def test_correction_links_matching_facts_and_never_overwrites_old(tmp_path: Path
             supersedes_id=old.filing_id,
         )
     )
-    versions = repository.list_filing_versions("600001.SH", date(2025, 12, 31))
+    versions = repository.list_filing_versions("699999.SH", date(2025, 12, 31))
     assert [item.filing.filing_id for item in versions] == [old.filing_id, new.filing_id]
     assert versions[1].filing.supersedes_id == old.filing_id
 ```
@@ -1848,7 +1848,7 @@ If policy or attachment validation fails, `RawObjectStore.put` is never called.
 --file PATH
 --source-id sse|szse
 --source-url HTTPS_URL
---ts-code 600001.SH|300001.SZ
+--ts-code 699999.SH|300001.SZ
 --exchange SSE|SZSE
 --report-period YYYY-MM-DD
 --report-type ANNUAL|Q1|HALF_YEAR|Q3
@@ -2014,7 +2014,7 @@ def test_repository_contains_only_marked_fictional_xbrl_fixtures() -> None:
         if path.suffix in {".xml", ".xsd"}
     )
     assert "urn:hengce:test-gaap" in fixture_text
-    assert "600001.SH" in fixture_text
+    assert "699999.SH" in fixture_text
     assert "FIXTURE DATA - NOT A REAL ISSUER" in fixture_text
 ```
 

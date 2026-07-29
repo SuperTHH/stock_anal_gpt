@@ -356,7 +356,7 @@ def test_latest_security_master_snapshot_uses_absolute_time_then_snapshot_id(
     assert repository.get_latest_security_master_snapshot("sse") == later
 
     same_instant_later_id = repository.save_security_master_snapshot(
-        [security("600001.SH", "MAIN_SH")],
+        [security("699999.SH", "MAIN_SH")],
         source_id="sse",
         source_url="https://www.sse.com.cn/master.csv",
         collected_at=datetime(2026, 7, 24, 11, tzinfo=timezone(timedelta(hours=8))),

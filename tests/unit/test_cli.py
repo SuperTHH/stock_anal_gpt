@@ -76,7 +76,7 @@ class FakeLocalXbrlProcessor:
         context = RawXbrlContext(
             context_id="context-1",
             entity_scheme="https://www.sse.com.cn/entity",
-            entity_identifier="600001.SH",
+            entity_identifier="699999.SH",
             period_start=None,
             period_end=None,
             instant=date(2025, 12, 31),
@@ -178,7 +178,7 @@ def financial_import_args(
     payload: bytes = VALID_INSTANCE,
     source_id: str = "sse",
     source_url: str = "https://www.sse.com.cn/filing.xml",
-    ts_code: str = "600001.SH",
+    ts_code: str = "699999.SH",
     exchange: str = "SSE",
     report_period: str = "2025-12-31",
     published_at: str = "2026-04-30T09:00:00+08:00",
@@ -891,6 +891,31 @@ def test_import_financial_xbrl_rejects_unsafe_xml_before_raw_persist(
     assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
 
 
+def test_import_financial_xbrl_rejects_unsafe_zip_member_before_raw_persist(
+    tmp_path: Path,
+) -> None:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("instance.xml", VALID_INSTANCE)
+        archive.writestr("../escape.xml", b"<xbrl/>")
+
+    result = CliRunner().invoke(
+        app,
+        financial_import_args(
+            tmp_path,
+            payload=output.getvalue(),
+            content_type="application/zip",
+            suffix=".zip",
+            instance_entrypoint="instance.xml",
+        ),
+    )
+
+    assert list((tmp_path / "data" / "raw").rglob("payload.bin")) == []
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ARCHIVE_UNSAFE_PATH"
+
+
 def test_import_financial_xbrl_rejects_non_iso_report_period_before_composition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -945,10 +970,10 @@ def test_import_financial_xbrl_rejects_naive_collected_at_before_composition(
 @pytest.mark.parametrize(
     ("source_id", "source_url", "ts_code", "exchange"),
     [
-        ("sse", "https://www.sse.com.cn/filing.xml", "600001.SH", "SZSE"),
+        ("sse", "https://www.sse.com.cn/filing.xml", "699999.SH", "SZSE"),
         ("sse", "https://www.sse.com.cn/filing.xml", "300001.SZ", "SSE"),
         ("szse", "https://www.szse.cn/filing.xml", "300001.SZ", "SSE"),
-        ("szse", "https://www.szse.cn/filing.xml", "600001.SH", "SZSE"),
+        ("szse", "https://www.szse.cn/filing.xml", "699999.SH", "SZSE"),
     ],
 )
 def test_import_financial_xbrl_rejects_exchange_or_ts_code_source_mismatch(

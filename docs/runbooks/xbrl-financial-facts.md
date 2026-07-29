@@ -35,6 +35,8 @@ $env:PYTHONPATH='src'
 - ZIP 必须显式给出 archive 内的相对 entrypoint。entrypoint 不能是绝对路径，不能含 `..`、反斜杠、盘符或 NUL。
 - XML 中的 DTD/ENTITY、ZIP 路径穿越、链接成员、危险 Windows 路径、超限文件数/大小/压缩比都会被拒绝。
 
+ZIP 会在写入 Raw Store 前完成 central directory、local record、成员路径、链接、解压大小/压缩比和成员 XML 安全扫描；解析前 materializer 会再次执行相同规则，形成纵深防御。任一预检失败都不会留下 raw `payload.bin`。
+
 ## 登记 taxonomy
 
 先用帮助命令确认当前安装的参数：

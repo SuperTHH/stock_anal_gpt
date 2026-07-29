@@ -148,7 +148,7 @@ def raw_fact(
         context=RawXbrlContext(
             context_id=context_id or f"context-{name}",
             entity_scheme="https://www.sse.com.cn/entity",
-            entity_identifier="600001.SH",
+            entity_identifier="699999.SH",
             period_start=None,
             period_end=None,
             instant=REPORT_PERIOD,
@@ -242,7 +242,7 @@ def add_descriptor(
     return FilingDescriptor(
         source_id=source_id,
         source_url=SOURCE_URL,
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=REPORT_PERIOD,
         report_type=report_type,
@@ -373,7 +373,7 @@ def test_ingestion_publishes_valid_filing_and_terminal_run(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("source_id", "source_url", "ts_code", "exchange"),
     [
-        ("sse", "https://www.sse.com.cn/disclosure/filing.xml", "600001.SH", "SSE"),
+        ("sse", "https://www.sse.com.cn/disclosure/filing.xml", "699999.SH", "SSE"),
         ("szse", "https://www.szse.cn/disclosure/filing.xml", "300001.SZ", "SZSE"),
     ],
 )
@@ -418,7 +418,7 @@ def test_repeating_same_descriptor_reuses_terminal_result_without_new_parse(
 
     assert first == second
     assert built.processor.calls == 1
-    assert len(built.repository.list_filing_versions("600001.SH", REPORT_PERIOD)) == 1
+    assert len(built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)) == 1
     assert len(built.state.list_runs(run_type="financial_xbrl")) == 1
     with sqlite3.connect(built.state.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM financial_filings").fetchone()[0] == 1
@@ -517,7 +517,7 @@ def test_correction_links_matching_fact_observations_without_overwriting_old(
 
     new = built.service.run(restated_descriptor)
 
-    versions = built.repository.list_filing_versions("600001.SH", REPORT_PERIOD)
+    versions = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)
     assert [item.filing.filing_id for item in versions] == [old.filing_id, new.filing_id]
     assert versions[1].filing.is_restated
     assert versions[1].filing.supersedes_id == old.filing_id
@@ -586,7 +586,7 @@ def test_crash_after_artifact_write_recovers_without_duplicate_publication(
     with pytest.raises(RuntimeError, match="injected crash"):
         built.service.run(built.descriptor)
 
-    pending = built.repository.list_filing_versions("600001.SH", REPORT_PERIOD)
+    pending = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)
     assert len(pending) == 1
     assert pending[0].artifact_status == "PENDING"
     assert Path(pending[0].expected_path).is_file()
@@ -598,7 +598,7 @@ def test_crash_after_artifact_write_recovers_without_duplicate_publication(
     result = recovered.service.run(recovered.descriptor)
 
     assert result.run_status is RunStatus.SUCCEEDED
-    assert len(recovered.repository.list_filing_versions("600001.SH", REPORT_PERIOD)) == 1
+    assert len(recovered.repository.list_filing_versions("699999.SH", REPORT_PERIOD)) == 1
     terminal_run = recovered.state.list_runs(run_type="financial_xbrl")[0]
     assert terminal_run.run_status is RunStatus.SUCCEEDED
     assert terminal_run.retry_count == 1

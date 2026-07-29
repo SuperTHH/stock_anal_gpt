@@ -7,7 +7,7 @@ import re
 import stat
 import struct
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -406,6 +406,7 @@ class LocalAttachmentInspector:
         if suffix == ".zip":
             if not prefix.startswith(b"PK"):
                 raise _error("FINANCIAL_ATTACHMENT_TYPE_INVALID")
+            _preflight_zip_archive(path)
             return
 
         if not _has_xml_signature(prefix):
@@ -604,18 +605,13 @@ class SafePackageMaterializer:
         destination: Path,
         root: Path,
     ) -> tuple[Path, ...]:
-        try:
-            with ZipFile(archive) as handle:
-                members = handle.infolist()
-                planned = self._validate_central_directory(members, destination, root)
-                _validate_raw_records(archive, handle, members)
-                _ensure_safe_directory(root, destination)
-                self._stream_members(handle, planned, root)
-                return tuple(target for member, target in planned if not member.is_dir())
-        except _PackageError:
-            raise
-        except Exception:
-            raise _error("FINANCIAL_ARCHIVE_INVALID") from None
+        return _extract_zip_archive(
+            archive,
+            destination,
+            root,
+            validate_central_directory=self._validate_central_directory,
+            stream_members=self._stream_members,
+        )
 
     def _validate_central_directory(
         self,
@@ -623,36 +619,12 @@ class SafePackageMaterializer:
         destination: Path,
         root: Path,
     ) -> list[tuple[ZipInfo, Path]]:
-        if len(members) > self._limits.max_files:
-            raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-
-        declared_total = 0
-        seen_targets: set[tuple[str, ...]] = set()
-        planned: list[tuple[ZipInfo, Path]] = []
-        for member in members:
-            raw_name = member.orig_filename
-            relative = _safe_archive_member(raw_name)
-            if _is_symlink(member):
-                raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH")
-
-            target = _contained_target(root, destination.joinpath(*relative.parts))
-            target_key = _windows_landing_key(relative)
-            if target_key in seen_targets:
-                raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH")
-            seen_targets.add(target_key)
-
-            if member.file_size > self._limits.max_file_bytes:
-                raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-            declared_total += member.file_size
-            if declared_total > self._limits.max_total_bytes:
-                raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-            if member.file_size and (
-                member.compress_size == 0
-                or member.file_size > member.compress_size * self._limits.max_compression_ratio
-            ):
-                raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-            planned.append((member, target))
-        return planned
+        return _validate_archive_central_directory(
+            members,
+            destination,
+            root,
+            self._limits,
+        )
 
     def _stream_members(
         self,
@@ -660,36 +632,130 @@ class SafePackageMaterializer:
         planned: list[tuple[ZipInfo, Path]],
         root: Path,
     ) -> None:
-        actual_total = 0
-        for member, target in planned:
-            if member.is_dir():
-                _ensure_safe_directory(root, target)
-                continue
+        _stream_archive_members(archive, planned, root, self._limits)
 
-            actual_member = 0
-            with (
-                archive.open(member, "r") as source,
-                _safe_output_file(
-                    root,
-                    target,
-                ) as output,
-            ):
-                while chunk := source.read(_COPY_CHUNK_BYTES):
-                    actual_member += len(chunk)
-                    actual_total += len(chunk)
-                    if (
-                        actual_member > self._limits.max_file_bytes
-                        or actual_total > self._limits.max_total_bytes
-                    ):
-                        raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
-                    output.write(chunk)
-                output.flush()
-                output.seek(0)
-                prefix = output.read(256)
-                if _has_xml_signature(prefix):
-                    _reject_unsafe_xml_stream(output)
-            if actual_member != member.file_size:
-                raise _error("FINANCIAL_ARCHIVE_INVALID")
+
+def _preflight_zip_archive(path: Path) -> None:
+    with TemporaryDirectory(prefix="hengce-xbrl-preflight-") as temporary_name:
+        root = Path(temporary_name).resolve()
+        limits = AttachmentLimits()
+        _extract_zip_archive(
+            path,
+            root / "archive",
+            root,
+            validate_central_directory=lambda members, destination, archive_root: (
+                _validate_archive_central_directory(
+                    members,
+                    destination,
+                    archive_root,
+                    limits,
+                )
+            ),
+            stream_members=lambda archive, planned, archive_root: _stream_archive_members(
+                archive,
+                planned,
+                archive_root,
+                limits,
+            ),
+        )
+
+
+def _extract_zip_archive(
+    archive: Path,
+    destination: Path,
+    root: Path,
+    *,
+    validate_central_directory: Callable[
+        [list[ZipInfo], Path, Path],
+        list[tuple[ZipInfo, Path]],
+    ],
+    stream_members: Callable[[ZipFile, list[tuple[ZipInfo, Path]], Path], None],
+) -> tuple[Path, ...]:
+    try:
+        with ZipFile(archive) as handle:
+            members = handle.infolist()
+            planned = validate_central_directory(members, destination, root)
+            _validate_raw_records(archive, handle, members)
+            _ensure_safe_directory(root, destination)
+            stream_members(handle, planned, root)
+            return tuple(target for member, target in planned if not member.is_dir())
+    except _PackageError:
+        raise
+    except Exception:
+        raise _error("FINANCIAL_ARCHIVE_INVALID") from None
+
+
+def _validate_archive_central_directory(
+    members: list[ZipInfo],
+    destination: Path,
+    root: Path,
+    limits: AttachmentLimits,
+) -> list[tuple[ZipInfo, Path]]:
+    if len(members) > limits.max_files:
+        raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+
+    declared_total = 0
+    seen_targets: set[tuple[str, ...]] = set()
+    planned: list[tuple[ZipInfo, Path]] = []
+    for member in members:
+        raw_name = member.orig_filename
+        relative = _safe_archive_member(raw_name)
+        if _is_symlink(member):
+            raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH")
+
+        target = _contained_target(root, destination.joinpath(*relative.parts))
+        target_key = _windows_landing_key(relative)
+        if target_key in seen_targets:
+            raise _error("FINANCIAL_ARCHIVE_UNSAFE_PATH")
+        seen_targets.add(target_key)
+
+        if member.file_size > limits.max_file_bytes:
+            raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+        declared_total += member.file_size
+        if declared_total > limits.max_total_bytes:
+            raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+        if member.file_size and (
+            member.compress_size == 0
+            or member.file_size > member.compress_size * limits.max_compression_ratio
+        ):
+            raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+        planned.append((member, target))
+    return planned
+
+
+def _stream_archive_members(
+    archive: ZipFile,
+    planned: list[tuple[ZipInfo, Path]],
+    root: Path,
+    limits: AttachmentLimits,
+) -> None:
+    actual_total = 0
+    for member, target in planned:
+        if member.is_dir():
+            _ensure_safe_directory(root, target)
+            continue
+
+        actual_member = 0
+        with (
+            archive.open(member, "r") as source,
+            _safe_output_file(
+                root,
+                target,
+            ) as output,
+        ):
+            while chunk := source.read(_COPY_CHUNK_BYTES):
+                actual_member += len(chunk)
+                actual_total += len(chunk)
+                if actual_member > limits.max_file_bytes or actual_total > limits.max_total_bytes:
+                    raise _error("FINANCIAL_ARCHIVE_LIMIT_EXCEEDED")
+                output.write(chunk)
+            output.flush()
+            output.seek(0)
+            prefix = output.read(256)
+            if _has_xml_signature(prefix):
+                _reject_unsafe_xml_stream(output)
+        if actual_member != member.file_size:
+            raise _error("FINANCIAL_ARCHIVE_INVALID")
 
 
 def _sanitized_declared_name(name: str) -> str:

@@ -144,7 +144,7 @@ class AcceptanceSystem:
             for row in self.warehouse.read_artifact(Path(record.expected_path))
         )
 
-    def recover_after_artifact_crash(self) -> FinancialIngestionResult:
+    def crash_after_artifact_write(self) -> FinancialArtifactRecord:
         crashed = False
 
         def crash_once(stage: str) -> None:
@@ -164,7 +164,10 @@ class AcceptanceSystem:
         assert len(pending) == 1
         assert pending[0].artifact_status == "PENDING"
         assert Path(pending[0].expected_path).is_file()
+        return pending[0]
 
+    def recover_crashed_filing(self) -> FinancialIngestionResult:
+        self.clock.value = self.descriptor.collected_at
         return self._service().run(self.descriptor)
 
     def write_unregistered_parquet(self, filing_id: str) -> Path:
@@ -357,7 +360,7 @@ def _fixture_descriptor(
     return FilingDescriptor(
         source_id="sse",
         source_url=FIXTURE_SOURCE_URL,
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=FIXTURE_REPORT_PERIOD,
         report_type=ReportType.ANNUAL,
@@ -451,7 +454,7 @@ def test_xbrl_kernel_is_offline_traceable_and_idempotent(
     assert len(result.facts) == 4
     assert all(len(str(row["content_hash"])) == 64 for row in result.facts)
     assert all(str(row["source_url"]).startswith("https://www.sse.com.cn/") for row in result.facts)
-    assert len(system.repository.list_filing_versions("600001.SH", FIXTURE_REPORT_PERIOD)) == 1
+    assert len(system.repository.list_filing_versions("699999.SH", FIXTURE_REPORT_PERIOD)) == 1
     with sqlite3.connect(system.state.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM financial_filings").fetchone()[0] == 1
 
@@ -466,6 +469,10 @@ def test_fixed_replay_uses_old_then_corrected_value_and_blocks_bad_correction(
     assert system.asset_value(
         as_of=corrected.filing.published_at - timedelta(seconds=1),
         known_at=corrected.filing.valid_from,
+    ) == Decimal("1000")
+    assert system.asset_value(
+        as_of=corrected.filing.published_at,
+        known_at=corrected.filing.valid_from - timedelta(seconds=1),
     ) == Decimal("1000")
     assert system.asset_value(
         as_of=corrected.filing.published_at,
@@ -521,8 +528,8 @@ def test_missing_taxonomy_and_conflict_never_become_queryable(tmp_path: Path) ->
             _fixture_instance_payload(),
             ".zip",
             "application/zip",
-            "../instance.xml",
-            "FINANCIAL_ENTRYPOINT_INVALID",
+            "instance.xml",
+            "FINANCIAL_ARCHIVE_UNSAFE_PATH",
             id="unsafe-zip-before-raw-persistence",
         ),
     ],
@@ -536,12 +543,13 @@ def test_unsafe_local_input_is_refused_before_raw_persistence(
     entrypoint: str | None,
     expected_code: str,
 ) -> None:
-    """Unsafe XML and ZIP entrypoints fail closed before immutable raw storage."""
+    """Unsafe XML and ZIP members fail closed before immutable raw storage."""
     attachment = tmp_path / f"unsafe-{case}{suffix}"
     if suffix == ".zip":
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as handle:
             handle.writestr("instance.xml", payload)
+            handle.writestr("../escape.xml", b"<xbrl/>")
         attachment.write_bytes(archive.getvalue())
     else:
         attachment.write_bytes(payload)
@@ -555,7 +563,7 @@ def test_unsafe_local_input_is_refused_before_raw_persistence(
         "--source-url",
         FIXTURE_SOURCE_URL,
         "--ts-code",
-        "600001.SH",
+        "699999.SH",
         "--exchange",
         "SSE",
         "--report-period",
@@ -578,17 +586,33 @@ def test_unsafe_local_input_is_refused_before_raw_persistence(
 
     result = CliRunner().invoke(app, arguments)
 
+    assert list((tmp_path / "data" / "raw").rglob("payload.bin")) == []
     assert result.exit_code != 0
     assert result.exception is not None
     assert str(result.exception) == expected_code
-    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
 
 
-def test_crash_recovery_and_manifest_only_visibility(tmp_path: Path) -> None:
-    """AC-XF07: recovery is idempotent and unregistered Parquet stays invisible."""
+def test_crash_is_invisible_until_idempotent_recovery(tmp_path: Path) -> None:
+    """AC-XF07: a crashed artifact is invisible until one idempotent recovery."""
     system = build_acceptance_system(tmp_path)
 
-    recovered = system.recover_after_artifact_crash()
+    pending = system.crash_after_artifact_write()
+    before_recovery = system.query(
+        canonical_names=frozenset({"assets"}),
+        as_of=system.descriptor.published_at,
+        known_at=system.descriptor.collected_at,
+    )
+
+    assert pending.artifact_status == "PENDING"
+    assert before_recovery.facts == ()
+    assert before_recovery.filing_ids == ()
+
+    recovered = system.recover_crashed_filing()
+    after_recovery = system.query(
+        canonical_names=frozenset({"assets"}),
+        as_of=system.descriptor.published_at,
+        known_at=system.descriptor.collected_at,
+    )
 
     assert recovered.run_status is RunStatus.SUCCEEDED
     versions = system.repository.list_filing_versions(
@@ -600,8 +624,15 @@ def test_crash_recovery_and_manifest_only_visibility(tmp_path: Path) -> None:
     run = system.state.list_runs(run_type="financial_xbrl")[0]
     assert run.run_status is RunStatus.SUCCEEDED
     assert run.retry_count == 1
+    assert len(after_recovery.facts) == 1
+    assert after_recovery.filing_ids == (recovered.filing_id,)
 
-    rogue_path = system.write_unregistered_parquet(recovered.filing_id)
+
+def test_unregistered_parquet_is_never_visible(tmp_path: Path) -> None:
+    """AC-XF07: a valid Parquet without a published manifest stays invisible."""
+    system = build_acceptance_system(tmp_path)
+    registered = system.ingest_valid_fixture()
+    rogue_path = system.write_unregistered_parquet(registered.filing_id)
     result = system.query(
         canonical_names=frozenset({"rogue_metric"}),
         as_of=system.descriptor.published_at,
@@ -609,7 +640,7 @@ def test_crash_recovery_and_manifest_only_visibility(tmp_path: Path) -> None:
     )
     assert rogue_path.is_file()
     assert result.facts == ()
-    assert result.filing_ids == (recovered.filing_id,)
+    assert result.filing_ids == (registered.filing_id,)
 
 
 def test_unmapped_qname_is_auditable_but_not_canonical(tmp_path: Path) -> None:
@@ -635,24 +666,32 @@ def test_unmapped_qname_is_auditable_but_not_canonical(tmp_path: Path) -> None:
 
 def test_repository_contains_only_marked_fictional_xbrl_fixtures() -> None:
     """AC-XF09/10: the full-suite gate uses only marked fictional XBRL fixtures."""
-    production_data = REPOSITORY_ROOT / "data"
     prohibited_suffixes = {".xbrl", ".xml", ".xsd", ".zip", ".parquet"}
-    offenders = (
-        [
-            path.relative_to(REPOSITORY_ROOT)
-            for path in production_data.rglob("*")
-            if path.is_file() and path.suffix.lower() in prohibited_suffixes
-        ]
-        if production_data.exists()
-        else []
+    local_only_directories = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+    }
+    fixture_files = sorted(
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in REPOSITORY_ROOT.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in prohibited_suffixes
+        and not local_only_directories.intersection(path.relative_to(REPOSITORY_ROOT).parts)
     )
-    assert offenders == []
+    assert fixture_files == [
+        "tests/fixtures/xbrl/minimal/instance.xml",
+        "tests/fixtures/xbrl/minimal/test-gaap.xsd",
+    ]
 
-    fixture_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(FIXTURE_ROOT.iterdir())
-        if path.suffix in {".xml", ".xsd"}
-    )
-    assert "urn:hengce:test-gaap" in fixture_text
-    assert "600001.SH" in fixture_text
-    assert "FIXTURE DATA - NOT A REAL ISSUER" in fixture_text
+    instance_text = (FIXTURE_ROOT / "instance.xml").read_text(encoding="utf-8")
+    taxonomy_text = (FIXTURE_ROOT / "test-gaap.xsd").read_text(encoding="utf-8")
+    assert "FIXTURE DATA - NOT A REAL ISSUER" in instance_text
+    assert "urn:hengce:test-gaap" in instance_text
+    assert "699999.SH" in instance_text
+    assert "FIXTURE DATA - NOT A REAL ISSUER" in taxonomy_text
+    assert "urn:hengce:test-gaap" in taxonomy_text
+    assert "600001.SH" not in "\n".join((instance_text, taxonomy_text))

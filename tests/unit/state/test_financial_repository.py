@@ -45,7 +45,7 @@ def financial_filing(
         license_policy="sse-personal-research",
         quality_status=QualityStatus.VALID,
         valid_from=valid_from,
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=date(2025, 12, 31),
         report_type=ReportType.ANNUAL,

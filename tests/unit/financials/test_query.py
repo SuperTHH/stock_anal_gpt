@@ -42,7 +42,7 @@ def filing(
     valid_from: datetime = OLD_VALID_FROM,
     quality_status: QualityStatus = QualityStatus.VALID,
     supersedes_id: str | None = None,
-    ts_code: str = "600001.SH",
+    ts_code: str = "699999.SH",
     report_period: date = REPORT_PERIOD,
 ) -> FinancialFiling:
     raw_hash = ("1" if filing_id == "old" else "2") * 64
@@ -215,7 +215,7 @@ def assert_graph_blocked_without_duckdb(
 
     monkeypatch.setattr(query_module.duckdb, "connect", tracking_connect)
     result = prepared.query.query_financial_facts(
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         report_period=REPORT_PERIOD,
         canonical_fact_names=frozenset({"assets"}),
         as_of=as_of,
@@ -244,7 +244,7 @@ def test_query_rejects_each_naive_cutoff(
 
     with pytest.raises(ValueError, match="^FINANCIAL_QUERY_CUTOFF_INVALID$"):
         prepared.query.query_financial_facts(
-            ts_code="600001.SH",
+            ts_code="699999.SH",
             report_period=REPORT_PERIOD,
             canonical_fact_names=frozenset({"assets"}),
             as_of=as_of,
@@ -261,7 +261,7 @@ def test_empty_names_validate_cutoffs_before_skipping_duckdb(
 
     with pytest.raises(ValueError, match="^FINANCIAL_QUERY_CUTOFF_INVALID$"):
         prepared.query.query_financial_facts(
-            ts_code="600001.SH",
+            ts_code="699999.SH",
             report_period=REPORT_PERIOD,
             canonical_fact_names=frozenset(),
             as_of=datetime(2026, 4, 30),
@@ -274,7 +274,7 @@ def test_empty_names_validate_cutoffs_before_skipping_duckdb(
 
     monkeypatch.setattr(query_module.duckdb, "connect", fail_connect)
     result = prepared.query.query_financial_facts(
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         report_period=REPORT_PERIOD,
         canonical_fact_names=frozenset(),
         as_of=NEW_PUBLISHED_AT,

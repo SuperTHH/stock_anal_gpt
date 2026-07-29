@@ -127,7 +127,7 @@ def test_arelle_parses_safely_materialized_relative_taxonomy_without_socket(
     descriptor = FilingDescriptor(
         source_id="sse",
         source_url="https://www.sse.com.cn/instance.xml",
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=date(2025, 12, 31),
         report_type=ReportType.ANNUAL,

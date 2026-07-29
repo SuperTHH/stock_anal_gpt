@@ -41,7 +41,7 @@ def financial_filing(filing_id: str = "filing-1") -> FinancialFiling:
         license_policy="fixture-only",
         quality_status=QualityStatus.VALID,
         valid_from=NOW,
-        ts_code="600001.SH",
+        ts_code="699999.SH",
         exchange="SSE",
         report_period=date(2025, 12, 31),
         report_type=ReportType.ANNUAL,
@@ -74,7 +74,7 @@ def raw_assets(
         context=RawXbrlContext(
             context_id="context-1",
             entity_scheme=entity_scheme,
-            entity_identifier="600001.SH",
+            entity_identifier="699999.SH",
             period_start=None,
             period_end=None,
             instant=date(2025, 12, 31),
