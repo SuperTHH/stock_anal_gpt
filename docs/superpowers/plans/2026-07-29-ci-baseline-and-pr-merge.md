@@ -251,10 +251,12 @@ Run:
 
 ```text
 git status --short
-git ls-files | rg '(^|/)(\.env|data/)|\.(sqlite3?|parquet|zip|xbrl)$'
+git ls-files | rg '(^|/)\.env$|^data/|\.(sqlite3?|parquet|zip|xbrl)$'
 ```
 
 Expected: no uncommitted implementation changes and no tracked secret/data artifacts. Documentation commits may be ahead of the remote until Step 5.
+The committed `.env.example` template and `src/hengce/data/source_policies.json`
+package resource are intentionally outside this rejection pattern.
 
 - [ ] **Step 5: Push the current feature branch**
 
