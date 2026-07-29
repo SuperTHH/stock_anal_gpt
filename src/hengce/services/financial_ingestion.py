@@ -108,13 +108,17 @@ class FinancialIngestionService:
         run_id = f"financial_xbrl:{filing_id}"
         descriptor_fingerprint = self._descriptor_fingerprint(descriptor)
         existing_run = self._find_run(run_id)
-        if existing_run is not None and existing_run.run_status in _TERMINAL_STATUSES:
-            return self._reuse_terminal_run(
+        if existing_run is not None:
+            validation_error = self._validate_existing_run(
                 descriptor,
                 existing_run,
                 filing_id,
                 descriptor_fingerprint,
             )
+            if validation_error is not None:
+                return validation_error
+            if existing_run.run_status in _TERMINAL_STATUSES:
+                return self._result_from_run(existing_run, filing_id)
 
         run = self._running_record(
             descriptor,
@@ -427,7 +431,6 @@ class FinancialIngestionService:
                     "error_code": None,
                     "error_summary": None,
                     "published_report_id": None,
-                    "descriptor_fingerprint": descriptor_fingerprint,
                 }
             )
         return RunRecord(
@@ -467,13 +470,13 @@ class FinancialIngestionService:
             error_code=run.error_code,
         )
 
-    def _reuse_terminal_run(
+    def _validate_existing_run(
         self,
         descriptor: FilingDescriptor,
         run: RunRecord,
         filing_id: str,
         descriptor_fingerprint: str,
-    ) -> FinancialIngestionResult:
+    ) -> FinancialIngestionResult | None:
         try:
             self.guard.validate(
                 descriptor.source_id,
@@ -483,7 +486,7 @@ class FinancialIngestionService:
             )
             self.repository.get_taxonomies(descriptor.taxonomy_refs)
         except PolicyDenied as error:
-            return self._terminal_reuse_error(
+            return self._existing_run_error(
                 run,
                 filing_id,
                 RunStatus.BLOCKED,
@@ -494,7 +497,7 @@ class FinancialIngestionService:
             status = ERROR_STATUS.get(error_code)
             if status is None:
                 raise
-            return self._terminal_reuse_error(
+            return self._existing_run_error(
                 run,
                 filing_id,
                 status,
@@ -504,16 +507,16 @@ class FinancialIngestionService:
             run.descriptor_fingerprint is None
             or run.descriptor_fingerprint != descriptor_fingerprint
         ):
-            return self._terminal_reuse_error(
+            return self._existing_run_error(
                 run,
                 filing_id,
                 RunStatus.BLOCKED,
                 "FINANCIAL_DESCRIPTOR_CONFLICT",
             )
-        return self._result_from_run(run, filing_id)
+        return None
 
     @staticmethod
-    def _terminal_reuse_error(
+    def _existing_run_error(
         run: RunRecord,
         filing_id: str,
         status: RunStatus,

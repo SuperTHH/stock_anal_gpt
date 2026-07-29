@@ -895,6 +895,102 @@ def test_crash_after_artifact_write_recovers_without_duplicate_publication(
         )
 
 
+@pytest.mark.parametrize("change", ["collected_at", "same_domain_url"])
+def test_pending_recovery_rejects_changed_descriptor_without_mutating_state(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    crash_once = CrashOnce("after_artifact_write")
+    built = build_service(tmp_path, stage_hook=crash_once)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        built.service.run(built.descriptor)
+    original_run = built.state.list_runs(run_type="financial_xbrl")[0]
+    original_pending = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)[0]
+    changed_payload = built.descriptor.model_dump()
+    changed_payload["collected_at" if change == "collected_at" else "source_url"] = (
+        NOW + timedelta(seconds=1)
+        if change == "collected_at"
+        else "https://www.sse.com.cn/disclosure/alternate-filing.xml"
+    )
+    changed = FilingDescriptor.model_validate(changed_payload)
+
+    rejected = built.service.run(changed)
+
+    assert rejected.run_status is RunStatus.BLOCKED
+    assert rejected.error_code == "FINANCIAL_DESCRIPTOR_CONFLICT"
+    assert built.state.list_runs(run_type="financial_xbrl") == [original_run]
+    assert built.repository.list_filing_versions("699999.SH", REPORT_PERIOD) == [original_pending]
+
+    recovered = built.service.run(built.descriptor)
+
+    assert recovered.run_status is RunStatus.SUCCEEDED
+    terminal_run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert terminal_run.descriptor_fingerprint == original_run.descriptor_fingerprint
+    assert terminal_run.retry_count == 1
+    published = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)[0]
+    assert published.artifact_status == "PUBLISHED"
+    assert published.filing.collected_at == built.descriptor.collected_at
+
+
+def test_pending_recovery_rejects_legacy_run_without_mutating_state(
+    tmp_path: Path,
+) -> None:
+    crash_once = CrashOnce("after_artifact_write")
+    built = build_service(tmp_path, stage_hook=crash_once)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        built.service.run(built.descriptor)
+    pending = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)[0]
+    with sqlite3.connect(built.state.path) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM run_records WHERE run_id=?",
+            (f"financial_xbrl:{pending.filing.filing_id}",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(str(row[0]))
+        payload.pop("descriptor_fingerprint")
+        connection.execute(
+            "UPDATE run_records SET payload_json=? WHERE run_id=?",
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                payload["run_id"],
+            ),
+        )
+    legacy_run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert legacy_run.descriptor_fingerprint is None
+
+    rejected = built.service.run(built.descriptor)
+
+    assert rejected.run_status is RunStatus.BLOCKED
+    assert rejected.error_code == "FINANCIAL_DESCRIPTOR_CONFLICT"
+    assert built.state.list_runs(run_type="financial_xbrl") == [legacy_run]
+    assert built.repository.list_filing_versions("699999.SH", REPORT_PERIOD) == [pending]
+
+
+def test_pending_recovery_applies_current_policy_before_descriptor_fingerprint(
+    tmp_path: Path,
+) -> None:
+    crash_once = CrashOnce("after_artifact_write")
+    built = build_service(tmp_path, stage_hook=crash_once)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        built.service.run(built.descriptor)
+    original_run = built.state.list_runs(run_type="financial_xbrl")[0]
+    original_pending = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)[0]
+    changed = FilingDescriptor.model_validate(
+        {
+            **built.descriptor.model_dump(),
+            "source_url": "https://evil.example/filing.xml",
+        }
+    )
+
+    rejected = built.service.run(changed)
+
+    assert rejected.run_status is RunStatus.BLOCKED
+    assert rejected.error_code == "DOMAIN_NOT_ALLOWED"
+    assert built.state.count_refusals() == 1
+    assert built.state.list_runs(run_type="financial_xbrl") == [original_run]
+    assert built.repository.list_filing_versions("699999.SH", REPORT_PERIOD) == [original_pending]
+
+
 def test_unknown_processor_exception_is_not_disguised_as_financial_status(
     tmp_path: Path,
 ) -> None:
