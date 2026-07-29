@@ -12,9 +12,11 @@ from hengce.contracts.enums import (
 )
 from hengce.contracts.financial import FinancialFiling
 from hengce.financials.mapping import (
+    EntityMappingRegistry,
     FactMapping,
     FactMappingRegistry,
     FinancialFactNormalizer,
+    stable_hash,
 )
 from hengce.financials.xbrl import RawXbrlContext, RawXbrlFact, RawXbrlUnit
 
@@ -64,6 +66,7 @@ def raw_assets(
     dimensions: tuple[tuple[str, str], ...] = (),
     unit: RawXbrlUnit | None = None,
     entity_scheme: str = "https://example.test/entity",
+    entity_identifier: str = "699999.SH",
     value: Decimal = Decimal("1000.25"),
 ) -> RawXbrlFact:
     return RawXbrlFact(
@@ -74,7 +77,7 @@ def raw_assets(
         context=RawXbrlContext(
             context_id="context-1",
             entity_scheme=entity_scheme,
-            entity_identifier="699999.SH",
+            entity_identifier=entity_identifier,
             period_start=None,
             period_end=None,
             instant=date(2025, 12, 31),
@@ -90,7 +93,11 @@ def raw_assets(
     )
 
 
-def normalizer(expected_unit_kind: str = "MONETARY") -> FinancialFactNormalizer:
+def normalizer(
+    expected_unit_kind: str = "MONETARY",
+    *,
+    entity_mappings: dict[tuple[str, str], str | tuple[str, ...]] | None = None,
+) -> FinancialFactNormalizer:
     return FinancialFactNormalizer(
         FactMappingRegistry(
             mapping_version="fixture-v1",
@@ -102,7 +109,14 @@ def normalizer(expected_unit_kind: str = "MONETARY") -> FinancialFactNormalizer:
                     expected_unit_kind=expected_unit_kind,
                 )
             },
-        )
+        ),
+        EntityMappingRegistry(
+            mappings=(
+                {("https://example.test/entity", "699999.SH"): "699999.SH"}
+                if entity_mappings is None
+                else entity_mappings
+            )
+        ),
     )
 
 
@@ -125,6 +139,38 @@ def test_normalizer_maps_fixture_qname_and_builds_stable_identities() -> None:
     assert left[0].dimensions == {"a": "1", "b": "2"}
 
 
+def test_mapped_fact_rejects_entity_owned_by_a_different_security() -> None:
+    with pytest.raises(ValueError, match="^FINANCIAL_ENTITY_MISMATCH$"):
+        normalizer().normalize(
+            financial_filing(),
+            [raw_assets(entity_identifier="000001.SZ")],
+        )
+
+
+@pytest.mark.parametrize(
+    "entity_mappings",
+    [
+        {},
+        {
+            ("https://example.test/entity", "699999.SH"): (
+                "699999.SH",
+                "000001.SZ",
+            )
+        },
+        {("https://example.test/entity", "699999.SH"): "000001.SZ"},
+    ],
+    ids=["missing", "ambiguous", "different-owner"],
+)
+def test_mapped_fact_requires_exactly_one_matching_security_owner(
+    entity_mappings: dict[tuple[str, str], str | tuple[str, ...]],
+) -> None:
+    with pytest.raises(ValueError, match="^FINANCIAL_ENTITY_MISMATCH$"):
+        normalizer(entity_mappings=entity_mappings).normalize(
+            financial_filing(),
+            [raw_assets()],
+        )
+
+
 def test_normalizer_gives_distinct_observation_ids_to_different_values() -> None:
     facts = normalizer().normalize(
         financial_filing(),
@@ -138,7 +184,8 @@ def test_normalizer_gives_distinct_observation_ids_to_different_values() -> None
 
 def test_unmapped_fact_is_preserved_but_unverified() -> None:
     facts = FinancialFactNormalizer(
-        FactMappingRegistry(mapping_version="empty", mappings={})
+        FactMappingRegistry(mapping_version="empty", mappings={}),
+        EntityMappingRegistry(mappings={}),
     ).normalize(financial_filing(), [raw_assets()])
 
     assert facts[0].raw_qname == ASSETS_QNAME
@@ -157,11 +204,17 @@ def test_comparison_identity_ignores_filing_id_but_fact_identity_does_not() -> N
 
 
 def test_entity_scheme_participates_in_all_context_derived_identities() -> None:
-    left = normalizer().normalize(
+    configured = normalizer(
+        entity_mappings={
+            ("https://example.test/entity-a", "699999.SH"): "699999.SH",
+            ("https://example.test/entity-b", "699999.SH"): "699999.SH",
+        }
+    )
+    left = configured.normalize(
         financial_filing(),
         [raw_assets(entity_scheme="https://example.test/entity-a")],
     )[0]
-    right = normalizer().normalize(
+    right = configured.normalize(
         financial_filing(),
         [raw_assets(entity_scheme="https://example.test/entity-b")],
     )[0]
@@ -272,7 +325,8 @@ def test_fact_mapping_rejects_other_unsupported_expected_unit_kinds(
 
 
 def test_normalizer_preserves_filing_provenance_and_uses_registry_version() -> None:
-    fact = normalizer().normalize(financial_filing(), [raw_assets()])[0]
+    configured = normalizer()
+    fact = configured.normalize(financial_filing(), [raw_assets()])[0]
 
     assert fact.source_id == "fixture-source"
     assert str(fact.source_url) == "https://example.test/filing.xml"
@@ -280,5 +334,12 @@ def test_normalizer_preserves_filing_provenance_and_uses_registry_version() -> N
     assert fact.valid_from == NOW
     assert fact.content_hash == HASH
     assert fact.version == "filing-v1:parser-v1:fixture-v1"
+    assert configured.mapping_version == "fixture-v1"
     assert fact.supersedes_id is None
     assert fact.consolidation_scope is ConsolidationScope.UNKNOWN
+
+
+def test_stable_hash_matches_hand_derived_canonical_json_digest() -> None:
+    assert stable_hash({"b": "x", "a": 1}) == (
+        "ecf9e98ec0641e23113ff3ce8bdc78d0ddd249886517fd4a7f68cc83d4e65667"
+    )

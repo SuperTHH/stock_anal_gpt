@@ -34,6 +34,9 @@ from hengce.warehouse.financial import FinancialArtifact, FinancialFactWarehouse
 ERROR_STATUS = {
     "RAW_PAYLOAD_INTEGRITY_ERROR": RunStatus.FAILED,
     "FINANCIAL_OVERLAY_CONFLICT": RunStatus.FAILED,
+    "FINANCIAL_ENTITY_MISMATCH": RunStatus.BLOCKED,
+    "FINANCIAL_BACKFILL_UNSUPPORTED": RunStatus.BLOCKED,
+    "FINANCIAL_DESCRIPTOR_CONFLICT": RunStatus.BLOCKED,
     "FINANCIAL_TAXONOMY_MISSING": RunStatus.BLOCKED,
     "FINANCIAL_XBRL_PARSE_ERROR": RunStatus.FAILED,
     "FINANCIAL_PARQUET_INTEGRITY_ERROR": RunStatus.FAILED,
@@ -103,11 +106,22 @@ class FinancialIngestionService:
     def run(self, descriptor: FilingDescriptor) -> FinancialIngestionResult:
         filing_id = self._filing_id(descriptor)
         run_id = f"financial_xbrl:{filing_id}"
+        descriptor_fingerprint = self._descriptor_fingerprint(descriptor)
         existing_run = self._find_run(run_id)
         if existing_run is not None and existing_run.run_status in _TERMINAL_STATUSES:
-            return self._result_from_run(existing_run, filing_id)
+            return self._reuse_terminal_run(
+                descriptor,
+                existing_run,
+                filing_id,
+                descriptor_fingerprint,
+            )
 
-        run = self._running_record(descriptor, run_id, existing_run)
+        run = self._running_record(
+            descriptor,
+            run_id,
+            existing_run,
+            descriptor_fingerprint,
+        )
         self.state.record_run(run)
         try:
             policy = self.guard.validate(
@@ -247,7 +261,7 @@ class FinancialIngestionService:
         taxonomy_hashes: tuple[str, ...],
     ) -> FinancialFiling:
         filing_id = self._filing_id(descriptor)
-        predecessors = [
+        published_versions = [
             record
             for record in self.repository.list_filing_versions(
                 descriptor.ts_code,
@@ -260,8 +274,17 @@ class FinancialIngestionService:
             and record.filing.filing_id != filing_id
             and record.artifact_status == "PUBLISHED"
         ]
+        if any(
+            record.filing.published_at >= descriptor.published_at for record in published_versions
+        ):
+            raise ValueError("FINANCIAL_BACKFILL_UNSUPPORTED")
+        predecessors = [
+            record
+            for record in published_versions
+            if record.filing.published_at < descriptor.published_at
+        ]
         predecessor = predecessors[-1].filing if predecessors else None
-        mapping_version = self.normalizer._registry.mapping_version
+        mapping_version = self.normalizer.mapping_version
         filing_version = f"xbrl-{descriptor.raw_object_hash}"
         return FinancialFiling(
             record_id=filing_id,
@@ -392,6 +415,7 @@ class FinancialIngestionService:
         descriptor: FilingDescriptor,
         run_id: str,
         existing: RunRecord | None,
+        descriptor_fingerprint: str,
     ) -> RunRecord:
         if existing is not None:
             return existing.model_copy(
@@ -403,6 +427,7 @@ class FinancialIngestionService:
                     "error_code": None,
                     "error_summary": None,
                     "published_report_id": None,
+                    "descriptor_fingerprint": descriptor_fingerprint,
                 }
             )
         return RunRecord(
@@ -412,6 +437,7 @@ class FinancialIngestionService:
             started_at=self.clock(),
             run_status=RunStatus.RUNNING,
             stage_statuses={"ingestion": "RUNNING"},
+            descriptor_fingerprint=descriptor_fingerprint,
         )
 
     def _find_run(self, run_id: str) -> RunRecord | None:
@@ -441,6 +467,69 @@ class FinancialIngestionService:
             error_code=run.error_code,
         )
 
+    def _reuse_terminal_run(
+        self,
+        descriptor: FilingDescriptor,
+        run: RunRecord,
+        filing_id: str,
+        descriptor_fingerprint: str,
+    ) -> FinancialIngestionResult:
+        try:
+            self.guard.validate(
+                descriptor.source_id,
+                str(descriptor.source_url),
+                "xbrl",
+                "services.financial_ingestion",
+            )
+            self.repository.get_taxonomies(descriptor.taxonomy_refs)
+        except PolicyDenied as error:
+            return self._terminal_reuse_error(
+                run,
+                filing_id,
+                RunStatus.BLOCKED,
+                error.reason_code,
+            )
+        except ValueError as error:
+            error_code = str(error)
+            status = ERROR_STATUS.get(error_code)
+            if status is None:
+                raise
+            return self._terminal_reuse_error(
+                run,
+                filing_id,
+                status,
+                error_code,
+            )
+        if (
+            run.descriptor_fingerprint is None
+            or run.descriptor_fingerprint != descriptor_fingerprint
+        ):
+            return self._terminal_reuse_error(
+                run,
+                filing_id,
+                RunStatus.BLOCKED,
+                "FINANCIAL_DESCRIPTOR_CONFLICT",
+            )
+        return self._result_from_run(run, filing_id)
+
+    @staticmethod
+    def _terminal_reuse_error(
+        run: RunRecord,
+        filing_id: str,
+        status: RunStatus,
+        error_code: str,
+    ) -> FinancialIngestionResult:
+        return FinancialIngestionResult(
+            filing_id=filing_id,
+            run_id=run.run_id,
+            run_status=status,
+            fact_count=0,
+            conflict_count=0,
+            artifact_path=None,
+            artifact_hash=None,
+            error_code=error_code,
+        )
+
     @staticmethod
     def _quality_error_code(quality: FinancialQualityResult) -> str | None:
         return next(
@@ -463,6 +552,16 @@ class FinancialIngestionService:
             separators=(",", ":"),
         ).encode("utf-8")
         return f"filing-{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _descriptor_fingerprint(descriptor: FilingDescriptor) -> str:
+        canonical = json.dumps(
+            descriptor.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
 
 __all__ = [

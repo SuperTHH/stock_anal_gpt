@@ -1082,3 +1082,35 @@ def test_materializer_validates_hash_before_copying_payload(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="RAW_PAYLOAD_INTEGRITY_ERROR"):
         with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
             pass
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "replacement"),
+    [
+        ("instance", b'<?xml version="1.0"?><replacement-instance/>'),
+        ("taxonomy", b'<?xml version="1.0"?><replacement-schema/>'),
+    ],
+)
+def test_materializer_rehashes_the_exact_bytes_copied_after_initial_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+    replacement: bytes,
+) -> None:
+    store, descriptor, taxonomy = stored_valid_fixture(tmp_path)
+    target_hash = (
+        descriptor.raw_object_hash if target_kind == "instance" else taxonomy.raw_object_hash
+    )
+    original_validate = store.validate_content_hash
+
+    def validate_then_replace(content_hash: str) -> Path:
+        path = original_validate(content_hash)
+        if content_hash == target_hash:
+            path.write_bytes(replacement)
+        return path
+
+    monkeypatch.setattr(store, "validate_content_hash", validate_then_replace)
+
+    with pytest.raises(ValueError, match="^RAW_PAYLOAD_INTEGRITY_ERROR$"):
+        with SafePackageMaterializer(store).materialize(descriptor, (taxonomy,)):
+            pass

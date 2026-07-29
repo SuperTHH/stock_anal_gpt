@@ -101,6 +101,71 @@ class FinancialQualityValidator:
                 )
             )
 
+        facts_by_canonical_identity: dict[CanonicalFactKey, list[FinancialFact]] = defaultdict(list)
+        for fact in retained_facts:
+            if (
+                fact.fact_id not in conflicting_fact_ids
+                and fact.mapping_status is MappingStatus.MAPPED
+                and fact.canonical_fact_name is not None
+            ):
+                facts_by_canonical_identity[_canonical_fact_key(fact)].append(fact)
+
+        folded_alias_fact_ids: set[str] = set()
+        for canonical_key in sorted(facts_by_canonical_identity):
+            candidates = sorted(
+                facts_by_canonical_identity[canonical_key],
+                key=_fact_sort_key,
+            )
+            if len({fact.raw_qname for fact in candidates}) <= 1:
+                continue
+            fact_ids = tuple(fact.fact_id for fact in candidates)
+            if len({fact.fact_value for fact in candidates}) == 1:
+                folded_alias_fact_ids.update(fact_ids[1:])
+                issues.append(
+                    QualityIssue(
+                        code="FINANCIAL_FACT_ALIAS_DUPLICATE",
+                        fact_ids=fact_ids,
+                        detail="raw QName aliases have one canonical identity and value",
+                    )
+                )
+                continue
+
+            canonical_identity_hash = _canonical_identity_hash(canonical_key)
+            conflicting_fact_ids.update(fact_ids)
+            conflicts.append(
+                FactConflict(
+                    conflict_id=_conflict_id(
+                        filing.filing_id,
+                        canonical_identity_hash,
+                        fact_ids,
+                    ),
+                    filing_id=filing.filing_id,
+                    fact_identity_hash=canonical_identity_hash,
+                    competing_fact_ids=fact_ids,
+                    conflict_type="CANONICAL_VALUE_MISMATCH",
+                    resolution_status=ConflictResolutionStatus.OPEN,
+                    quality_status=QualityStatus.CONFLICT,
+                    detected_at=filing.collected_at,
+                )
+            )
+            issues.append(
+                QualityIssue(
+                    code="FINANCIAL_FACT_CONFLICT",
+                    fact_ids=fact_ids,
+                    detail="raw QName aliases map to one canonical fact with different values",
+                )
+            )
+
+        retained_facts = [
+            (
+                fact.model_copy(update={"quality_status": QualityStatus.CONFLICT})
+                if fact.fact_id in conflicting_fact_ids
+                else fact
+            )
+            for fact in retained_facts
+            if fact.fact_id not in folded_alias_fact_ids
+        ]
+
         unmapped_fact_ids = tuple(
             fact.fact_id
             for fact in sorted(retained_facts, key=_fact_sort_key)
@@ -165,10 +230,7 @@ class FinancialQualityValidator:
             )
             difference = abs(assets.fact_value - liabilities.fact_value - equity.fact_value)
             tolerance = sum(
-                (
-                    rounding_tolerance(fact.decimals)
-                    for fact in (assets, liabilities, equity)
-                ),
+                (rounding_tolerance(fact.decimals) for fact in (assets, liabilities, equity)),
                 Decimal(0),
             )
             if difference > tolerance:
@@ -179,8 +241,7 @@ class FinancialQualityValidator:
                         code="FINANCIAL_BALANCE_EQUATION_CONFLICT",
                         fact_ids=fact_ids,
                         detail=(
-                            "assets do not equal liabilities plus equity "
-                            "within rounding tolerance"
+                            "assets do not equal liabilities plus equity within rounding tolerance"
                         ),
                     )
                 )
@@ -219,6 +280,50 @@ EquationKey = tuple[
     object,
     tuple[tuple[str, str], ...],
 ]
+
+
+CanonicalFactKey = tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    tuple[tuple[str, str], ...],
+    str,
+    str,
+    str,
+]
+
+
+def _canonical_fact_key(fact: FinancialFact) -> CanonicalFactKey:
+    if fact.canonical_fact_name is None:
+        raise ValueError("mapped canonical fact requires a canonical name")
+    return (
+        fact.canonical_fact_name,
+        fact.entity_scheme,
+        fact.entity_identifier,
+        fact.period_start.isoformat() if fact.period_start is not None else "",
+        fact.period_end.isoformat() if fact.period_end is not None else "",
+        fact.instant.isoformat() if fact.instant is not None else "",
+        fact.unit_signature or "",
+        fact.currency or "",
+        tuple(sorted(fact.dimensions.items())),
+        fact.consolidation_scope.value,
+        fact.report_period.isoformat(),
+        fact.report_type.value,
+    )
+
+
+def _canonical_identity_hash(key: CanonicalFactKey) -> str:
+    payload = json.dumps(
+        key,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _equation_key(fact: FinancialFact) -> EquationKey:

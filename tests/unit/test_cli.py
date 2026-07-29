@@ -17,6 +17,7 @@ from hengce import cli
 from hengce.cli import app, build_market_ingestion, load_trade_dates
 from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, ReportType, RunStatus
+from hengce.financials.package import LocalAttachmentInspector
 from hengce.financials.xbrl import (
     RawXbrlContext,
     RawXbrlFact,
@@ -599,6 +600,41 @@ def test_register_taxonomy_persists_approved_local_object(tmp_path: Path) -> Non
     assert references[0].raw_object_hash == payload["raw_object_hash"]
 
 
+def test_register_taxonomy_persists_the_validated_payload_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operator_path = tmp_path / "test-gaap.xsd"
+    replacement = VALID_TAXONOMY.replace(
+        b"/>",
+        b"><!--replacement--></xsd:schema>",
+    )
+    original_validate = LocalAttachmentInspector.validate
+
+    def validate_then_replace(
+        inspector: object,
+        path: Path,
+        content_type: str,
+        *,
+        taxonomy: bool,
+    ) -> None:
+        original_validate(inspector, path, content_type, taxonomy=taxonomy)
+        operator_path.write_bytes(replacement)
+
+    monkeypatch.setattr(
+        LocalAttachmentInspector,
+        "validate",
+        validate_then_replace,
+    )
+
+    result = invoke_fixture_taxonomy_registration(tmp_path)
+
+    assert result.exit_code == 0
+    persisted = list((tmp_path / "data" / "raw").rglob("payload.bin"))
+    assert len(persisted) == 1
+    assert persisted[0].read_bytes() == VALID_TAXONOMY
+
+
 def test_register_taxonomy_rejects_custom_approved_non_exchange_source_before_raw_persist(
     tmp_path: Path,
 ) -> None:
@@ -751,6 +787,63 @@ def test_import_financial_xbrl_uses_injected_local_composition(
     output = json.loads(result.stdout)
     assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
     assert "<xbrli:xbrl" not in result.stdout
+
+
+def test_import_financial_xbrl_persists_the_validated_payload_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operator_path = tmp_path / "filing.xml"
+    replacement = VALID_INSTANCE.replace(
+        b"/>",
+        b"><!--replacement--></xbrli:xbrl>",
+    )
+    original_validate = LocalAttachmentInspector.validate
+
+    def validate_then_replace(
+        inspector: object,
+        path: Path,
+        content_type: str,
+        *,
+        taxonomy: bool,
+    ) -> None:
+        original_validate(inspector, path, content_type, taxonomy=taxonomy)
+        operator_path.write_bytes(replacement)
+
+    monkeypatch.setattr(
+        LocalAttachmentInspector,
+        "validate",
+        validate_then_replace,
+    )
+
+    result = CliRunner().invoke(app, financial_import_args(tmp_path))
+
+    assert result.exit_code == 0
+    persisted = list((tmp_path / "data" / "raw").rglob("payload.bin"))
+    assert len(persisted) == 1
+    assert persisted[0].read_bytes() == VALID_INSTANCE
+
+
+def test_import_financial_xbrl_rejects_a_symlinked_operator_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.xml"
+    source.write_bytes(VALID_INSTANCE)
+    operator_path = tmp_path / "filing.xml"
+    try:
+        operator_path.symlink_to(source)
+    except OSError:
+        pytest.skip("file symlinks are unavailable on this platform")
+    arguments = financial_import_args(tmp_path)
+    operator_path.unlink()
+    operator_path.symlink_to(source)
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert str(result.exception) == "FINANCIAL_ATTACHMENT_TYPE_INVALID"
+    assert not list((tmp_path / "data" / "raw").rglob("payload.bin"))
 
 
 def test_import_financial_xbrl_suppresses_parser_logs_around_sorted_json(
@@ -1129,8 +1222,7 @@ def test_build_financial_ingestion_uses_empty_mapping_and_single_layer_dataset(
 ) -> None:
     service = cli.build_financial_ingestion(Settings(data_dir=tmp_path / "data"))
 
-    assert service.normalizer._registry.mapping_version == "empty-v1"
-    assert not service.normalizer._registry.mappings
+    assert service.normalizer.mapping_version == "empty-v1"
     assert service.warehouse.dataset == tmp_path / "data" / "warehouse" / "financial_facts"
 
 

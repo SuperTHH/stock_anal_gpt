@@ -1,6 +1,8 @@
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -25,12 +27,14 @@ from hengce.contracts.financial import (
 )
 from hengce.contracts.policy import SourcePolicy
 from hengce.financials.mapping import (
+    EntityMappingRegistry,
     FactMapping,
     FactMappingRegistry,
     FinancialFactNormalizer,
 )
 from hengce.financials.package import MaterializedFiling, SafePackageMaterializer
 from hengce.financials.quality import FinancialQualityValidator
+from hengce.financials.query import AsOfFinancialQuery
 from hengce.financials.xbrl import (
     RawXbrlContext,
     RawXbrlFact,
@@ -139,6 +143,8 @@ def raw_fact(
     value: str,
     *,
     context_id: str | None = None,
+    entity_scheme: str = "https://www.sse.com.cn/entity",
+    entity_identifier: str = "699999.SH",
 ) -> RawXbrlFact:
     return RawXbrlFact(
         raw_qname=f"{QNAME_PREFIX}{name.title()}",
@@ -147,8 +153,8 @@ def raw_fact(
         decimals="0",
         context=RawXbrlContext(
             context_id=context_id or f"context-{name}",
-            entity_scheme="https://www.sse.com.cn/entity",
-            entity_identifier="699999.SH",
+            entity_scheme=entity_scheme,
+            entity_identifier=entity_identifier,
             period_start=None,
             period_end=None,
             instant=REPORT_PERIOD,
@@ -163,12 +169,36 @@ def raw_fact(
     )
 
 
-def valid_raw_facts() -> tuple[RawXbrlFact, ...]:
+def valid_raw_facts(
+    *,
+    entity_scheme: str = "https://www.sse.com.cn/entity",
+    entity_identifier: str = "699999.SH",
+) -> tuple[RawXbrlFact, ...]:
     return (
-        raw_fact("assets", "1000"),
-        raw_fact("liabilities", "400"),
-        raw_fact("equity", "600"),
-        raw_fact("revenue", "250"),
+        raw_fact(
+            "assets",
+            "1000",
+            entity_scheme=entity_scheme,
+            entity_identifier=entity_identifier,
+        ),
+        raw_fact(
+            "liabilities",
+            "400",
+            entity_scheme=entity_scheme,
+            entity_identifier=entity_identifier,
+        ),
+        raw_fact(
+            "equity",
+            "600",
+            entity_scheme=entity_scheme,
+            entity_identifier=entity_identifier,
+        ),
+        raw_fact(
+            "revenue",
+            "250",
+            entity_scheme=entity_scheme,
+            entity_identifier=entity_identifier,
+        ),
     )
 
 
@@ -181,12 +211,24 @@ def conflicting_raw_facts() -> tuple[RawXbrlFact, ...]:
     )
 
 
-def normalizer() -> FinancialFactNormalizer:
-    statement_types = {
-        "assets": StatementType.BALANCE_SHEET,
-        "liabilities": StatementType.BALANCE_SHEET,
-        "equity": StatementType.BALANCE_SHEET,
-        "revenue": StatementType.INCOME_STATEMENT,
+def canonical_alias_conflicting_raw_facts() -> tuple[RawXbrlFact, ...]:
+    return (
+        raw_fact("assets", "1000"),
+        raw_fact("assets_alias", "1100"),
+        raw_fact("liabilities", "400"),
+        raw_fact("equity", "600"),
+    )
+
+
+def normalizer(
+    entity_mappings: dict[tuple[str, str], str | tuple[str, ...]] | None = None,
+) -> FinancialFactNormalizer:
+    mapping_specs = {
+        "assets": ("assets", StatementType.BALANCE_SHEET),
+        "assets_alias": ("assets", StatementType.BALANCE_SHEET),
+        "liabilities": ("liabilities", StatementType.BALANCE_SHEET),
+        "equity": ("equity", StatementType.BALANCE_SHEET),
+        "revenue": ("revenue", StatementType.INCOME_STATEMENT),
     }
     return FinancialFactNormalizer(
         FactMappingRegistry(
@@ -194,13 +236,20 @@ def normalizer() -> FinancialFactNormalizer:
             mappings={
                 f"{QNAME_PREFIX}{name.title()}": FactMapping(
                     raw_qname=f"{QNAME_PREFIX}{name.title()}",
-                    canonical_fact_name=name,
+                    canonical_fact_name=canonical_name,
                     statement_type=statement_type,
                     expected_unit_kind="MONETARY",
                 )
-                for name, statement_type in statement_types.items()
+                for name, (canonical_name, statement_type) in mapping_specs.items()
             },
-        )
+        ),
+        EntityMappingRegistry(
+            mappings=(
+                {("https://www.sse.com.cn/entity", "699999.SH"): "699999.SH"}
+                if entity_mappings is None
+                else entity_mappings
+            )
+        ),
     )
 
 
@@ -229,6 +278,7 @@ def add_descriptor(
     payload: bytes,
     *,
     collected_at: datetime = NOW,
+    published_at: datetime = NOW,
     source_id: str = "sse",
     report_type: ReportType = ReportType.ANNUAL,
 ) -> FilingDescriptor:
@@ -246,7 +296,7 @@ def add_descriptor(
         exchange="SSE",
         report_period=REPORT_PERIOD,
         report_type=report_type,
-        published_at=NOW,
+        published_at=published_at,
         collected_at=collected_at,
         attachment_name="filing.xml",
         content_type="application/xml",
@@ -266,6 +316,7 @@ def build_service(
     register_policy: bool = True,
     stage_hook: object | None = None,
     clock: object | None = None,
+    entity_mappings: dict[tuple[str, str], str | tuple[str, ...]] | None = None,
 ) -> BuiltService:
     state = StateRepository(tmp_path / "state.sqlite3")
     state.migrate()
@@ -302,7 +353,7 @@ def build_service(
         repository=repository,
         materializer=SafePackageMaterializer(raw_store),
         processor=resolved_processor,
-        normalizer=normalizer(),
+        normalizer=normalizer(entity_mappings),
         validator=FinancialQualityValidator(),
         warehouse=warehouse,
         state=state,
@@ -389,10 +440,19 @@ def test_default_exchange_xbrl_policy_allows_ingestion_without_purpose_denial(
     assert policy is not None
     assert "xbrl" in policy.allowed_purposes
     assert "financial_xbrl" not in policy.allowed_purposes
-    built = build_service(tmp_path / "service")
+    entity_scheme = f"https://www.{source_id}.com.cn/entity"
+    built = build_service(
+        tmp_path / "service",
+        facts=valid_raw_facts(
+            entity_scheme=entity_scheme,
+            entity_identifier=ts_code,
+        ),
+        entity_mappings={(entity_scheme, ts_code): ts_code},
+    )
     built.state.upsert_policy(policy)
-    descriptor = built.descriptor.model_copy(
-        update={
+    descriptor = FilingDescriptor.model_validate(
+        {
+            **built.descriptor.model_dump(),
             "source_id": source_id,
             "source_url": source_url,
             "ts_code": ts_code,
@@ -427,6 +487,113 @@ def test_repeating_same_descriptor_reuses_terminal_result_without_new_parse(
         )
 
 
+def test_terminal_reuse_revalidates_policy_without_overwriting_success(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+    successful = built.service.run(built.descriptor)
+    changed = FilingDescriptor.model_validate(
+        {
+            **built.descriptor.model_dump(),
+            "source_url": "https://evil.example/filing.xml",
+        }
+    )
+
+    result = built.service.run(changed)
+
+    assert successful.run_status is RunStatus.SUCCEEDED
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "DOMAIN_NOT_ALLOWED"
+    assert built.state.count_refusals() == 1
+    assert built.processor.calls == 1
+    persisted = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert persisted.run_status is RunStatus.SUCCEEDED
+    assert persisted.error_code is None
+
+
+def test_terminal_reuse_revalidates_taxonomy_without_overwriting_success(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+    successful = built.service.run(built.descriptor)
+    changed = built.descriptor.model_copy(update={"taxonomy_refs": ("missing-test-taxonomy",)})
+
+    result = built.service.run(changed)
+
+    assert successful.run_status is RunStatus.SUCCEEDED
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "FINANCIAL_TAXONOMY_MISSING"
+    assert built.processor.calls == 1
+    persisted = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert persisted.run_status is RunStatus.SUCCEEDED
+    assert persisted.error_code is None
+
+
+def test_terminal_reuse_requires_exact_descriptor_fingerprint(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+    built.service.run(built.descriptor)
+    changed = built.descriptor.model_copy(update={"collected_at": NOW + timedelta(seconds=1)})
+
+    result = built.service.run(changed)
+
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "FINANCIAL_DESCRIPTOR_CONFLICT"
+    assert built.processor.calls == 1
+    persisted = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert persisted.run_status is RunStatus.SUCCEEDED
+    assert persisted.error_code is None
+
+
+def test_financial_run_persists_canonical_complete_descriptor_fingerprint(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+
+    built.service.run(built.descriptor)
+
+    canonical = json.dumps(
+        built.descriptor.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected = hashlib.sha256(canonical).hexdigest()
+    run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert run.descriptor_fingerprint == expected
+
+
+def test_terminal_reuse_rejects_legacy_run_without_descriptor_fingerprint(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+    successful = built.service.run(built.descriptor)
+    with sqlite3.connect(built.state.path) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM run_records WHERE run_id=?",
+            (successful.run_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(str(row[0]))
+        payload.pop("descriptor_fingerprint", None)
+        connection.execute(
+            "UPDATE run_records SET payload_json=? WHERE run_id=?",
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                payload["run_id"],
+            ),
+        )
+
+    result = built.service.run(built.descriptor)
+
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "FINANCIAL_DESCRIPTOR_CONFLICT"
+    persisted = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert persisted.run_status is RunStatus.SUCCEEDED
+    assert persisted.descriptor_fingerprint is None
+
+
 def test_missing_taxonomy_blocks_without_parser_call(tmp_path: Path) -> None:
     built = build_service(tmp_path, register_taxonomy=False)
 
@@ -440,7 +607,55 @@ def test_missing_taxonomy_blocks_without_parser_call(tmp_path: Path) -> None:
     assert run.finished_at == NOW
 
 
-def test_policy_denial_records_one_refusal_and_never_calls_parser(
+def test_entity_mismatch_blocks_without_publishing_filing_artifact(
+    tmp_path: Path,
+) -> None:
+    built = build_service(
+        tmp_path,
+        facts=(raw_fact("assets", "1000", entity_identifier="000001.SZ"),),
+    )
+
+    result = built.service.run(built.descriptor)
+
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "FINANCIAL_ENTITY_MISMATCH"
+    assert built.repository.get_filing(result.filing_id) is None
+    assert not list((tmp_path / "warehouse").rglob("*.parquet"))
+    run = built.state.list_runs(run_type="financial_xbrl")[0]
+    assert run.run_status is RunStatus.BLOCKED
+    assert run.error_code == "FINANCIAL_ENTITY_MISMATCH"
+    assert run.finished_at == NOW
+
+
+def test_payload_replaced_after_initial_hash_check_fails_before_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = build_service(tmp_path)
+    original_validate = built.raw_store.validate_content_hash
+
+    def validate_then_replace(content_hash: str) -> Path:
+        path = original_validate(content_hash)
+        if content_hash == built.descriptor.raw_object_hash:
+            path.write_bytes(b'<?xml version="1.0"?><replacement-instance/>')
+        return path
+
+    monkeypatch.setattr(
+        built.raw_store,
+        "validate_content_hash",
+        validate_then_replace,
+    )
+
+    result = built.service.run(built.descriptor)
+
+    assert result.run_status is RunStatus.FAILED
+    assert result.error_code == "RAW_PAYLOAD_INTEGRITY_ERROR"
+    assert built.processor.calls == 0
+    assert built.repository.get_filing(result.filing_id) is None
+    assert not list((tmp_path / "warehouse").rglob("*.parquet"))
+
+
+def test_policy_denial_records_one_refusal_per_attempt_and_never_calls_parser(
     tmp_path: Path,
 ) -> None:
     built = build_service(tmp_path, register_policy=False)
@@ -451,7 +666,7 @@ def test_policy_denial_records_one_refusal_and_never_calls_parser(
     assert first == second
     assert first.run_status is RunStatus.BLOCKED
     assert first.error_code == "SOURCE_POLICY_MISSING"
-    assert built.state.count_refusals() == 1
+    assert built.state.count_refusals() == 2
     assert built.processor.calls == 0
     run = built.state.list_runs(run_type="financial_xbrl")[0]
     assert run.run_status is RunStatus.BLOCKED
@@ -475,6 +690,35 @@ def test_conflicting_facts_publish_partial_and_record_open_conflict(
     filing = built.repository.get_filing(result.filing_id)
     assert filing is not None
     assert filing.artifact_status == "PUBLISHED"
+
+
+def test_canonical_alias_conflict_is_partial_and_query_invisible(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path, facts=canonical_alias_conflicting_raw_facts())
+
+    result = built.service.run(built.descriptor)
+
+    assert result.run_status is RunStatus.PARTIAL
+    assert result.error_code == "FINANCIAL_FACT_CONFLICT"
+    assert result.conflict_count == 1
+    conflict = built.repository.list_conflicts(result.filing_id)[0]
+    assert conflict.conflict_type == "CANONICAL_VALUE_MISMATCH"
+    filing = built.repository.get_filing(result.filing_id)
+    assert filing is not None
+    assert filing.filing.quality_status is QualityStatus.CONFLICT
+    query = AsOfFinancialQuery(
+        repository=built.repository,
+        warehouse_root=built.warehouse.root,
+    )
+    queried = query.query_financial_facts(
+        ts_code=built.descriptor.ts_code,
+        report_period=built.descriptor.report_period,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=built.descriptor.published_at,
+        known_at=built.descriptor.collected_at,
+    )
+    assert queried.facts == ()
 
 
 @pytest.mark.parametrize(
@@ -513,6 +757,7 @@ def test_correction_links_matching_fact_observations_without_overwriting_old(
         built.raw_store,
         INSTANCE_TWO,
         collected_at=NOW.replace(minute=1),
+        published_at=NOW.replace(minute=1),
     )
 
     new = built.service.run(restated_descriptor)
@@ -529,6 +774,47 @@ def test_correction_links_matching_fact_observations_without_overwriting_old(
     )
     assert all(fact.fact_id != fact.supersedes_id for fact in new_facts)
     assert Path(old_record.expected_path).read_bytes() == old_bytes
+
+
+def test_out_of_order_historical_backfill_is_blocked_without_reversing_chain(
+    tmp_path: Path,
+) -> None:
+    built = build_service(tmp_path)
+    later = built.descriptor.model_copy(
+        update={
+            "published_at": NOW + timedelta(days=1),
+            "collected_at": NOW + timedelta(days=1),
+        }
+    )
+    later_result = built.service.run(later)
+    earlier = add_descriptor(
+        built.raw_store,
+        INSTANCE_TWO,
+        published_at=NOW - timedelta(days=1),
+        collected_at=NOW + timedelta(days=2),
+    )
+
+    result = built.service.run(earlier)
+
+    assert later_result.run_status is RunStatus.SUCCEEDED
+    assert result.run_status is RunStatus.BLOCKED
+    assert result.error_code == "FINANCIAL_BACKFILL_UNSUPPORTED"
+    versions = built.repository.list_filing_versions("699999.SH", REPORT_PERIOD)
+    assert [record.filing.filing_id for record in versions] == [later_result.filing_id]
+    assert versions[0].filing.supersedes_id is None
+    assert built.repository.get_filing(result.filing_id) is None
+    query = AsOfFinancialQuery(
+        repository=built.repository,
+        warehouse_root=built.warehouse.root,
+    )
+    still_usable = query.query_financial_facts(
+        ts_code=later.ts_code,
+        report_period=later.report_period,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=later.published_at,
+        known_at=NOW,
+    )
+    assert still_usable.facts[0]["fact_value"] == Decimal("1000")
 
 
 def test_different_source_does_not_create_correction_chain(tmp_path: Path) -> None:
@@ -699,6 +985,9 @@ def test_error_status_is_explicit_and_does_not_guess_unknown_exceptions() -> Non
     assert ERROR_STATUS == {
         "RAW_PAYLOAD_INTEGRITY_ERROR": RunStatus.FAILED,
         "FINANCIAL_OVERLAY_CONFLICT": RunStatus.FAILED,
+        "FINANCIAL_ENTITY_MISMATCH": RunStatus.BLOCKED,
+        "FINANCIAL_BACKFILL_UNSUPPORTED": RunStatus.BLOCKED,
+        "FINANCIAL_DESCRIPTOR_CONFLICT": RunStatus.BLOCKED,
         "FINANCIAL_TAXONOMY_MISSING": RunStatus.BLOCKED,
         "FINANCIAL_XBRL_PARSE_ERROR": RunStatus.FAILED,
         "FINANCIAL_PARQUET_INTEGRITY_ERROR": RunStatus.FAILED,

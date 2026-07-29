@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import hengce.financials.query as query_module
@@ -167,6 +169,18 @@ def register_artifact(
             artifact.fact_count,
         )
     return artifact
+
+
+def rewrite_artifact_fact_value(path: Path, value: str) -> None:
+    with pq.ParquetFile(path) as parquet:
+        table = parquet.read()
+    fact_value_index = table.schema.get_field_index("fact_value")
+    tampered = table.set_column(
+        fact_value_index,
+        table.schema.field(fact_value_index),
+        pa.array([value], type=table.schema.field(fact_value_index).type),
+    )
+    pq.write_table(tampered, path, compression="zstd")
 
 
 def prepared_old_and_corrected_query(
@@ -729,6 +743,75 @@ def test_unregistered_parquet_below_warehouse_root_is_never_discovered(tmp_path:
 
     assert result.facts == ()
     assert result.filing_ids == ("old",)
+
+
+def test_query_rejects_a_published_artifact_tampered_after_manifest_publication(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_query(tmp_path)
+    owner = filing("old")
+    artifact = register_artifact(
+        prepared,
+        owner,
+        [fact(owner, fact_id="assets", canonical_name="assets", value="1000")],
+    )
+    rewrite_artifact_fact_value(artifact.path, "9999")
+
+    try:
+        result = prepared.query.query_financial_facts(
+            ts_code=owner.ts_code,
+            report_period=owner.report_period,
+            canonical_fact_names=frozenset({"assets"}),
+            as_of=owner.published_at,
+            known_at=owner.valid_from,
+        )
+    except ValueError as error:
+        assert str(error) == "FINANCIAL_PARQUET_INTEGRITY_ERROR"
+    else:
+        pytest.fail(f"tampered manifest value became queryable: {result.facts[0]['fact_value']}")
+
+
+def test_duckdb_reads_the_same_private_snapshot_that_was_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepared_query(tmp_path)
+    owner = filing("old")
+    published = register_artifact(
+        prepared,
+        owner,
+        [fact(owner, fact_id="assets", canonical_name="assets", value="1000")],
+    )
+    original_validate = FinancialFactWarehouse.validate_artifact
+    validated_paths: list[Path] = []
+
+    def validate_then_tamper_published(
+        warehouse: FinancialFactWarehouse,
+        artifact: FinancialArtifact,
+        filing_id: str,
+    ) -> str:
+        result = original_validate(warehouse, artifact, filing_id)
+        validated_paths.append(artifact.path)
+        rewrite_artifact_fact_value(published.path, "9999")
+        return result
+
+    monkeypatch.setattr(
+        FinancialFactWarehouse,
+        "validate_artifact",
+        validate_then_tamper_published,
+    )
+
+    result = prepared.query.query_financial_facts(
+        ts_code=owner.ts_code,
+        report_period=owner.report_period,
+        canonical_fact_names=frozenset({"assets"}),
+        as_of=owner.published_at,
+        known_at=owner.valid_from,
+    )
+
+    assert len(validated_paths) == 1
+    assert validated_paths[0] != published.path
+    assert result.facts[0]["fact_value"] == Decimal("1000")
 
 
 def test_cwd_relative_root_prefixed_manifest_path_is_resolved_once(

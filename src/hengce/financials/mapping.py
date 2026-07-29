@@ -26,6 +26,24 @@ SHARES_MEASURE = f"{{{XBRLI_NAMESPACE}}}shares"
 PURE_MEASURE = f"{{{XBRLI_NAMESPACE}}}pure"
 ExpectedUnitKind = Literal["MONETARY", "SHARES", "PURE", "PER_SHARE"]
 ALLOWED_UNIT_KINDS = frozenset({"MONETARY", "SHARES", "PURE", "PER_SHARE"})
+EntityKey = tuple[str, str]
+EntityOwners = str | tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EntityMappingRegistry:
+    mappings: Mapping[EntityKey, EntityOwners]
+
+    def __post_init__(self) -> None:
+        normalized = {
+            key: tuple(sorted({owners} if isinstance(owners, str) else set(owners)))
+            for key, owners in self.mappings.items()
+        }
+        object.__setattr__(self, "mappings", MappingProxyType(normalized))
+
+    def owners_for(self, entity_scheme: str, entity_identifier: str) -> tuple[str, ...]:
+        owners = self.mappings.get((entity_scheme, entity_identifier))
+        return owners if isinstance(owners, tuple) else ()
 
 
 @dataclass(frozen=True)
@@ -53,8 +71,17 @@ class FactMappingRegistry:
 
 
 class FinancialFactNormalizer:
-    def __init__(self, registry: FactMappingRegistry) -> None:
+    def __init__(
+        self,
+        registry: FactMappingRegistry,
+        entity_registry: EntityMappingRegistry,
+    ) -> None:
         self._registry = registry
+        self._entity_registry = entity_registry
+
+    @property
+    def mapping_version(self) -> str:
+        return self._registry.mapping_version
 
     def normalize(
         self,
@@ -75,6 +102,12 @@ class FinancialFactNormalizer:
             statement_type = StatementType.OTHER
             quality_status = QualityStatus.UNVERIFIED
         else:
+            owners = self._entity_registry.owners_for(
+                raw_fact.context.entity_scheme,
+                raw_fact.context.entity_identifier,
+            )
+            if owners != (filing.ts_code,):
+                raise ValueError("FINANCIAL_ENTITY_MISMATCH")
             if mapping.expected_unit_kind != _unit_kind(raw_fact.unit):
                 raise ValueError("FINANCIAL_UNIT_KIND_MISMATCH")
             mapping_status = MappingStatus.MAPPED
@@ -130,9 +163,7 @@ class FinancialFactNormalizer:
             ),
             collected_at=filing.collected_at,
             version=(
-                f"{filing.filing_version}:"
-                f"{filing.parser_version}:"
-                f"{self._registry.mapping_version}"
+                f"{filing.filing_version}:{filing.parser_version}:{self._registry.mapping_version}"
             ),
             content_hash=filing.content_hash,
             license_policy=filing.license_policy,
@@ -244,6 +275,7 @@ def _is_iso_4217_measure(measure: str) -> bool:
 
 
 __all__ = [
+    "EntityMappingRegistry",
     "FactMapping",
     "FactMappingRegistry",
     "FinancialFactNormalizer",

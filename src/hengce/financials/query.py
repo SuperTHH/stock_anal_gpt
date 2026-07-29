@@ -1,7 +1,11 @@
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import duckdb
 
@@ -10,6 +14,7 @@ from hengce.state.financial_repository import (
     FinancialArtifactRecord,
     FinancialFilingRepository,
 )
+from hengce.warehouse.financial import FinancialArtifact, FinancialFactWarehouse
 
 _UNUSABLE_QUALITY_STATUSES = frozenset(
     {
@@ -79,33 +84,34 @@ class AsOfFinancialQuery:
                 )
             return FinancialQueryResult((), (), ())
 
-        paths = [str(self._approved_path(selected))]
         names = sorted(canonical_fact_names)
         placeholders = ", ".join("?" for _ in names)
-        connection = duckdb.connect()
-        try:
-            cursor = connection.execute(
-                f"""
-                SELECT * FROM read_parquet(?)
-                WHERE ts_code = ?
-                  AND report_period = ?
-                  AND canonical_fact_name IN ({placeholders})
-                  AND quality_status = 'VALID'
-                ORDER BY canonical_fact_name, fact_id
-                """,
-                [paths, ts_code, report_period.isoformat(), *names],
-            )
-            columns = [str(column[0]) for column in cursor.description]
-            fact_rows: list[dict[str, object]] = []
-            for row in cursor.fetchall():
-                fact = dict(zip(columns, row, strict=True))
-                value = fact["fact_value"]
-                if not isinstance(value, Decimal):
-                    fact["fact_value"] = Decimal(str(value))
-                fact_rows.append(fact)
-            facts = tuple(fact_rows)
-        finally:
-            connection.close()
+        with self._validated_snapshot(selected) as snapshot:
+            paths = [str(snapshot)]
+            connection = duckdb.connect()
+            try:
+                cursor = connection.execute(
+                    f"""
+                    SELECT * FROM read_parquet(?)
+                    WHERE ts_code = ?
+                      AND report_period = ?
+                      AND canonical_fact_name IN ({placeholders})
+                      AND quality_status = 'VALID'
+                    ORDER BY canonical_fact_name, fact_id
+                    """,
+                    [paths, ts_code, report_period.isoformat(), *names],
+                )
+                columns = [str(column[0]) for column in cursor.description]
+                fact_rows: list[dict[str, object]] = []
+                for row in cursor.fetchall():
+                    fact = dict(zip(columns, row, strict=True))
+                    value = fact["fact_value"]
+                    if not isinstance(value, Decimal):
+                        fact["fact_value"] = Decimal(str(value))
+                    fact_rows.append(fact)
+                facts = tuple(fact_rows)
+            finally:
+                connection.close()
         return FinancialQueryResult(
             facts,
             (),
@@ -171,3 +177,30 @@ class AsOfFinancialQuery:
         if not approved:
             raise ValueError("FINANCIAL_QUERY_PATH_INVALID")
         return next((candidate for candidate in approved if candidate.is_file()), approved[0])
+
+    @contextmanager
+    def _validated_snapshot(
+        self,
+        record: FinancialArtifactRecord,
+    ) -> Iterator[Path]:
+        source = self._approved_path(record)
+        with TemporaryDirectory(prefix="hengce-financial-query-") as temporary_name:
+            snapshot_root = Path(temporary_name).resolve()
+            if len(source.parts) < 4:
+                raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR")
+            snapshot = snapshot_root.joinpath(*source.parts[-4:])
+            try:
+                snapshot.parent.mkdir(parents=True)
+                shutil.copyfile(source, snapshot)
+            except OSError:
+                raise ValueError("FINANCIAL_PARQUET_INTEGRITY_ERROR") from None
+            artifact = FinancialArtifact(
+                path=snapshot,
+                content_hash=record.expected_hash,
+                fact_count=record.expected_count,
+            )
+            FinancialFactWarehouse(snapshot_root).validate_artifact(
+                artifact,
+                record.filing.filing_id,
+            )
+            yield snapshot

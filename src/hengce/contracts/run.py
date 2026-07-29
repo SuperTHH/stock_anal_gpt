@@ -19,6 +19,7 @@ class RunRecord(BaseModel):
     error_code: str | None = None
     error_summary: str | None = None
     published_report_id: str | None = None
+    descriptor_fingerprint: str | None = None
 
 
 class RefusalRecord(BaseModel):

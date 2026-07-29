@@ -21,8 +21,15 @@ from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
-from hengce.financials.mapping import FactMappingRegistry, FinancialFactNormalizer
-from hengce.financials.package import LocalAttachmentInspector, SafePackageMaterializer
+from hengce.financials.mapping import (
+    EntityMappingRegistry,
+    FactMappingRegistry,
+    FinancialFactNormalizer,
+)
+from hengce.financials.package import (
+    SafePackageMaterializer,
+    validated_attachment_snapshot,
+)
 from hengce.financials.quality import FinancialQualityValidator
 from hengce.financials.xbrl import ArelleXbrlProcessor
 from hengce.policy.guard import PolicyGuard
@@ -189,7 +196,10 @@ def build_financial_ingestion(
         repository=FinancialFilingRepository(state.path),
         materializer=SafePackageMaterializer(raw_store),
         processor=ArelleXbrlProcessor(),
-        normalizer=FinancialFactNormalizer(mapping_registry),
+        normalizer=FinancialFactNormalizer(
+            mapping_registry,
+            EntityMappingRegistry(mappings={}),
+        ),
         validator=FinancialQualityValidator(),
         warehouse=FinancialFactWarehouse(settings.data_dir / "warehouse"),
         state=state,
@@ -306,15 +316,19 @@ def register_xbrl_taxonomy(
         "cli.register_taxonomy",
     )
     validate_financial_source(source_id)
-    LocalAttachmentInspector().validate(file, content_type, taxonomy=True)
-    validate_taxonomy_entrypoint(file, entrypoint)
-    raw_ref = RawObjectStore(settings.data_dir / "raw").put(
-        source_id=source_id,
-        source_url=source_url,
-        collected_at=parsed_collected_at,
-        content_type=content_type,
-        payload=file.read_bytes(),
-    )
+    with validated_attachment_snapshot(
+        file,
+        content_type,
+        taxonomy=True,
+    ) as snapshot:
+        validate_taxonomy_entrypoint(snapshot.path, entrypoint)
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=source_url,
+            collected_at=parsed_collected_at,
+            content_type=content_type,
+            payload=snapshot.payload,
+        )
     reference = TaxonomyPackageRef(
         taxonomy_id=taxonomy_id,
         source_id=source_id,
@@ -365,15 +379,19 @@ def import_financial_xbrl(
         "cli.import_financial_xbrl",
     )
     validate_financial_identity(source_id, ts_code, exchange)
-    LocalAttachmentInspector().validate(file, content_type, taxonomy=False)
-    validate_instance_entrypoint(file, instance_entrypoint)
-    raw_ref = RawObjectStore(settings.data_dir / "raw").put(
-        source_id=source_id,
-        source_url=source_url,
-        collected_at=parsed_collected_at,
-        content_type=content_type,
-        payload=file.read_bytes(),
-    )
+    with validated_attachment_snapshot(
+        file,
+        content_type,
+        taxonomy=False,
+    ) as snapshot:
+        validate_instance_entrypoint(snapshot.path, instance_entrypoint)
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=source_url,
+            collected_at=parsed_collected_at,
+            content_type=content_type,
+            payload=snapshot.payload,
+        )
     descriptor = FilingDescriptor(
         source_id=source_id,
         source_url=source_url,

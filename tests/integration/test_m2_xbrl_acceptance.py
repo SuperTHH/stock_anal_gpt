@@ -28,6 +28,7 @@ from hengce.contracts.financial import (
     TaxonomyPackageRef,
 )
 from hengce.financials.mapping import (
+    EntityMappingRegistry,
     FactMapping,
     FactMappingRegistry,
     FinancialFactNormalizer,
@@ -313,7 +314,14 @@ def _financial_ingestion_service(
         repository=repository,
         materializer=SafePackageMaterializer(raw_store),
         processor=ArelleXbrlProcessor(),
-        normalizer=FinancialFactNormalizer(mapping),
+        normalizer=FinancialFactNormalizer(
+            mapping,
+            EntityMappingRegistry(
+                mappings={
+                    ("urn:hengce:test-issuer", "699999.SH"): "699999.SH",
+                }
+            ),
+        ),
         validator=FinancialQualityValidator(),
         warehouse=warehouse,
         state=state,

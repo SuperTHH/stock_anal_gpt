@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import ctypes
+import hashlib
 import os
 import re
 import stat
@@ -36,6 +37,12 @@ class MaterializedFiling:
     entrypoint_path: Path
     taxonomy_package_paths: tuple[Path, ...]
     root: Path
+
+
+@dataclass(frozen=True)
+class ValidatedAttachmentSnapshot:
+    payload: bytes
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -414,6 +421,43 @@ class LocalAttachmentInspector:
         _reject_unsafe_xml(path)
 
 
+@contextmanager
+def validated_attachment_snapshot(
+    path: Path,
+    content_type: str,
+    *,
+    taxonomy: bool,
+) -> Iterator[ValidatedAttachmentSnapshot]:
+    source = path.absolute()
+    declared_name = source.name
+    if _sanitized_declared_name(declared_name) != declared_name or _has_unsafe_windows_component(
+        (declared_name,)
+    ):
+        raise _error("FINANCIAL_ATTACHMENT_TYPE_INVALID")
+    try:
+        root = source.parent.resolve(strict=True)
+        with _safe_input_file(root, root / declared_name) as input_stream:
+            payload = input_stream.read()
+    except (OSError, ValueError):
+        raise _error("FINANCIAL_ATTACHMENT_TYPE_INVALID") from None
+
+    with TemporaryDirectory(prefix="hengce-xbrl-snapshot-") as temporary_name:
+        snapshot_root = Path(temporary_name).resolve()
+        snapshot_path = snapshot_root / declared_name
+        try:
+            with _safe_output_file(snapshot_root, snapshot_path) as output:
+                output.write(payload)
+                output.flush()
+        except OSError:
+            raise _error("FINANCIAL_ATTACHMENT_TYPE_INVALID") from None
+        LocalAttachmentInspector().validate(
+            snapshot_path,
+            content_type,
+            taxonomy=taxonomy,
+        )
+        yield ValidatedAttachmentSnapshot(payload=payload, path=snapshot_path)
+
+
 class SafePackageMaterializer:
     def __init__(self, store: RawObjectStore) -> None:
         self._store = store
@@ -457,6 +501,7 @@ class SafePackageMaterializer:
             root,
             source,
             Path("attachments") / "instance" / declared_name,
+            descriptor.raw_object_hash,
         )
         self._inspector.validate(attachment, descriptor.content_type, taxonomy=False)
         if suffix != ".zip":
@@ -493,6 +538,7 @@ class SafePackageMaterializer:
             root,
             source,
             Path("attachments") / f"taxonomy-{index}" / declared_name,
+            taxonomy.raw_object_hash,
         )
         self._inspector.validate(attachment, taxonomy.content_type, taxonomy=True)
         if attachment.suffix.lower() != ".zip":
@@ -586,8 +632,14 @@ class SafePackageMaterializer:
         return targets_by_source
 
     @staticmethod
-    def _copy_attachment(root: Path, source: Path, relative_target: Path) -> Path:
+    def _copy_attachment(
+        root: Path,
+        source: Path,
+        relative_target: Path,
+        expected_hash: str,
+    ) -> Path:
         target = _contained_target(root, root / relative_target)
+        copied_hash = hashlib.sha256()
         with (
             source.open("rb") as input_stream,
             _safe_output_file(
@@ -596,7 +648,10 @@ class SafePackageMaterializer:
             ) as output,
         ):
             while chunk := input_stream.read(_COPY_CHUNK_BYTES):
+                copied_hash.update(chunk)
                 output.write(chunk)
+        if copied_hash.hexdigest() != expected_hash:
+            raise _error("RAW_PAYLOAD_INTEGRITY_ERROR")
         return target
 
     def _extract_zip(
