@@ -1,10 +1,13 @@
 """Local-only command-line entry points for the research workspace."""
 
 import hashlib
+import io
 import json
+import re
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
@@ -16,11 +19,27 @@ from hengce.bootstrap import bootstrap_state
 from hengce.collectors.security_master import OfficialSecurityMasterCsvImporter
 from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
+from hengce.contracts.enums import DiscoveryMethod, ReportType
+from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
+from hengce.financials.mapping import (
+    EntityMappingRegistry,
+    FactMappingRegistry,
+    FinancialFactNormalizer,
+)
+from hengce.financials.package import (
+    SafePackageMaterializer,
+    validated_attachment_snapshot,
+)
+from hengce.financials.quality import FinancialQualityValidator
+from hengce.financials.xbrl import ArelleXbrlProcessor
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
+from hengce.services.financial_ingestion import FinancialIngestionService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
+from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.repository import StateRepository
+from hengce.warehouse.financial import FinancialFactWarehouse
 from hengce.warehouse.market import MarketWarehouse
 
 app = typer.Typer(no_args_is_help=True)
@@ -63,6 +82,82 @@ def parse_trade_date(value: str) -> date:
     return parsed
 
 
+def parse_financial_date(value: str) -> date:
+    """Parse a strict ISO report date."""
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise typer.BadParameter("report-period must use YYYY-MM-DD") from error
+    if parsed.isoformat() != value:
+        raise typer.BadParameter("report-period must use YYYY-MM-DD")
+    return parsed
+
+
+def parse_offset_datetime(value: str, option_name: str) -> datetime:
+    """Parse an ISO datetime that contains an explicit UTC offset."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise typer.BadParameter(f"{option_name} must be ISO-8601") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise typer.BadParameter(f"{option_name} must include an offset")
+    return parsed
+
+
+def validate_financial_identity(source_id: str, ts_code: str, exchange: str) -> None:
+    """Require the exchange and Tushare suffix declared by the source."""
+    validate_financial_source(source_id)
+    expected = {
+        "sse": ("SSE", ".SH"),
+        "szse": ("SZSE", ".SZ"),
+    }[source_id]
+    if (
+        exchange != expected[0]
+        or not re.fullmatch(r"[0-9]{6}\.(?:SH|SZ)", ts_code)
+        or not ts_code.endswith(expected[1])
+    ):
+        raise ValueError("FINANCIAL_SOURCE_MISMATCH")
+
+
+def validate_financial_source(source_id: str) -> None:
+    """Restrict financial XBRL commands to the two exchange policy identities."""
+    if source_id not in {"sse", "szse"}:
+        raise ValueError("FINANCIAL_SOURCE_MISMATCH")
+
+
+def validate_instance_entrypoint(file: Path, entrypoint: str | None) -> None:
+    """Require a safe relative entrypoint exactly when the instance is a ZIP."""
+    if file.suffix.lower() != ".zip":
+        if entrypoint is not None:
+            raise ValueError("FINANCIAL_ENTRYPOINT_INVALID")
+        return
+    if entrypoint is None or not is_safe_relative_entrypoint(entrypoint):
+        raise ValueError("FINANCIAL_ENTRYPOINT_INVALID")
+
+
+def validate_taxonomy_entrypoint(file: Path, entrypoint: str) -> None:
+    """Require direct schemas to name themselves and ZIP entrypoints to stay relative."""
+    if file.suffix.lower() == ".zip":
+        valid = is_safe_relative_entrypoint(entrypoint)
+    else:
+        valid = entrypoint == file.name
+    if not valid:
+        raise ValueError("FINANCIAL_ENTRYPOINT_INVALID")
+
+
+def is_safe_relative_entrypoint(entrypoint: str) -> bool:
+    if (
+        not entrypoint
+        or "\x00" in entrypoint
+        or "\\" in entrypoint
+        or entrypoint.startswith(("/", "//"))
+        or re.match(r"^[A-Za-z]:", entrypoint)
+    ):
+        return False
+    relative = PurePosixPath(entrypoint)
+    return bool(relative.parts) and not relative.is_absolute() and ".." not in relative.parts
+
+
 def build_market_ingestion(
     settings: Settings, client: httpx.Client, policy_file: Path | None = None
 ) -> MarketIngestionService:
@@ -80,6 +175,33 @@ def build_market_ingestion(
         collector=collector,
         raw_store=RawObjectStore(settings.data_dir / "raw"),
         warehouse=MarketWarehouse(settings.data_dir / "normalized"),
+        state=state,
+    )
+
+
+def build_financial_ingestion(
+    settings: Settings,
+    policy_file: Path | None = None,
+) -> FinancialIngestionService:
+    """Compose local-only financial ingestion with no production QName mappings."""
+    state = bootstrap_state(settings, policy_file)
+    raw_store = RawObjectStore(settings.data_dir / "raw")
+    mapping_registry = FactMappingRegistry(
+        mapping_version="empty-v1",
+        mappings={},
+    )
+    return FinancialIngestionService(
+        guard=PolicyGuard(state),
+        raw_store=raw_store,
+        repository=FinancialFilingRepository(state.path),
+        materializer=SafePackageMaterializer(raw_store),
+        processor=ArelleXbrlProcessor(),
+        normalizer=FinancialFactNormalizer(
+            mapping_registry,
+            EntityMappingRegistry(mappings={}),
+        ),
+        validator=FinancialQualityValidator(),
+        warehouse=FinancialFactWarehouse(settings.data_dir / "warehouse"),
         state=state,
     )
 
@@ -169,6 +291,126 @@ def import_security_master(
             sort_keys=True,
         )
     )
+
+
+@app.command("register-xbrl-taxonomy")
+def register_xbrl_taxonomy(
+    file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    taxonomy_id: Annotated[str, typer.Option()],
+    source_id: Annotated[str, typer.Option()],
+    source_url: Annotated[str, typer.Option()],
+    entrypoint: Annotated[str, typer.Option()],
+    content_type: Annotated[str, typer.Option()],
+    collected_at: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Register one locally supplied taxonomy package; this command never fetches."""
+    parsed_collected_at = parse_offset_datetime(collected_at, "collected-at")
+    settings = Settings(data_dir=data_dir)
+    state = bootstrap_state(settings, policy_file)
+    PolicyGuard(state).validate(
+        source_id,
+        source_url,
+        "xbrl",
+        "cli.register_taxonomy",
+    )
+    validate_financial_source(source_id)
+    with validated_attachment_snapshot(
+        file,
+        content_type,
+        taxonomy=True,
+    ) as snapshot:
+        validate_taxonomy_entrypoint(snapshot.path, entrypoint)
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=source_url,
+            collected_at=parsed_collected_at,
+            content_type=content_type,
+            payload=snapshot.payload,
+        )
+    reference = TaxonomyPackageRef(
+        taxonomy_id=taxonomy_id,
+        source_id=source_id,
+        source_url=source_url,
+        raw_object_hash=raw_ref.content_hash,
+        package_name=file.name,
+        entrypoint=entrypoint,
+        content_type=content_type,
+        collected_at=parsed_collected_at,
+    )
+    FinancialFilingRepository(state.path).register_taxonomy(reference)
+    typer.echo(
+        json.dumps(
+            reference.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("import-financial-xbrl")
+def import_financial_xbrl(
+    file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    source_id: Annotated[str, typer.Option()],
+    source_url: Annotated[str, typer.Option()],
+    ts_code: Annotated[str, typer.Option()],
+    exchange: Annotated[str, typer.Option()],
+    report_period: Annotated[str, typer.Option()],
+    report_type: Annotated[ReportType, typer.Option()],
+    published_at: Annotated[str, typer.Option()],
+    collected_at: Annotated[str, typer.Option()],
+    content_type: Annotated[str, typer.Option()],
+    taxonomy_id: Annotated[list[str], typer.Option()],
+    instance_entrypoint: Annotated[str | None, typer.Option()] = None,
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Import one locally supplied financial XBRL attachment; this command never fetches."""
+    parsed_report_period = parse_financial_date(report_period)
+    parsed_published_at = parse_offset_datetime(published_at, "published-at")
+    parsed_collected_at = parse_offset_datetime(collected_at, "collected-at")
+    settings = Settings(data_dir=data_dir)
+    state = bootstrap_state(settings, policy_file)
+    PolicyGuard(state).validate(
+        source_id,
+        source_url,
+        "xbrl",
+        "cli.import_financial_xbrl",
+    )
+    validate_financial_identity(source_id, ts_code, exchange)
+    with validated_attachment_snapshot(
+        file,
+        content_type,
+        taxonomy=False,
+    ) as snapshot:
+        validate_instance_entrypoint(snapshot.path, instance_entrypoint)
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=source_url,
+            collected_at=parsed_collected_at,
+            content_type=content_type,
+            payload=snapshot.payload,
+        )
+    descriptor = FilingDescriptor(
+        source_id=source_id,
+        source_url=source_url,
+        ts_code=ts_code,
+        exchange=exchange,
+        report_period=parsed_report_period,
+        report_type=report_type,
+        published_at=parsed_published_at,
+        collected_at=parsed_collected_at,
+        attachment_name=file.name,
+        content_type=content_type,
+        raw_object_hash=raw_ref.content_hash,
+        taxonomy_refs=tuple(taxonomy_id),
+        discovery_method=DiscoveryMethod.MANUAL_IMPORT,
+        instance_entrypoint=instance_entrypoint,
+    )
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        result = build_financial_ingestion(settings, policy_file).run(descriptor)
+    typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
 
 
 @app.command("check-security-universe")

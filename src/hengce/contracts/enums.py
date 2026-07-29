@@ -25,3 +25,72 @@ class RunStatus(StrEnum):
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
+
+
+class ReportType(StrEnum):
+    ANNUAL = "ANNUAL"
+    Q1 = "Q1"
+    HALF_YEAR = "HALF_YEAR"
+    Q3 = "Q3"
+
+
+class StatementType(StrEnum):
+    BALANCE_SHEET = "BALANCE_SHEET"
+    INCOME_STATEMENT = "INCOME_STATEMENT"
+    CASH_FLOW = "CASH_FLOW"
+    OTHER = "OTHER"
+
+
+class MappingStatus(StrEnum):
+    MAPPED = "MAPPED"
+    UNMAPPED = "UNMAPPED"
+
+
+class ConsolidationScope(StrEnum):
+    CONSOLIDATED = "CONSOLIDATED"
+    PARENT = "PARENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class DiscoveryMethod(StrEnum):
+    FIXTURE = "FIXTURE"
+    MANUAL_IMPORT = "MANUAL_IMPORT"
+
+
+class ConflictResolutionStatus(StrEnum):
+    OPEN = "OPEN"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class ActionType(StrEnum):
+    CASH_DIVIDEND = "CASH_DIVIDEND"
+    STOCK_DIVIDEND = "STOCK_DIVIDEND"
+    SPLIT = "SPLIT"
+    RIGHTS_ISSUE = "RIGHTS_ISSUE"
+
+
+class ActionStatus(StrEnum):
+    ANNOUNCED = "ANNOUNCED"
+    IMPLEMENTED = "IMPLEMENTED"
+    CANCELLED = "CANCELLED"
+
+
+class StrategyType(StrEnum):
+    QUALITY_GROWTH = "QUALITY_GROWTH"
+    DEEP_VALUE = "DEEP_VALUE"
+    STABLE_DIVIDEND = "STABLE_DIVIDEND"
+
+
+class CandidateStatus(StrEnum):
+    CANDIDATE = "CANDIDATE"
+    WATCH = "WATCH"
+    NOT_QUALIFIED = "NOT_QUALIFIED"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+
+
+class ReportStatus(StrEnum):
+    PUBLISHED = "PUBLISHED"
+    PUBLISHED_PARTIAL = "PUBLISHED_PARTIAL"
+    BLOCKED_MISSING_DATA = "BLOCKED_MISSING_DATA"
+    BLOCKED_QUALITY_FAILURE = "BLOCKED_QUALITY_FAILURE"
+    NOT_A_TRADING_DAY = "NOT_A_TRADING_DAY"

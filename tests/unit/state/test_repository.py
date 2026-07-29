@@ -356,7 +356,7 @@ def test_latest_security_master_snapshot_uses_absolute_time_then_snapshot_id(
     assert repository.get_latest_security_master_snapshot("sse") == later
 
     same_instant_later_id = repository.save_security_master_snapshot(
-        [security("600001.SH", "MAIN_SH")],
+        [security("699999.SH", "MAIN_SH")],
         source_id="sse",
         source_url="https://www.sse.com.cn/master.csv",
         collected_at=datetime(2026, 7, 24, 11, tzinfo=timezone(timedelta(hours=8))),
@@ -765,8 +765,10 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
         "002_rate_reservations",
         "003_ingestion_leases",
         "004_security_master_snapshots",
-        "005_ingestion_run_link",
-    }
+            "005_ingestion_run_link",
+            "006_financial_filings",
+            "007_reports",
+        }
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
     assert lease_columns == {
         "trade_date",

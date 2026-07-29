@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- FIXTURE DATA - NOT A REAL ISSUER -->
+<xbrli:xbrl
+  xmlns:xbrli="http://www.xbrl.org/2003/instance"
+  xmlns:link="http://www.xbrl.org/2003/linkbase"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+  xmlns:t="urn:hengce:test-gaap">
+  <link:schemaRef xlink:type="simple" xlink:href="test-gaap.xsd"/>
+  <xbrli:context id="instant">
+    <xbrli:entity>
+      <xbrli:identifier scheme="urn:hengce:test-issuer">699999.SH</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:instant>2025-12-31</xbrli:instant>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="duration">
+    <xbrli:entity>
+      <xbrli:identifier scheme="urn:hengce:test-issuer">699999.SH</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:unit id="CNY">
+    <xbrli:measure>iso4217:CNY</xbrli:measure>
+  </xbrli:unit>
+  <t:Assets contextRef="instant" unitRef="CNY" decimals="0">1000</t:Assets>
+  <t:Liabilities contextRef="instant" unitRef="CNY" decimals="0">400</t:Liabilities>
+  <t:Equity contextRef="instant" unitRef="CNY" decimals="0">600</t:Equity>
+  <t:FactTuple>
+    <t:Revenue contextRef="duration" unitRef="CNY" decimals="0">2000</t:Revenue>
+  </t:FactTuple>
+  <t:Assets contextRef="instant" unitRef="CNY" xsi:nil="true"/>
+  <t:DisclosureNote contextRef="duration">Fictional fixture disclosure.</t:DisclosureNote>
+</xbrli:xbrl>

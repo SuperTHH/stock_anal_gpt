@@ -1,5 +1,10 @@
 .worktrees/
 .npm-cache/
+node_modules/
+dist/
+*.tsbuildinfo
+apps/web/vite.config.js
+apps/web/vite.config.d.ts
 .superdesign/review/
 .superdesign/tmp/
 .superpowers/sdd/
