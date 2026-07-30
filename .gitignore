@@ -8,6 +8,7 @@ apps/web/vite.config.d.ts
 .superdesign/review/
 .superdesign/tmp/
 .superpowers/sdd/
+.superpowers/brainstorm/
 .env
 .venv/
 __pycache__/
