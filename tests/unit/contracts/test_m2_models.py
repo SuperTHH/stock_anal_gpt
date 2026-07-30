@@ -111,3 +111,22 @@ def test_derived_metric_rejects_non_derived_quality() -> None:
         DerivedFinancialMetric.model_validate(
             {**metric_payload(), "quality_status": QualityStatus.VALID}
         )
+
+
+def test_derived_metric_preserves_formula_assumptions() -> None:
+    """Catches presenting an explicit tax proxy as if it were a sourced company value."""
+    metric = DerivedFinancialMetric.model_validate(
+        {
+            **metric_payload(),
+            "metric_name": "roic_2025",
+            "formula_metadata": {
+                "tax_rate_proxy": "0.25",
+                "tax_rate_kind": "pilot_proxy_not_company_actual",
+            },
+        }
+    )
+
+    assert metric.formula_metadata == {
+        "tax_rate_proxy": "0.25",
+        "tax_rate_kind": "pilot_proxy_not_company_actual",
+    }

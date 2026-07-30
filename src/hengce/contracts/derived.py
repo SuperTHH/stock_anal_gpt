@@ -1,7 +1,13 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import ConfigDict, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from .base import FactBase
 from .enums import QualityStatus
@@ -19,6 +25,7 @@ class DerivedFinancialMetric(FactBase):
     known_at: datetime
     input_fact_ids: tuple[str, ...]
     algorithm_version: str
+    formula_metadata: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("as_of", "known_at")
     @classmethod

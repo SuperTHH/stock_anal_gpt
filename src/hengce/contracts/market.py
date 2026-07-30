@@ -67,6 +67,8 @@ class CorporateAction(FactBase):
     ex_date: date
     pay_date: date | None = None
     cash_dividend_per_share: Decimal | None = None
+    cash_dividend_total: Decimal | None = None
+    fiscal_year: int | None = None
     stock_dividend_ratio: Decimal | None = None
     split_ratio: Decimal | None = None
     rights_ratio: Decimal | None = None
@@ -97,4 +99,8 @@ class CorporateAction(FactBase):
         }[self.action_type]
         if any(value is None or value <= 0 for value in required_terms):
             raise ValueError("action terms must be positive and complete")
+        if self.cash_dividend_total is not None and self.cash_dividend_total <= 0:
+            raise ValueError("cash dividend total must be positive")
+        if self.fiscal_year is not None and not 2000 <= self.fiscal_year <= 2100:
+            raise ValueError("fiscal year is out of range")
         return self
