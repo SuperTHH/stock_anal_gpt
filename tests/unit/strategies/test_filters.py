@@ -40,6 +40,12 @@ def eligible_input(**updates: object) -> SecurityResearchInput:
         "total_return_quality": QualityStatus.DERIVED,
         "publication_order_known": True,
         "financial_age_days": 120,
+        "evidence_record_ids": (
+            "security-master-1",
+            "trading-status-1",
+            "audit-opinion-1",
+            "investigation-screen-1",
+        ),
     }
     payload.update(updates)
     return SecurityResearchInput(**payload)
@@ -61,6 +67,12 @@ def test_eligible_security_passes_all_twelve_filters() -> None:
     assert result.passed is True
     assert result.reasons == ()
     assert result.filter_version == "hard-filter-v1"
+    assert result.source_record_ids == (
+        "security-master-1",
+        "trading-status-1",
+        "audit-opinion-1",
+        "investigation-screen-1",
+    )
 
 
 @pytest.mark.parametrize(

@@ -39,6 +39,7 @@ class SecurityResearchInput:
     total_return_quality: QualityStatus
     publication_order_known: bool
     financial_age_days: int
+    evidence_record_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +47,7 @@ class HardFilterResult:
     passed: bool
     reasons: tuple[str, ...]
     filter_version: str
+    source_record_ids: tuple[str, ...] = ()
 
 
 class HardFilterEngine:
@@ -97,4 +99,5 @@ class HardFilterEngine:
             passed=not reasons,
             reasons=tuple(reasons),
             filter_version=self.config.filter_version,
+            source_record_ids=item.evidence_record_ids,
         )

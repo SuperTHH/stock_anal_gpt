@@ -231,24 +231,11 @@ class StrategyEngine:
                 used_market_fallback=False,
             )
 
-        industry_values = self._values(
+        values = self._values(
             population,
             spec.name,
-            industry=item.industry_l1,
             data_cutoff_at=data_cutoff_at,
             known_at=known_at,
-        )
-        use_market = len(industry_values) < 20
-        values = (
-            self._values(
-                population,
-                spec.name,
-                industry=None,
-                data_cutoff_at=data_cutoff_at,
-                known_at=known_at,
-            )
-            if use_market
-            else industry_values
         )
         winsorized = self._winsorize(values)
         raw = self._winsorize_value(factor.value, values)
@@ -263,10 +250,8 @@ class StrategyEngine:
             weighted_score=normalized * spec.weight,
             quality_status=factor.quality_status,
             source_record_ids=factor.source_record_ids,
-            normalization_scope=(
-                "market" if use_market else f"industry:{item.industry_l1 or 'UNKNOWN'}"
-            ),
-            used_market_fallback=use_market,
+            normalization_scope="pilot_universe",
+            used_market_fallback=False,
         )
 
     @staticmethod
@@ -274,15 +259,13 @@ class StrategyEngine:
         population: list[SecurityStrategyInput],
         factor_name: str,
         *,
-        industry: str | None,
         data_cutoff_at: datetime,
         known_at: datetime,
     ) -> list[Decimal]:
         values = [
             factor.value
             for item in population
-            if (industry is None or item.industry_l1 == industry)
-            and (factor := item.factors.get(factor_name)) is not None
+            if (factor := item.factors.get(factor_name)) is not None
             and StrategyEngine._factor_available(
                 factor,
                 data_cutoff_at,

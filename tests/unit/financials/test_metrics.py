@@ -213,6 +213,7 @@ def financial_series(
             "operating_cash_flow": "180",
             "capital_expenditure": "60",
             "total_assets": "1200",
+            "current_assets": "500",
             "total_liabilities": "400",
             "interest_bearing_debt": "240",
             "cash_and_equivalents": "120",
@@ -330,6 +331,9 @@ def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:
         Decimal("0.000001")
     ) == Decimal("0.009428")
     assert result.metrics["debt_ratio"].value == Decimal("1") / Decimal("3")
+    assert result.metrics["current_asset_ratio"].value == Decimal("5") / Decimal(
+        "12"
+    )
     assert result.metrics["interest_bearing_debt_ratio"].value == Decimal("0.2")
     assert result.metrics["cash_debt_coverage"].value == Decimal("0.5")
     assert result.metrics["free_cash_flow"].value == Decimal("120")

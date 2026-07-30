@@ -49,6 +49,7 @@ PERIOD_VALUES: dict[date, dict[str, str]] = {
         "operating_cash_flow": "180",
         "capital_expenditure": "60",
         "total_assets": "1200",
+        "current_assets": "500",
         "total_liabilities": "400",
         "interest_bearing_debt": "240",
         "cash_and_equivalents": "120",

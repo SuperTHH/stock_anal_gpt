@@ -564,6 +564,10 @@ class PilotMetricCalculator:
                 debt_2025,
                 fact(annual_2025, "total_assets"),
             ),
+            "current_asset_ratio": ratio(
+                fact(annual_2025, "current_assets"),
+                fact(annual_2025, "total_assets"),
+            ),
             "cash_debt_coverage": ratio(cash_2025, debt_2025),
         }
 

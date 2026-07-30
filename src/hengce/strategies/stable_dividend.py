@@ -6,7 +6,7 @@ from .engine import FactorSpec, StrategyDefinition
 
 STABLE_DIVIDEND_V1 = StrategyDefinition(
     strategy_type=StrategyType.STABLE_DIVIDEND,
-    version="stable-dividend-v1",
+    version="stable-dividend-pilot-v1",
     factors=(
         FactorSpec("dividend_yield", Decimal("0.25")),
         FactorSpec("dividend_continuity", Decimal("0.20")),

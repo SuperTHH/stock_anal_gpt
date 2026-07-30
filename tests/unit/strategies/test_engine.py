@@ -50,8 +50,8 @@ def complete_values(value: str) -> dict[str, str]:
     return {spec.name: value for spec in QUALITY_GROWTH_V1.factors}
 
 
-def test_small_industry_sample_falls_back_to_market_with_lineage() -> None:
-    """Catches pretending a two-security industry percentile is statistically adequate."""
+def test_pilot_normalization_never_displays_industry_or_fallback_scope() -> None:
+    """Catches leaking an industry rank into the fixed thirty-security pilot sample."""
     result = StrategyEngine(QUALITY_GROWTH_V1).rank(
         [
             security_input("699998.SH", complete_values("10")),
@@ -64,8 +64,38 @@ def test_small_industry_sample_falls_back_to_market_with_lineage() -> None:
 
     top = result[0]
     assert top.ts_code == "699999.SH"
-    assert all(detail.used_market_fallback for detail in top.factor_details)
-    assert all(detail.normalization_scope == "market" for detail in top.factor_details)
+    assert all(not detail.used_market_fallback for detail in top.factor_details)
+    assert all(
+        detail.normalization_scope == "pilot_universe"
+        for detail in top.factor_details
+    )
+
+
+def test_equal_scores_use_ts_code_ascending_tie_break() -> None:
+    result = StrategyEngine(QUALITY_GROWTH_V1).rank(
+        [
+            security_input("699999.SH", complete_values("10")),
+            security_input("699998.SH", complete_values("10")),
+        ],
+        report_date=date(2026, 7, 29),
+        data_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert [candidate.ts_code for candidate in result] == [
+        "699998.SH",
+        "699999.SH",
+    ]
+
+
+def test_winsorization_uses_frozen_one_and_ninety_nine_percent_bounds() -> None:
+    values = [Decimal(index) for index in range(100)] + [Decimal("10000")]
+
+    winsorized = StrategyEngine._winsorize(values)
+
+    assert min(winsorized) == StrategyEngine._quantile(values, Decimal("0.01"))
+    assert max(winsorized) == StrategyEngine._quantile(values, Decimal("0.99"))
+    assert winsorized[-1] < Decimal("10000")
 
 
 def test_missing_noncritical_factor_does_not_redistribute_its_weight() -> None:

@@ -82,4 +82,8 @@ def test_three_pools_have_independent_scores_versions_and_rankings() -> None:
         quality[0].strategy_version,
         value[0].strategy_version,
         dividend[0].strategy_version,
-    } == {"quality-growth-v1", "deep-value-v1", "stable-dividend-v1"}
+    } == {
+        "quality-growth-pilot-v1",
+        "deep-value-pilot-v1",
+        "stable-dividend-pilot-v1",
+    }
