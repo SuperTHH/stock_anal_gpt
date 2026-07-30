@@ -1,11 +1,17 @@
 import json
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from hengce.config import Settings
+from hengce.contracts.enums import QualityStatus
+from hengce.contracts.market import MarketBar, SecurityMaster
 from hengce.contracts.policy import SourcePolicy
+from hengce.services.pilot_universe import PilotUniverseSelector
 from hengce.state.repository import StateRepository
+from hengce.warehouse.market import MarketWarehouse
 
 POLICY_FILE = Path(__file__).parents[2] / "config" / "source_policies.json"
 
@@ -117,3 +123,102 @@ def test_bootstrap_only_inserts_missing_policies_and_preserves_operational_state
     bootstrap_state(settings, POLICY_FILE)
 
     assert repository.get_policy("tushare") == changed
+
+
+def test_pilot_selector_consumes_persisted_market_and_dual_master_shapes(
+    tmp_path: Path,
+) -> None:
+    """Catches SQLite/Parquet serialization changing the selector's ranking inputs."""
+    from hengce.bootstrap import bootstrap_state
+
+    settings = Settings(data_dir=tmp_path / "data")
+    repository = bootstrap_state(settings, POLICY_FILE)
+    market_date = date(2026, 7, 22)
+    cutoff = datetime(2026, 7, 22, 21, 30, tzinfo=UTC)
+    created_at = datetime(2026, 7, 30, 9, tzinfo=UTC)
+    board_config = (
+        ("MAIN_SH", "SSE", "600", "SH", 8),
+        ("STAR", "SSE", "688", "SH", 7),
+        ("MAIN_SZ", "SZSE", "000", "SZ", 8),
+        ("CHINEXT", "SZSE", "300", "SZ", 7),
+    )
+    securities: list[SecurityMaster] = []
+    bars: list[MarketBar] = []
+    sequence = 0
+    for board, exchange, prefix, suffix, count in board_config:
+        for index in range(1, count + 1):
+            sequence += 1
+            symbol = f"{prefix}{index:03d}"
+            ts_code = f"{symbol}.{suffix}"
+            securities.append(
+                SecurityMaster(
+                    ts_code=ts_code,
+                    symbol=symbol,
+                    name=f"虚构公司{sequence:02d}",
+                    exchange=exchange,
+                    board=board,
+                    list_date=date(2020, 1, 1),
+                    is_in_scope=True,
+                )
+            )
+            bars.append(
+                MarketBar(
+                    record_id=f"bar-{ts_code}",
+                    source_id="tushare",
+                    source_url="http://api.tushare.pro/",
+                    collected_at=cutoff,
+                    version="daily-20260722",
+                    content_hash="9" * 64,
+                    license_policy="tushare-daily",
+                    quality_status=QualityStatus.VALID,
+                    valid_from=cutoff,
+                    ts_code=ts_code,
+                    trade_date=market_date,
+                    open=Decimal("10"),
+                    high=Decimal("11"),
+                    low=Decimal("9"),
+                    close=Decimal("10.5"),
+                    pre_close=Decimal("10"),
+                    volume=Decimal("1000000"),
+                    amount=Decimal("1000000000") - sequence,
+                )
+            )
+
+    repository.save_security_master_snapshot(
+        [item for item in securities if item.exchange == "SSE"],
+        source_id="sse",
+        source_url="https://www.sse.com.cn/assortment/stock/list/share/",
+        collected_at=cutoff,
+        content_hash="1" * 64,
+        version="sse-pilot-fixture-v1",
+        quality_lineage={"fixture": True},
+    )
+    repository.save_security_master_snapshot(
+        [item for item in securities if item.exchange == "SZSE"],
+        source_id="szse",
+        source_url="https://www.szse.cn/market/product/stock/list/",
+        collected_at=cutoff,
+        content_hash="2" * 64,
+        version="szse-pilot-fixture-v1",
+        quality_lineage={"fixture": True},
+    )
+    warehouse = MarketWarehouse(settings.data_dir / "normalized")
+    artifact = warehouse.write_bars(bars)
+    market_hash = warehouse.validate_artifact(artifact, market_date, 30)
+    master = repository.get_security_master_universe()
+
+    snapshot = PilotUniverseSelector().select(
+        market_date=market_date,
+        report_cutoff_at=cutoff,
+        bars=warehouse.read_bars(market_date),
+        securities=master.securities,
+        market_content_hash=market_hash,
+        master_universe_hash=master.universe_hash,
+        created_at=created_at,
+    )
+
+    assert len(snapshot.members) == 30
+    assert snapshot.input_hashes == {
+        "market": market_hash,
+        "security_master": master.universe_hash,
+    }

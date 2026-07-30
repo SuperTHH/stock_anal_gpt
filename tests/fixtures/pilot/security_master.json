@@ -1,0 +1,6 @@
+[
+  {"board": "MAIN_SH", "exchange": "SSE", "prefix": "600", "suffix": "SH", "count": 10},
+  {"board": "MAIN_SZ", "exchange": "SZSE", "prefix": "000", "suffix": "SZ", "count": 10},
+  {"board": "CHINEXT", "exchange": "SZSE", "prefix": "300", "suffix": "SZ", "count": 9},
+  {"board": "STAR", "exchange": "SSE", "prefix": "688", "suffix": "SH", "count": 9}
+]
