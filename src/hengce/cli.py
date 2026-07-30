@@ -37,6 +37,7 @@ from hengce.raw_store.store import RawObjectStore
 from hengce.services.financial_ingestion import FinancialIngestionService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
+from hengce.services.pilot_acceptance import PilotAcceptanceValidator
 from hengce.services.pilot_reconstruction import (
     HistoricalPilotRunner,
     PilotRunSummary,
@@ -560,6 +561,34 @@ def rebuild_pilot_report(
         raise typer.Exit(code=1)
     if int(output["manual_todo_count"]) > 0 and output["report_id"] is None:
         raise typer.Exit(code=2)
+
+
+@app.command("validate-pilot-report")
+def validate_pilot_report(
+    market_date: Annotated[str, typer.Option()],
+    report_cutoff_at: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Validate one private pilot report and emit aggregate JSON only."""
+    parsed_market_date = parse_trade_date(market_date)
+    parsed_cutoff = parse_offset_datetime(
+        report_cutoff_at,
+        "report-cutoff-at",
+    )
+    summary = PilotAcceptanceValidator().validate(
+        data_dir=data_dir,
+        market_date=parsed_market_date,
+        report_cutoff_at=parsed_cutoff,
+    )
+    typer.echo(
+        json.dumps(
+            summary.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    if not summary.passed:
+        raise typer.Exit(code=1)
 
 
 def _aggregate_pilot_summary(

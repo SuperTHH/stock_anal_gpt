@@ -1779,3 +1779,110 @@ def test_rebuild_pilot_report_rejects_invalid_cutoff_and_mode(
 
     assert naive.exit_code == 2
     assert bad_mode.exit_code == 2
+
+
+def test_validate_pilot_report_emits_aggregate_json_and_passes_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeSummary:
+        passed = True
+
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {
+                "passed": True,
+                "report_id": "pilot-report-v1",
+                "universe_count": 30,
+                "candidate_count": 3,
+                "errors": [],
+            }
+
+    class FakeValidator:
+        def validate(self, **kwargs: object) -> FakeSummary:
+            calls.append(kwargs)
+            return FakeSummary()
+
+    monkeypatch.setattr(
+        cli,
+        "PilotAcceptanceValidator",
+        FakeValidator,
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "validate-pilot-report",
+            "--market-date",
+            "2026-07-22",
+            "--report-cutoff-at",
+            "2026-07-22T21:30:00+08:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "candidate_count": 3,
+        "errors": [],
+        "passed": True,
+        "report_id": "pilot-report-v1",
+        "universe_count": 30,
+    }
+    assert calls == [
+        {
+            "data_dir": tmp_path,
+            "market_date": date(2026, 7, 22),
+            "report_cutoff_at": datetime(
+                2026,
+                7,
+                22,
+                21,
+                30,
+                tzinfo=datetime.fromisoformat(
+                    "2026-07-22T21:30:00+08:00"
+                ).tzinfo,
+            ),
+        }
+    ]
+
+
+def test_validate_pilot_report_returns_one_when_acceptance_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSummary:
+        passed = False
+
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {
+                "passed": False,
+                "errors": ["PILOT_QUOTA_INVALID"],
+            }
+
+    validator = Mock()
+    validator.validate.return_value = FakeSummary()
+    monkeypatch.setattr(
+        cli,
+        "PilotAcceptanceValidator",
+        lambda: validator,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "validate-pilot-report",
+            "--market-date",
+            "2026-07-22",
+            "--report-cutoff-at",
+            "2026-07-22T21:30:00+08:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["errors"] == ["PILOT_QUOTA_INVALID"]

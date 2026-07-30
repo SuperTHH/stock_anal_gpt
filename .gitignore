@@ -14,6 +14,10 @@ apps/web/vite.config.d.ts
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+data/manual_inbox/
+data/reports/
+data/backups/
+data/run_summaries/
 data/
 !src/hengce/data/
 !src/hengce/data/source_policies.json
