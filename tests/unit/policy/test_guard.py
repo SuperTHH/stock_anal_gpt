@@ -1,4 +1,6 @@
+import json
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
@@ -116,6 +118,46 @@ def test_guard_denies_http_for_non_tushare_even_when_editable_policy_allows_it(
         )
 
     assert repository.count_refusals() == 1
+
+
+def test_cninfo_public_attachment_host_is_exact_and_financial_pdf_only(
+    tmp_path: Path,
+) -> None:
+    """Catches broad wildcard approval while allowing the confirmed public PDF host."""
+    payload = json.loads(
+        files("hengce").joinpath("data", "source_policies.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cninfo = next(item for item in payload if item["source_id"] == "cninfo")
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.upsert_policy(SourcePolicy.model_validate(cninfo))
+    guard = PolicyGuard(repository)
+
+    guard.validate(
+        "cninfo",
+        "https://static.cninfo.com.cn/finalpage/fixture.pdf",
+        "financial_pdf",
+        "acquisition.manual_inbox",
+    )
+    for forbidden_purpose in ("xbrl", "filing", "official_event"):
+        with pytest.raises(PolicyDenied, match="^PURPOSE_NOT_ALLOWED$"):
+            guard.validate(
+                "cninfo",
+                "https://static.cninfo.com.cn/finalpage/fixture.pdf",
+                forbidden_purpose,
+                "acquisition.manual_inbox",
+            )
+    with pytest.raises(PolicyDenied, match="^DOMAIN_NOT_ALLOWED$"):
+        guard.validate(
+            "cninfo",
+            "https://other.cninfo.com.cn/finalpage/fixture.pdf",
+            "financial_pdf",
+            "acquisition.manual_inbox",
+        )
+
+    assert cninfo["terms_reviewed_at"] == "2026-07-30T00:00:00+08:00"
 
 
 def test_guard_persists_rate_reservations_across_repository_instances(

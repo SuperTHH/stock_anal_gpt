@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from .enums import ReviewStatus
 
@@ -14,6 +14,7 @@ class SourcePolicy(BaseModel):
     allowed_domains: list[str]
     allowed_schemes: list[Literal["http", "https"]]
     allowed_purposes: list[str]
+    domain_purposes: dict[str, list[str]] = Field(default_factory=dict)
     fetch_frequency: str
     full_text_rule: str
     attachment_rule: str

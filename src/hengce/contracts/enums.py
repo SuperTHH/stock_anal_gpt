@@ -55,6 +55,7 @@ class ConsolidationScope(StrEnum):
 class DiscoveryMethod(StrEnum):
     FIXTURE = "FIXTURE"
     MANUAL_IMPORT = "MANUAL_IMPORT"
+    PUBLIC_PAGE = "PUBLIC_PAGE"
 
 
 class AcquisitionStatus(StrEnum):

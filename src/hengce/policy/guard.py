@@ -89,4 +89,7 @@ class PolicyGuard:
             return "DOMAIN_NOT_ALLOWED"
         if purpose not in policy.allowed_purposes:
             return "PURPOSE_NOT_ALLOWED"
+        restricted_purposes = policy.domain_purposes.get(hostname)
+        if restricted_purposes is not None and purpose not in restricted_purposes:
+            return "PURPOSE_NOT_ALLOWED"
         return None

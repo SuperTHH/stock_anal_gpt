@@ -152,7 +152,11 @@ def test_financial_enum_values_are_frozen() -> None:
     ]
     assert [member.value for member in MappingStatus] == ["MAPPED", "UNMAPPED"]
     assert [member.value for member in ConsolidationScope] == ["CONSOLIDATED", "PARENT", "UNKNOWN"]
-    assert [member.value for member in DiscoveryMethod] == ["FIXTURE", "MANUAL_IMPORT"]
+    assert [member.value for member in DiscoveryMethod] == [
+        "FIXTURE",
+        "MANUAL_IMPORT",
+        "PUBLIC_PAGE",
+    ]
     assert [member.value for member in ConflictResolutionStatus] == ["OPEN", "SUPERSEDED"]
 
 
