@@ -38,6 +38,7 @@ from hengce.services.financial_ingestion import FinancialIngestionService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
 from hengce.services.pilot_acceptance import PilotAcceptanceValidator
+from hengce.services.pilot_pipeline import PilotProductionStages
 from hengce.services.pilot_reconstruction import (
     HistoricalPilotRunner,
     PilotRunSummary,
@@ -227,21 +228,23 @@ def build_financial_ingestion(
 
 
 def build_pilot_runner(settings: Settings) -> HistoricalPilotRunner:
-    """Compose the resumable pilot shell; production stage wiring is explicit."""
+    """Compose the resumable, fail-closed production pilot pipeline."""
     state = bootstrap_state(settings)
 
-    def unconfigured_stage(context: object) -> dict[str, object]:
-        del context
-        raise ValueError("PILOT_STAGE_NOT_CONFIGURED")
+    def clock() -> datetime:
+        return datetime.now(ZoneInfo(settings.timezone))
+
+    stages = PilotProductionStages(
+        state=state,
+        data_dir=settings.data_dir,
+        clock=clock,
+    )
 
     return HistoricalPilotRunner(
         state=state,
         data_dir=settings.data_dir,
-        stage_handlers={
-            stage: unconfigured_stage
-            for stage in HistoricalPilotRunner.STAGES[1:]
-        },
-        clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
+        stage_handlers=stages.handlers(),
+        clock=clock,
     )
 
 

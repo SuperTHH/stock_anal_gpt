@@ -110,33 +110,37 @@ if ($marketPartition.Count -eq 0) {
 `manifest_status_distribution` 与 `manual_todo_count`。这就是允许对外展示的
 `AWAITING_MANUAL` 聚合清单；不要把股票代码、公告正文或本地路径复制到工单或 Git。
 
-每个已审核文件放入独立目录：
+收件箱使用已批准的单层目录。每个附件旁必须放置一个同名 `.json` 侧车；附件名在
+收件箱内必须唯一：
 
 ```text
-data/manual_inbox/<MANIFEST_ITEM_ID>/
-  attachment.<APPROVED_EXTENSION>
-  sidecar.json
+data/manual_inbox/
+  <UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>
+  <UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>.json
 ```
 
-`sidecar.json` 使用以下占位结构：
+侧车使用以下占位结构；非定期报告的 `report_type` 使用 `null`，无报告期的项目将
+`report_period` 设为 `null`：
 
 ```json
 {
-  "manifest_item_id": "<MANIFEST_ITEM_ID>",
-  "source_id": "<sse_OR_szse_OR_cninfo>",
+  "item_id": "<MANIFEST_ITEM_ID>",
   "source_url": "https://<APPROVED_OFFICIAL_DOMAIN>/<OFFICIAL_PATH>",
+  "ts_code": "<SIX_DIGITS.SH_OR_SZ>",
+  "document_kind": "<PERIODIC_REPORT_OR_OTHER_MANIFEST_KIND>",
+  "report_type": "ANNUAL",
+  "report_period": "2025-12-31",
   "published_at": "<OFFSET_AWARE_ISO_TIME>",
-  "collected_at": "<OFFSET_AWARE_ISO_TIME>",
-  "version": "<SOURCE_VERSION>",
-  "content_type": "<APPROVED_MIME>",
-  "attachment_name": "attachment.<APPROVED_EXTENSION>",
-  "content_sha256": "<64_LOWERCASE_HEX>"
+  "downloaded_at": "<OFFSET_AWARE_ISO_TIME>",
+  "attachment_name": "<UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>",
+  "content_type": "<APPROVED_MIME>"
 }
 ```
 
-侧车中的哈希必须与附件完全一致，时间必须含 UTC 偏移，来源必须通过 `SourcePolicy`。
-不要编辑数据库状态来跳过校验。准备完成后用完全相同的市场日期、截止时间和采集模式
-重新运行；系统从稳定检查点继续。
+系统自行计算附件哈希，不接受侧车声明的哈希或版本。侧车身份必须与清单项完全一致，
+时间必须含 UTC 偏移，URL 必须通过 `SourcePolicy`。不要编辑数据库状态来跳过校验。
+准备完成后用完全相同的市场日期、截止时间和采集模式重新运行；系统复用不可变样本、
+清单和已经验证的 Raw 对象。
 
 ## 7. 启动本地 API 与 UI
 
