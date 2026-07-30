@@ -11,6 +11,13 @@ const report = {
     market_cutoff_at: "2026-07-29T21:30:00+08:00",
     report_status: "PUBLISHED",
     data_domain_statuses: { market: "VALID", financials: "VALID" },
+    is_historical_reconstruction: true,
+    universe_id: "pilot-2026-07-22",
+    report_cutoff_at: "2026-07-29T13:00:00Z",
+    known_at: "2026-07-29T13:00:00Z",
+    generation_started_at: "2026-07-30T09:05:00+08:00",
+    generated_at: "2026-07-30T09:08:00+08:00",
+    manual_todo_count: 2,
   },
   candidate_pools: {
     QUALITY_GROWTH: [
@@ -41,6 +48,55 @@ const report = {
   },
   data_domain_statuses: { market: "VALID", financials: "VALID" },
   official_events: [],
+  pool_readiness: {
+    QUALITY_GROWTH: {
+      strategy_type: "QUALITY_GROWTH",
+      universe_size: 30,
+      eligible_count: 29,
+      complete_factor_count: 28,
+      coverage_ratio: "0.9333",
+      required_coverage_ratio: "0.8",
+      status: "READY",
+      missing_by_security: { "699997.SH": ["gross_margin:VALUE_MISSING"] },
+      blocking_codes: [],
+      strategy_version: "quality-growth-pilot-v1",
+      factor_version: "pilot-financial-metrics-v1",
+    },
+    DEEP_VALUE: {
+      strategy_type: "DEEP_VALUE",
+      universe_size: 30,
+      eligible_count: 30,
+      complete_factor_count: 30,
+      coverage_ratio: "1",
+      required_coverage_ratio: "0.8",
+      status: "READY",
+      missing_by_security: {},
+      blocking_codes: [],
+      strategy_version: "deep-value-pilot-v1",
+      factor_version: "pilot-financial-metrics-v1",
+    },
+    STABLE_DIVIDEND: {
+      strategy_type: "STABLE_DIVIDEND",
+      universe_size: 30,
+      eligible_count: 21,
+      complete_factor_count: 21,
+      coverage_ratio: "0.7",
+      required_coverage_ratio: "0.8",
+      status: "BLOCKED",
+      missing_by_security: {
+        "699996.SH": ["cash_dividend_total:VALUE_MISSING"],
+        "699995.SH": ["free_cash_flow:VALUE_MISSING"],
+      },
+      blocking_codes: ["POOL_FACTOR_COVERAGE_BELOW_80_PERCENT"],
+      strategy_version: "stable-dividend-pilot-v1",
+      factor_version: "pilot-financial-metrics-v1",
+    },
+  },
+  quality_summary: {
+    manifest_status_distribution: { INGESTED: 360, MANUAL_TODO: 2 },
+    xbrl_used_count: 140,
+    pdf_used_count: 10,
+  },
 };
 
 afterEach(() => {
@@ -66,6 +122,60 @@ test("all pages stay pinned to one published report while strategy tabs remain i
   expect(screen.getByText("699992.SH")).toBeInTheDocument();
   expect(screen.queryByText("699991.SH")).not.toBeInTheDocument();
   expect(screen.getByText("report-2026-07-29-v1")).toBeInTheDocument();
+});
+
+test("historical pilot report shows its fixed boundary, cutoff, generation time, and pool readiness", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(report), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  render(<App />);
+
+  expect(await screen.findByText("真实数据 · 30只试点样本 · 历史重建")).toBeInTheDocument();
+  expect(screen.getByText("排名只在 30 只试点样本内有效")).toBeInTheDocument();
+  expect(screen.getByText(/报告截止.*2026-07-29 13:00/)).toBeInTheDocument();
+  expect(screen.getByText(/实际生成.*2026-07-30 09:05/)).toBeInTheDocument();
+  expect(screen.getAllByText("READY")).toHaveLength(2);
+  expect(screen.getByText("BLOCKED")).toBeInTheDocument();
+  expect(screen.getByText("28 / 30")).toBeInTheDocument();
+  expect(screen.getByText("93.33%")).toBeInTheDocument();
+});
+
+test("blocked strategy explains missing securities, factors, and machine-readable codes", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(report), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "策略候选池" }));
+  await user.click(screen.getByRole("tab", { name: /^稳定高股息/ }));
+  expect(screen.getByRole("heading", { name: "该策略池暂不发布候选" })).toBeInTheDocument();
+  expect(screen.getByText("POOL_FACTOR_COVERAGE_BELOW_80_PERCENT")).toBeInTheDocument();
+  expect(screen.getByText("699996.SH")).toBeInTheDocument();
+  expect(screen.getByText("cash_dividend_total:VALUE_MISSING")).toBeInTheDocument();
+  expect(screen.queryByText("本报告在该策略下没有候选标的。")).not.toBeInTheDocument();
+});
+
+test("stale previous report is visibly marked instead of presented as current", async () => {
+  const staleReport = {
+    ...report,
+    display_status: "STALE_PREVIOUS_REPORT",
+  };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(staleReport), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  render(<App />);
+
+  expect(await screen.findByText("上一版报告 · 本次更新未完成")).toBeInTheDocument();
 });
 
 test("production empty state never falls back to fictional prototype candidates", async () => {

@@ -7,10 +7,12 @@ from fastapi.testclient import TestClient
 from hengce.api.app import create_app
 from hengce.contracts.enums import (
     CandidateStatus,
+    PoolReadinessStatus,
     QualityStatus,
     StrategyType,
 )
 from hengce.contracts.official_event import OfficialEvent, ReportSource
+from hengce.contracts.pilot import PoolReadiness
 from hengce.contracts.strategy import (
     FactorDetail,
     StrategyCandidate,
@@ -23,18 +25,22 @@ from hengce.state.repository import StateRepository
 NOW = datetime(2026, 7, 29, 13, tzinfo=UTC)
 
 
-def publish_fixture(tmp_path: Path) -> tuple[ReportRepository, Path]:
+def publish_fixture(
+    tmp_path: Path,
+    blocked_strategy: StrategyType | None = None,
+) -> tuple[ReportRepository, Path]:
     state = StateRepository(tmp_path / "state.sqlite3")
     state.migrate()
     repository = ReportRepository(state.path)
     report_root = tmp_path / "reports"
     pools: dict[StrategyType, list[StrategyCandidate]] = {}
+    versions = {
+        StrategyType.QUALITY_GROWTH: "quality-growth-v1",
+        StrategyType.DEEP_VALUE: "deep-value-v1",
+        StrategyType.STABLE_DIVIDEND: "stable-dividend-v1",
+    }
     for index, strategy in enumerate(StrategyType, start=1):
-        version = {
-            StrategyType.QUALITY_GROWTH: "quality-growth-v1",
-            StrategyType.DEEP_VALUE: "deep-value-v1",
-            StrategyType.STABLE_DIVIDEND: "stable-dividend-v1",
-        }[strategy]
+        version = versions[strategy]
         factor = FactorDetail(
             factor_name="composite",
             raw_value=Decimal(index),
@@ -67,6 +73,8 @@ def publish_fixture(tmp_path: Path) -> tuple[ReportRepository, Path]:
                 candidate_status=CandidateStatus.CANDIDATE,
             )
         ]
+    if blocked_strategy is not None:
+        pools[blocked_strategy] = []
     ReportPublisher(repository, report_root).publish(
         report_id="report-2026-07-29-v1",
         report_date=date(2026, 7, 29),
@@ -76,7 +84,55 @@ def publish_fixture(tmp_path: Path) -> tuple[ReportRepository, Path]:
         candidate_pools=pools,
         data_domain_statuses={
             "market": QualityStatus.VALID,
+            "security_master": QualityStatus.VALID,
+            "pilot_universe": QualityStatus.VALID,
+            "manifest": QualityStatus.VALID,
             "financials": QualityStatus.VALID,
+        },
+        pool_readiness={
+            strategy: PoolReadiness(
+                strategy_type=strategy,
+                universe_size=30,
+                eligible_count=(
+                    23 if strategy is blocked_strategy else 30
+                ),
+                complete_factor_count=(
+                    23 if strategy is blocked_strategy else 30
+                ),
+                coverage_ratio=(
+                    Decimal(23) / Decimal(30)
+                    if strategy is blocked_strategy
+                    else Decimal("1")
+                ),
+                required_coverage_ratio=Decimal("0.80"),
+                status=(
+                    PoolReadinessStatus.BLOCKED
+                    if strategy is blocked_strategy
+                    else PoolReadinessStatus.READY
+                ),
+                missing_by_security=(
+                    {"699999.SH": ("critical:VALUE_MISSING",)}
+                    if strategy is blocked_strategy
+                    else {}
+                ),
+                blocking_codes=(
+                    ("POOL_FACTOR_COVERAGE_BELOW_80_PERCENT",)
+                    if strategy is blocked_strategy
+                    else ()
+                ),
+                strategy_version=versions[strategy],
+                factor_version="pilot-financial-metrics-v1",
+            )
+            for strategy in StrategyType
+        },
+        universe_id="pilot-2026-07-22",
+        report_cutoff_at=NOW,
+        known_at=NOW,
+        generation_started_at=NOW,
+        quality_summary={
+            "manifest_status_distribution": {"INGESTED": 360},
+            "xbrl_used_count": 140,
+            "pdf_used_count": 10,
         },
         official_events=(
             OfficialEvent(
@@ -119,12 +175,14 @@ def publish_fixture(tmp_path: Path) -> tuple[ReportRepository, Path]:
         strategy_evidence={
             strategy: StrategyRunEvidence(
                 strategy_type=strategy,
-                strategy_version=pools[strategy][0].strategy_version,
+                strategy_version=versions[strategy],
                 input_count=1,
-                excluded_count=0,
+                excluded_count=(1 if strategy is blocked_strategy else 0),
                 data_insufficient_count=0,
-                qualified_count=1,
-                published_candidate_count=1,
+                qualified_count=(0 if strategy is blocked_strategy else 1),
+                published_candidate_count=(
+                    0 if strategy is blocked_strategy else 1
+                ),
                 completed=True,
             )
             for strategy in StrategyType
@@ -188,6 +246,56 @@ def test_events_and_quality_endpoints_preserve_published_source_lineage(
     assert events.json()["events"][0]["source_url"] == "https://www.sse.com.cn/"
     assert quality.status_code == 200
     assert quality.json()["source_records"][0]["license_policy"] == "personal-research"
+    assert quality.json()["manifest_status_distribution"] == {"INGESTED": 360}
+    assert quality.json()["xbrl_used_count"] == 140
+    assert quality.json()["pdf_used_count"] == 10
+    assert quality.json()["known_at"] == NOW.isoformat().replace("+00:00", "Z")
+
+
+def test_historical_fields_and_ready_pool_are_returned_from_artifact(
+    tmp_path: Path,
+) -> None:
+    repository, report_root = publish_fixture(tmp_path)
+    client = TestClient(create_app(repository, report_root))
+
+    latest = client.get("/api/reports/latest")
+    strategy = client.get(
+        "/api/strategies/QUALITY_GROWTH",
+        params={"report_id": "report-2026-07-29-v1"},
+    )
+
+    assert latest.status_code == 200
+    assert latest.json()["snapshot"]["is_historical_reconstruction"] is True
+    assert latest.json()["snapshot"]["universe_id"] == "pilot-2026-07-22"
+    assert latest.json()["snapshot"]["known_at"] == NOW.isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+    assert strategy.status_code == 200
+    assert strategy.json()["readiness"]["status"] == "READY"
+    assert strategy.json()["readiness"]["complete_factor_count"] == 30
+
+
+def test_blocked_strategy_returns_200_with_empty_candidates_and_readiness(
+    tmp_path: Path,
+) -> None:
+    repository, report_root = publish_fixture(
+        tmp_path,
+        blocked_strategy=StrategyType.STABLE_DIVIDEND,
+    )
+
+    response = TestClient(create_app(repository, report_root)).get(
+        "/api/strategies/STABLE_DIVIDEND",
+        params={"report_id": "report-2026-07-29-v1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidates"] == []
+    assert response.json()["readiness"]["status"] == "BLOCKED"
+    assert response.json()["readiness"]["complete_factor_count"] == 23
+    assert response.json()["readiness"]["blocking_codes"] == [
+        "POOL_FACTOR_COVERAGE_BELOW_80_PERCENT"
+    ]
 
 
 def test_no_published_report_returns_404_and_never_demo_candidates(tmp_path: Path) -> None:

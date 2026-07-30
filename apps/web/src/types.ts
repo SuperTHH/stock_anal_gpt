@@ -1,4 +1,19 @@
 export type StrategyType = "QUALITY_GROWTH" | "DEEP_VALUE" | "STABLE_DIVIDEND";
+export type PoolStatus = "READY" | "BLOCKED";
+
+export interface PoolReadiness {
+  strategy_type: StrategyType;
+  universe_size: number;
+  eligible_count: number;
+  complete_factor_count: number;
+  coverage_ratio: string;
+  required_coverage_ratio: string;
+  status: PoolStatus;
+  missing_by_security: Record<string, string[]>;
+  blocking_codes: string[];
+  strategy_version: string;
+  factor_version: string;
+}
 
 export interface FactorDetail {
   factor_name: string;
@@ -62,9 +77,29 @@ export interface ReportPayload {
     market_cutoff_at: string;
     report_status: string;
     data_domain_statuses: Record<string, string>;
+    is_historical_reconstruction?: boolean;
+    universe_id?: string | null;
+    report_cutoff_at?: string | null;
+    known_at?: string | null;
+    generation_started_at?: string | null;
+    generated_at?: string;
+    manual_todo_count?: number;
   };
   candidate_pools: Record<StrategyType, Candidate[]>;
   data_domain_statuses: Record<string, string>;
   official_events?: OfficialEvent[];
   source_records?: ReportSource[];
+  pool_readiness?: Partial<Record<StrategyType, PoolReadiness>>;
+  universe_id?: string | null;
+  report_cutoff_at?: string | null;
+  known_at?: string | null;
+  generation_started_at?: string | null;
+  manual_todo_count?: number;
+  quality_summary?: {
+    manifest_status_distribution?: Record<string, number>;
+    xbrl_used_count?: number;
+    pdf_used_count?: number;
+    [key: string]: unknown;
+  };
+  display_status?: string;
 }

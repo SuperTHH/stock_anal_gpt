@@ -75,6 +75,11 @@ def create_app(repository: ReportRepository, report_root: Path) -> FastAPI:
             "strategy_type": strategy_type.value,
             "strategy_version": report["strategy_versions"][strategy_type.value],
             "candidates": candidates,
+            "readiness": (
+                report.get("pool_readiness", {}).get(strategy_type.value)
+                if isinstance(report.get("pool_readiness"), dict)
+                else None
+            ),
         }
 
     @app.get("/api/securities/{ts_code}")
@@ -111,10 +116,33 @@ def create_app(repository: ReportRepository, report_root: Path) -> FastAPI:
     @app.get("/api/quality")
     def quality(report_id: str = Query(min_length=1)) -> dict[str, object]:
         report = reader.by_id(report_id)
+        snapshot = report.get("snapshot", {})
+        summary = report.get("quality_summary", {})
         return {
             "report_id": report_id,
             "data_domain_statuses": report.get("data_domain_statuses", {}),
             "source_records": report.get("source_records", []),
+            "known_at": (
+                snapshot.get("known_at")
+                if isinstance(snapshot, dict)
+                else None
+            ),
+            "manifest_status_distribution": (
+                summary.get("manifest_status_distribution", {})
+                if isinstance(summary, dict)
+                else {}
+            ),
+            "xbrl_used_count": (
+                summary.get("xbrl_used_count", 0)
+                if isinstance(summary, dict)
+                else 0
+            ),
+            "pdf_used_count": (
+                summary.get("pdf_used_count", 0)
+                if isinstance(summary, dict)
+                else 0
+            ),
+            "pool_readiness": report.get("pool_readiness", {}),
         }
 
     @app.get("/api/events")

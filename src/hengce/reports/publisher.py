@@ -56,6 +56,7 @@ class ReportPublisher:
         known_at: datetime | None = None,
         generation_started_at: datetime | None = None,
         manual_todo_count: int = 0,
+        quality_summary: dict[str, object] | None = None,
     ) -> PublicationResult:
         core_domains = {
             "market",
@@ -274,6 +275,7 @@ class ReportPublisher:
                 else None
             ),
             "manual_todo_count": manual_todo_count,
+            "quality_summary": quality_summary or {},
         }
         ready_pool_count = (
             sum(

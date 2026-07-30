@@ -36,6 +36,17 @@ main { margin-left: 208px; min-width: 0; padding: 20px 24px 32px; }
   min-height: 32px; margin-bottom: 8px; padding: 6px 10px; border: 1px solid #c58a22;
   background: #f4e9d2; color: #6b4a12; font-weight: 600; text-align: center;
 }
+.pilot-banner, .stale-banner {
+  margin-top: 12px; padding: 11px 12px; border: 1px solid #356a8a;
+  background: #e7eff3; color: #183f58;
+}
+.pilot-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.pilot-banner > div:first-child { display: grid; gap: 2px; }
+.pilot-banner span { font-size: 11px; }
+.pilot-times { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 18px; }
+.stale-banner {
+  border-color: #a6542c; background: #f5e5dc; color: #713719; font-weight: 700;
+}
 .utility-row {
   min-height: 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
   padding-bottom: 12px; color: #6f746f; border-bottom: 1px solid #c8cbc5; font-size: 11px;
@@ -68,6 +79,14 @@ h3 { font-size: 14px; line-height: 20px; }
 .section-heading h2 { margin-bottom: 0; }
 .strategy-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .strategy-card { min-height: 210px; padding: 16px; border: 1px solid #c8cbc5; background: #fff; }
+.readiness-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; margin: 10px 0 2px; }
+.readiness-badge {
+  padding: 2px 7px; border: 1px solid #2f6c4d; background: #e2eee7;
+  color: #1a5136; font: 600 10px/16px Consolas, monospace;
+}
+.readiness-badge.blocked {
+  border-color: #a6542c; background: #f5e5dc; color: #713719;
+}
 .large-number { display: block; margin-top: 18px; font: 500 28px/32px Consolas, monospace; color: #1a3c2b; }
 .rule { height: 1px; margin: 16px 0; background: #c8cbc5; }
 .outline-button, .text-button {
@@ -83,6 +102,17 @@ h3 { font-size: 14px; line-height: 20px; }
 }
 .tabs button.active { background: #1a3c2b; color: #fff; }
 .tabs button span { margin-left: 8px; }
+.tabs .tab-status { padding: 2px 5px; border: 1px solid currentColor; font-size: 9px; }
+.tabs .tab-status.blocked { color: #a34420; }
+.blocked-panel {
+  padding: 20px; border: 1px solid #a6542c; border-top: 0; background: #fff8f4;
+}
+.blocked-panel h2 { margin-bottom: 6px; }
+.blocked-grid { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 24px; margin-top: 18px; }
+.code-list, .missing-list { margin: 0; padding-left: 18px; }
+.code-list li, .missing-list li { margin: 7px 0; }
+.missing-list li { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; }
+.missing-list span { overflow-wrap: anywhere; }
 .table-wrap { overflow: auto; border: 1px solid #c8cbc5; border-top: 0; background: #fff; }
 table { width: 100%; min-width: 920px; border-collapse: collapse; }
 th, td { padding: 9px 10px; border-bottom: 1px solid #c8cbc5; text-align: left; vertical-align: top; }
@@ -97,6 +127,16 @@ tbody tr:hover { background: #efefeb; }
 .evidence-list dt { color: #6f746f; }
 .evidence-list dd { margin: 0; }
 .factor-row, .quality-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid #c8cbc5; }
+.factor-row > div:first-child { display: grid; gap: 2px; }
+.factor-row small { color: #6f746f; }
+.factor-row a { color: #1a3c2b; font-size: 11px; }
+.factor-score { display: grid; justify-items: end; align-content: start; }
+.quality-pools { display: grid; gap: 7px; }
+.quality-pools > div {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 6px 0; border-top: 1px solid #c8cbc5;
+}
+.quality-note { margin: 12px 0 0; color: #6f746f; }
 .event-row { padding: 16px; border: 1px solid #c8cbc5; border-bottom: 0; background: #fff; }
 .event-row:last-child { border-bottom: 1px solid #c8cbc5; }
 .event-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 12px 0; color: #6f746f; font-size: 11px; }
@@ -129,4 +169,7 @@ footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #c8cbc5; col
   .research-grid { grid-template-columns: 1fr; }
   .source-grid { grid-template-columns: 1fr; }
   .status-strip { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .pilot-banner { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .pilot-times { justify-content: flex-start; }
+  .blocked-grid { grid-template-columns: 1fr; }
 }
