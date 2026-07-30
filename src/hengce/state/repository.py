@@ -72,6 +72,25 @@ class StateRepository:
             if "active_run_id" not in lease_columns:
                 connection.execute("ALTER TABLE ingestion_leases ADD COLUMN active_run_id TEXT")
 
+    def backup_to(self, target: Path) -> Path:
+        """Create one exclusive SQLite backup without copying an active WAL file."""
+        if not self.path.is_file():
+            raise ValueError("STATE_BACKUP_SOURCE_MISSING")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with target.open("xb"):
+                pass
+        except FileExistsError as error:
+            raise ValueError("STATE_BACKUP_TARGET_EXISTS") from error
+        try:
+            with sqlite3.connect(self.path) as source:
+                with sqlite3.connect(target) as destination:
+                    source.backup(destination)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+
     def upsert_policy(self, policy: SourcePolicy) -> None:
         self.upsert_policies([policy])
 
