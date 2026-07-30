@@ -82,13 +82,20 @@ class StateRepository:
                 pass
         except FileExistsError as error:
             raise ValueError("STATE_BACKUP_TARGET_EXISTS") from error
+        source: sqlite3.Connection | None = None
+        destination: sqlite3.Connection | None = None
         try:
-            with sqlite3.connect(self.path) as source:
-                with sqlite3.connect(target) as destination:
-                    source.backup(destination)
+            source = sqlite3.connect(self.path)
+            destination = sqlite3.connect(target)
+            source.backup(destination)
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        finally:
+            if destination is not None:
+                destination.close()
+            if source is not None:
+                source.close()
         return target
 
     def upsert_policy(self, policy: SourcePolicy) -> None:

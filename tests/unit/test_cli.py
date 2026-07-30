@@ -1675,3 +1675,107 @@ def test_load_trade_dates_rejects_invalid_calendar(tmp_path: Path, payload: obje
 
     with pytest.raises(ValueError, match="TRADE_DATES_INVALID"):
         load_trade_dates(calendar)
+
+
+def test_rebuild_pilot_report_emits_only_aggregate_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRunner:
+        def run(self, **kwargs: object) -> cli.PilotRunSummary:
+            assert kwargs["acquisition_mode"] == "manual-only"
+            return cli.PilotRunSummary(
+                market_date=date(2026, 7, 22),
+                report_cutoff_at=datetime(
+                    2026,
+                    7,
+                    22,
+                    13,
+                    30,
+                    tzinfo=UTC,
+                ),
+                known_at=datetime(2026, 7, 30, tzinfo=UTC),
+                acquisition_mode="manual-only",
+                stage_statuses={
+                    stage: "SUCCEEDED"
+                    for stage in cli.HistoricalPilotRunner.STAGES
+                },
+                stage_output_hashes={},
+                failed_stage=None,
+                error_code=None,
+                universe_id="pilot-fixed-30",
+                backup_path=None,
+                aggregate_summary={
+                    "manifest_status_distribution": {"INGESTED": 360},
+                    "xbrl_used_count": 140,
+                    "pdf_used_count": 10,
+                    "pool_coverage": {"QUALITY_GROWTH": "0.8"},
+                    "report_id": "report-1",
+                    "report_hash": "a" * 64,
+                    "manual_todo_count": 0,
+                    "candidate_full_facts": {"secret": "must-not-leak"},
+                    "token": "must-not-leak",
+                },
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "build_pilot_runner",
+        lambda _settings: FakeRunner(),
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "rebuild-pilot-report",
+            "--market-date",
+            "2026-07-22",
+            "--report-cutoff-at",
+            "2026-07-22T21:30:00+08:00",
+            "--acquisition-mode",
+            "manual-only",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout)
+    assert output["universe_id"] == "pilot-fixed-30"
+    assert output["manifest_status_distribution"] == {"INGESTED": 360}
+    assert "candidate_full_facts" not in output
+    assert "token" not in result.stdout
+
+
+def test_rebuild_pilot_report_rejects_invalid_cutoff_and_mode(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    naive = runner.invoke(
+        app,
+        [
+            "rebuild-pilot-report",
+            "--market-date",
+            "2026-07-22",
+            "--report-cutoff-at",
+            "2026-07-22T21:30:00",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    bad_mode = runner.invoke(
+        app,
+        [
+            "rebuild-pilot-report",
+            "--market-date",
+            "2026-07-22",
+            "--report-cutoff-at",
+            "2026-07-22T21:30:00+08:00",
+            "--acquisition-mode",
+            "unrestricted",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert naive.exit_code == 2
+    assert bad_mode.exit_code == 2

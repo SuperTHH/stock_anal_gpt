@@ -37,6 +37,10 @@ from hengce.raw_store.store import RawObjectStore
 from hengce.services.financial_ingestion import FinancialIngestionService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
+from hengce.services.pilot_reconstruction import (
+    HistoricalPilotRunner,
+    PilotRunSummary,
+)
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
@@ -218,6 +222,25 @@ def build_financial_ingestion(
         warehouse=FinancialFactWarehouse(settings.data_dir / "warehouse"),
         state=state,
         pilot_repository=pilot_repository,
+    )
+
+
+def build_pilot_runner(settings: Settings) -> HistoricalPilotRunner:
+    """Compose the resumable pilot shell; production stage wiring is explicit."""
+    state = bootstrap_state(settings)
+
+    def unconfigured_stage(context: object) -> dict[str, object]:
+        del context
+        raise ValueError("PILOT_STAGE_NOT_CONFIGURED")
+
+    return HistoricalPilotRunner(
+        state=state,
+        data_dir=settings.data_dir,
+        stage_handlers={
+            stage: unconfigured_stage
+            for stage in HistoricalPilotRunner.STAGES[1:]
+        },
+        clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
     )
 
 
@@ -500,6 +523,65 @@ def check_security_universe(
             sort_keys=True,
         )
     )
+
+
+@app.command("rebuild-pilot-report")
+def rebuild_pilot_report(
+    market_date: Annotated[str, typer.Option()],
+    report_cutoff_at: Annotated[str, typer.Option()],
+    acquisition_mode: Annotated[str, typer.Option()] = "manual-only",
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Resume the historical pilot pipeline and emit aggregate JSON only."""
+    parsed_market_date = parse_trade_date(market_date)
+    parsed_cutoff = parse_offset_datetime(
+        report_cutoff_at,
+        "report-cutoff-at",
+    )
+    if acquisition_mode not in {"manual-only", "approved-public"}:
+        raise typer.BadParameter(
+            "acquisition-mode must be manual-only or approved-public"
+        )
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    known_at = datetime.now(ZoneInfo(settings.timezone))
+    summary = build_pilot_runner(settings).run(
+        market_date=parsed_market_date,
+        report_cutoff_at=parsed_cutoff,
+        known_at=known_at,
+        acquisition_mode=acquisition_mode,
+    )
+    output = _aggregate_pilot_summary(summary)
+    typer.echo(json.dumps(output, ensure_ascii=False, sort_keys=True))
+    if summary.failed_stage is not None:
+        raise typer.Exit(code=1)
+    if int(output["manual_todo_count"]) > 0 and output["report_id"] is None:
+        raise typer.Exit(code=2)
+
+
+def _aggregate_pilot_summary(
+    summary: PilotRunSummary,
+) -> dict[str, object]:
+    aggregate = summary.aggregate_summary
+    return {
+        "universe_id": summary.universe_id,
+        "stage_statuses": summary.stage_statuses,
+        "manifest_status_distribution": aggregate.get(
+            "manifest_status_distribution",
+            {},
+        ),
+        "xbrl_used_count": int(aggregate.get("xbrl_used_count", 0)),
+        "pdf_used_count": int(aggregate.get("pdf_used_count", 0)),
+        "pool_coverage": aggregate.get("pool_coverage", {}),
+        "report_id": aggregate.get("report_id"),
+        "report_hash": aggregate.get("report_hash"),
+        "manual_todo_count": int(aggregate.get("manual_todo_count", 0)),
+        "failed_stage": summary.failed_stage,
+        "error_code": summary.error_code,
+    }
 
 
 if __name__ == "__main__":

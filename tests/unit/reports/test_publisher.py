@@ -4,10 +4,12 @@ from pathlib import Path
 
 from hengce.contracts.enums import (
     CandidateStatus,
+    PoolReadinessStatus,
     QualityStatus,
     StrategyType,
 )
 from hengce.contracts.official_event import ReportSource
+from hengce.contracts.pilot import PoolReadiness
 from hengce.contracts.strategy import (
     FactorDetail,
     StrategyCandidate,
@@ -118,6 +120,46 @@ def lineage(
         for strategy, candidates in candidate_pools.items()
     }
     return {"source_records": sources, "strategy_evidence": evidence}
+
+
+def readiness(
+    candidate_pools: dict[StrategyType, list[StrategyCandidate]],
+) -> dict[StrategyType, PoolReadiness]:
+    versions = {
+        StrategyType.QUALITY_GROWTH: "quality-growth-v1",
+        StrategyType.DEEP_VALUE: "deep-value-v1",
+        StrategyType.STABLE_DIVIDEND: "stable-dividend-v1",
+    }
+    return {
+        strategy: PoolReadiness(
+            strategy_type=strategy,
+            universe_size=30,
+            eligible_count=(30 if candidates else 23),
+            complete_factor_count=(30 if candidates else 23),
+            coverage_ratio=(
+                Decimal("1")
+                if candidates
+                else Decimal(23) / Decimal(30)
+            ),
+            required_coverage_ratio=Decimal("0.80"),
+            status=(
+                PoolReadinessStatus.READY
+                if candidates
+                else PoolReadinessStatus.BLOCKED
+            ),
+            missing_by_security=(
+                {} if candidates else {"699999.SH": ("critical:VALUE_MISSING",)}
+            ),
+            blocking_codes=(
+                ()
+                if candidates
+                else ("POOL_FACTOR_COVERAGE_BELOW_80_PERCENT",)
+            ),
+            strategy_version=versions[strategy],
+            factor_version="pilot-financial-metrics-v1",
+        )
+        for strategy, candidates in candidate_pools.items()
+    }
 
 
 def test_complete_report_is_content_addressed_and_atomically_becomes_latest(
@@ -389,3 +431,86 @@ def test_factor_source_must_be_visible_at_candidate_cutoff(tmp_path: Path) -> No
         assert str(error) == "REPORT_SOURCE_AFTER_CANDIDATE_CUTOFF"
     else:
         raise AssertionError("late source was attached to an earlier candidate cutoff")
+
+
+def test_historical_report_publishes_ready_pools_and_keeps_blocked_pool_empty(
+    tmp_path: Path,
+) -> None:
+    service, repository = publisher(tmp_path)
+    candidate_pools = pools()
+    candidate_pools[StrategyType.STABLE_DIVIDEND] = []
+    metadata = lineage(candidate_pools)
+
+    result = service.publish(
+        report_id="historical-partial",
+        report_date=date(2026, 7, 29),
+        market_cutoff_at=NOW,
+        event_cutoff_at=NOW,
+        generated_at=NOW,
+        candidate_pools=candidate_pools,
+        strategy_evidence=metadata["strategy_evidence"],
+        source_records=metadata["source_records"],
+        data_domain_statuses={
+            "market": QualityStatus.VALID,
+            "security_master": QualityStatus.VALID,
+            "pilot_universe": QualityStatus.VALID,
+            "manifest": QualityStatus.VALID,
+            "financials": QualityStatus.PARTIAL,
+        },
+        pool_readiness=readiness(candidate_pools),
+        universe_id="pilot-2026-07-22",
+        report_cutoff_at=NOW,
+        known_at=NOW,
+        generation_started_at=NOW,
+    )
+
+    assert result.published is True
+    assert result.snapshot is not None
+    assert result.snapshot.report_status.value == "PUBLISHED_PARTIAL"
+    assert result.snapshot.is_historical_reconstruction is True
+    assert result.snapshot.pool_readiness[
+        StrategyType.STABLE_DIVIDEND
+    ].status is PoolReadinessStatus.BLOCKED
+    assert repository.latest_report_id() == "historical-partial"
+
+
+def test_all_blocked_pools_publish_quality_report_without_candidates(
+    tmp_path: Path,
+) -> None:
+    service, repository = publisher(tmp_path)
+    candidate_pools = {strategy: [] for strategy in StrategyType}
+
+    result = service.publish(
+        report_id="historical-quality-only",
+        report_date=date(2026, 7, 29),
+        market_cutoff_at=NOW,
+        event_cutoff_at=NOW,
+        generated_at=NOW,
+        candidate_pools=candidate_pools,
+        strategy_evidence={},
+        source_records=(),
+        strategy_versions={
+            StrategyType.QUALITY_GROWTH: "quality-growth-v1",
+            StrategyType.DEEP_VALUE: "deep-value-v1",
+            StrategyType.STABLE_DIVIDEND: "stable-dividend-v1",
+        },
+        data_domain_statuses={
+            "market": QualityStatus.VALID,
+            "security_master": QualityStatus.VALID,
+            "pilot_universe": QualityStatus.VALID,
+            "manifest": QualityStatus.VALID,
+            "financials": QualityStatus.MISSING,
+        },
+        pool_readiness=readiness(candidate_pools),
+        universe_id="pilot-2026-07-22",
+        report_cutoff_at=NOW,
+        known_at=NOW,
+        generation_started_at=NOW,
+        manual_todo_count=7,
+    )
+
+    assert result.published is True
+    assert result.snapshot is not None
+    assert result.snapshot.report_status.value == "PUBLISHED_PARTIAL"
+    assert result.snapshot.manual_todo_count == 7
+    assert repository.latest_report_id() == "historical-quality-only"
