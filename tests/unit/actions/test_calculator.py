@@ -162,6 +162,60 @@ def test_duplicate_action_identity_is_applied_only_once() -> None:
     assert result.points[-1].total_return_index == Decimal("1.00")
 
 
+def test_visible_correction_replaces_old_action_in_total_return() -> None:
+    """Catches applying both an original dividend and its append-only correction."""
+    bars = [
+        bar(date(2026, 7, 17), "10", "10"),
+        bar(date(2026, 7, 20), "9.4", "10"),
+    ]
+    original = action(ActionType.CASH_DIVIDEND, record_id="dividend-original")
+    correction = action(
+        ActionType.CASH_DIVIDEND,
+        record_id="dividend-correction",
+        cash_dividend_per_share=Decimal("0.6"),
+        published_at=NOW - timedelta(days=5),
+        valid_from=NOW - timedelta(days=4),
+        supersedes_id=original.record_id,
+    )
+
+    result = TotalReturnCalculator("total-return-v1").calculate(
+        bars=bars,
+        actions=[original, correction],
+        as_of=NOW,
+        known_at=NOW,
+    )
+
+    assert result.blocked_reasons == ()
+    assert result.points[-1].total_return_index == Decimal("1.00")
+    assert result.points[-1].action_record_ids == ("dividend-correction",)
+
+
+def test_buyback_cancellation_does_not_mutate_raw_price_or_holder_return() -> None:
+    """Catches treating an issuer share cancellation as a holder distribution."""
+    bars = [
+        bar(date(2026, 7, 17), "10", "10"),
+        bar(date(2026, 7, 20), "10", "10"),
+    ]
+    buyback = action(
+        ActionType.BUYBACK_CANCELLATION,
+        record_id="buyback-cancellation",
+        cash_dividend_per_share=None,
+        share_reduction=Decimal("1000000"),
+    )
+
+    result = TotalReturnCalculator("total-return-v1").calculate(
+        bars=bars,
+        actions=[buyback],
+        as_of=NOW,
+        known_at=NOW,
+    )
+
+    assert result.blocked_reasons == ()
+    assert result.points[-1].total_return_index == Decimal("1")
+    assert result.points[-1].raw_close == Decimal("10")
+    assert bars[-1].close == Decimal("10")
+
+
 def test_future_or_late_known_market_bar_blocks_total_return() -> None:
     future_trade = bar(date(2026, 7, 30), "10", "10")
     late_known = bar(date(2026, 7, 20), "10", "10").model_copy(

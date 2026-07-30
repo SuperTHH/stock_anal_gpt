@@ -71,6 +71,7 @@ class CorporateAction(FactBase):
     split_ratio: Decimal | None = None
     rights_ratio: Decimal | None = None
     rights_price: Decimal | None = None
+    share_reduction: Decimal | None = None
     action_status: ActionStatus
 
     @field_validator("published_at")
@@ -92,6 +93,7 @@ class CorporateAction(FactBase):
             ActionType.STOCK_DIVIDEND: (self.stock_dividend_ratio,),
             ActionType.SPLIT: (self.split_ratio,),
             ActionType.RIGHTS_ISSUE: (self.rights_ratio, self.rights_price),
+            ActionType.BUYBACK_CANCELLATION: (self.share_reduction,),
         }[self.action_type]
         if any(value is None or value <= 0 for value in required_terms):
             raise ValueError("action terms must be positive and complete")

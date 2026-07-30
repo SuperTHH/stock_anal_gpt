@@ -1090,4 +1090,7 @@ def test_error_status_is_explicit_and_does_not_guess_unknown_exceptions() -> Non
         "FINANCIAL_NUMERIC_FACTS_MISSING": RunStatus.PARTIAL,
         "FINANCIAL_FACT_UNMAPPED": RunStatus.PARTIAL,
         "FINANCIAL_FACT_CONFLICT": RunStatus.PARTIAL,
+        "FINANCIAL_MAPPING_TAXONOMY_MISMATCH": RunStatus.BLOCKED,
+        "FINANCIAL_BALANCE_COMPONENT_MISSING": RunStatus.PARTIAL,
+        "FINANCIAL_BALANCE_EQUATION_CONFLICT": RunStatus.PARTIAL,
     }

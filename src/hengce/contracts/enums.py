@@ -90,6 +90,7 @@ class ActionType(StrEnum):
     STOCK_DIVIDEND = "STOCK_DIVIDEND"
     SPLIT = "SPLIT"
     RIGHTS_ISSUE = "RIGHTS_ISSUE"
+    BUYBACK_CANCELLATION = "BUYBACK_CANCELLATION"
 
 
 class ActionStatus(StrEnum):

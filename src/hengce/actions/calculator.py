@@ -79,8 +79,14 @@ class TotalReturnCalculator:
                 return TotalReturnResult((), ("CORPORATE_ACTION_QUALITY_BLOCKED",))
             visible_actions.setdefault(action.record_id, action)
 
+        resolved_actions, version_error = self._resolve_action_versions(
+            tuple(visible_actions.values())
+        )
+        if version_error is not None:
+            return TotalReturnResult((), (version_error,))
+
         by_ex_date: dict[date, list[CorporateAction]] = {}
-        for action in visible_actions.values():
+        for action in resolved_actions:
             if action.action_status is not ActionStatus.CANCELLED:
                 by_ex_date.setdefault(action.ex_date, []).append(action)
 
@@ -115,6 +121,10 @@ class TotalReturnCalculator:
                     ratio = action.rights_ratio or Decimal(0)
                     shares += ratio
                     subscription_cost += ratio * (action.rights_price or Decimal(0))
+                elif action.action_type is ActionType.BUYBACK_CANCELLATION:
+                    # An issuer share cancellation changes point-in-time share capital,
+                    # but it is not a distribution to holders in a total-return series.
+                    pass
             period_return = (current.close * shares + cash - subscription_cost) / previous_close
             index *= period_return
             points.append(
@@ -134,3 +144,33 @@ class TotalReturnCalculator:
     def _validate_cutoff(value: datetime) -> None:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("TOTAL_RETURN_CUTOFF_INVALID")
+
+    @staticmethod
+    def _resolve_action_versions(
+        actions: tuple[CorporateAction, ...],
+    ) -> tuple[tuple[CorporateAction, ...], str | None]:
+        by_id = {action.record_id: action for action in actions}
+        children: dict[str, list[CorporateAction]] = {}
+        for action in actions:
+            if action.supersedes_id is None:
+                continue
+            predecessor = by_id.get(action.supersedes_id)
+            if predecessor is None:
+                return (), "CORPORATE_ACTION_CHAIN_GAP"
+            if (
+                predecessor.ts_code != action.ts_code
+                or predecessor.action_type is not action.action_type
+            ):
+                return (), "CORPORATE_ACTION_CHAIN_CONFLICT"
+            children.setdefault(predecessor.record_id, []).append(action)
+        if any(len(successors) != 1 for successors in children.values()):
+            return (), "CORPORATE_ACTION_BRANCH_CONFLICT"
+        superseded_ids = set(children)
+        return (
+            tuple(
+                action
+                for action in actions
+                if action.record_id not in superseded_ids
+            ),
+            None,
+        )
