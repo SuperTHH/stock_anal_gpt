@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from hengce.contracts.enums import QualityStatus
@@ -83,3 +83,54 @@ def test_xbrl_pdf_conflict_returns_xbrl_and_quality_block() -> None:
     assert result.document is not None
     assert result.document.source_kind == "XBRL"
     assert result.blocked_reasons == ("XBRL_PDF_FACT_CONFLICT",)
+
+
+def test_pdf_correction_chain_switches_only_when_published_and_known() -> None:
+    """Catches replacing an old PDF value before the correction was public and collected."""
+    old = document("PDF", QualityStatus.VALID).model_copy(
+        update={
+            "filing_id": "pdf-old",
+            "published_at": NOW,
+            "valid_from": NOW + timedelta(days=10),
+            "facts": {"total_assets": Decimal("100")},
+        }
+    )
+    correction = old.model_copy(
+        update={
+            "filing_id": "pdf-correction",
+            "published_at": NOW + timedelta(days=5),
+            "valid_from": NOW + timedelta(days=12),
+            "version": "v2",
+            "supersedes_id": "pdf-old",
+            "facts": {"total_assets": Decimal("110")},
+        }
+    )
+    def provider() -> tuple[FinancialDocument, FinancialDocument]:
+        return old, correction
+
+    resolver = PreferredFinancialResolver()
+
+    before_publication = resolver.resolve(
+        exchange_xbrl=None,
+        cninfo_pdf_provider=provider,
+        as_of=NOW + timedelta(days=4),
+        known_at=NOW + timedelta(days=20),
+    )
+    before_collection = resolver.resolve(
+        exchange_xbrl=None,
+        cninfo_pdf_provider=provider,
+        as_of=NOW + timedelta(days=6),
+        known_at=NOW + timedelta(days=11),
+    )
+    after_both = resolver.resolve(
+        exchange_xbrl=None,
+        cninfo_pdf_provider=provider,
+        as_of=NOW + timedelta(days=6),
+        known_at=NOW + timedelta(days=12),
+    )
+
+    assert before_publication.document == old
+    assert before_collection.document == old
+    assert after_both.document == correction
+    assert old.facts["total_assets"] == Decimal("100")
+    assert correction.supersedes_id == old.filing_id

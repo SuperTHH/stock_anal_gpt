@@ -5,6 +5,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from hengce.contracts.enums import QualityStatus
+from hengce.financials.pdf_extractor import (
+    CninfoPdfExtractor,
+    PdfExtractionResult,
+    PdfFactCandidate,
+)
 from hengce.services.financial_resolution import FinancialDocument
 
 _LABELS = {
@@ -118,7 +123,7 @@ class CninfoPdfFactExtractor:
             and liabilities is not None
             and equity is not None
             and abs(assets - liabilities - equity)
-            > max(abs(assets) * Decimal("0.001"), Decimal("1"))
+            > max(abs(assets) * Decimal("0.000001"), Decimal("1"))
         ):
             issues.append("PDF_BALANCE_EQUATION_FAILED")
         return replace(
@@ -161,3 +166,12 @@ class CninfoPdfFactExtractor:
                 "normalized_unit": "CNY",
             },
         )
+
+
+__all__ = [
+    "CninfoPdfExtractor",
+    "CninfoPdfFactExtractor",
+    "PdfExtractionResult",
+    "PdfFactCandidate",
+    "PdfFactExtraction",
+]

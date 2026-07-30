@@ -74,6 +74,29 @@ def test_unbalanced_pdf_facts_stay_unverified_with_machine_readable_issue() -> N
     assert validated.issues == ("PDF_BALANCE_EQUATION_FAILED",)
 
 
+def test_balance_tolerance_is_one_part_per_million_not_one_per_thousand() -> None:
+    """Catches materially loose validation accidentally blessing a bad PDF fallback."""
+    extractor = CninfoPdfFactExtractor("cninfo-pdf-v1")
+    parsed = extractor.parse_text(
+        """
+        报告期：2025-12-31
+        货币单位：人民币元
+        资产总计 | 1,000,000
+        负债合计 | 400,000
+        所有者权益合计 | 599,500
+        营业收入 | 1,500
+        净利润 | 120
+        经营活动产生的现金流量净额 | 180
+        """,
+        filing_id="cninfo-strict-tolerance",
+    )
+
+    validated = extractor.validate(parsed)
+
+    assert validated.quality_status is QualityStatus.UNVERIFIED
+    assert validated.issues == ("PDF_BALANCE_EQUATION_FAILED",)
+
+
 def test_version_metadata_requires_aware_publication_time() -> None:
     """Catches losing announcement/version ordering when creating a PDF fallback filing."""
     extractor = CninfoPdfFactExtractor("cninfo-pdf-v1")
