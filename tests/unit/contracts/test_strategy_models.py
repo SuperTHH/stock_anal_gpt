@@ -6,10 +6,12 @@ from pydantic import ValidationError
 
 from hengce.contracts.enums import (
     CandidateStatus,
+    PoolReadinessStatus,
     QualityStatus,
     ReportStatus,
     StrategyType,
 )
+from hengce.contracts.pilot import PoolReadiness
 from hengce.contracts.strategy import (
     FactorDetail,
     ReportSnapshot,
@@ -80,6 +82,26 @@ def test_candidate_enforces_score_rank_completeness_and_aware_cutoff() -> None:
 
 
 def snapshot_payload() -> dict[str, object]:
+    readiness = {
+        strategy: PoolReadiness(
+            strategy_type=strategy,
+            universe_size=30,
+            eligible_count=30,
+            complete_factor_count=30,
+            coverage_ratio=Decimal("1"),
+            required_coverage_ratio=Decimal("0.80"),
+            status=PoolReadinessStatus.READY,
+            missing_by_security={},
+            blocking_codes=(),
+            strategy_version=version,
+            factor_version="pilot-financial-metrics-v1",
+        )
+        for strategy, version in {
+            StrategyType.QUALITY_GROWTH: "quality-growth-pilot-v1",
+            StrategyType.DEEP_VALUE: "deep-value-pilot-v1",
+            StrategyType.STABLE_DIVIDEND: "stable-dividend-pilot-v1",
+        }.items()
+    }
     return {
         "report_id": "report-2026-07-29-v1",
         "report_date": date(2026, 7, 29),
@@ -99,6 +121,13 @@ def snapshot_payload() -> dict[str, object]:
             StrategyType.STABLE_DIVIDEND: "stable-dividend-v1",
         },
         "manifest_hash": "a" * 64,
+        "universe_id": "pilot-2026-07-22",
+        "is_historical_reconstruction": True,
+        "report_cutoff_at": NOW,
+        "known_at": NOW,
+        "generation_started_at": NOW,
+        "pool_readiness": readiness,
+        "manual_todo_count": 0,
     }
 
 
@@ -128,4 +157,28 @@ def test_completed_strategy_evidence_cannot_hide_qualified_candidates() -> None:
             qualified_count=10,
             published_candidate_count=0,
             completed=True,
+        )
+
+
+def test_historical_snapshot_requires_all_pool_readiness_and_real_times() -> None:
+    """Catches a reconstructed report that omits a pool or disguises its generation time."""
+    payload = snapshot_payload()
+    assert ReportSnapshot.model_validate(payload).is_historical_reconstruction
+    with pytest.raises(ValidationError, match="historical report requires all pool readiness"):
+        ReportSnapshot.model_validate(
+            {
+                **payload,
+                "pool_readiness": {
+                    StrategyType.QUALITY_GROWTH: payload["pool_readiness"][
+                        StrategyType.QUALITY_GROWTH
+                    ]
+                },
+            }
+        )
+    with pytest.raises(ValidationError, match="known_at must include a timezone"):
+        ReportSnapshot.model_validate(
+            {
+                **payload,
+                "known_at": datetime(2026, 7, 29, 13),
+            }
         )

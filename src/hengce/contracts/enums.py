@@ -57,6 +57,28 @@ class DiscoveryMethod(StrEnum):
     MANUAL_IMPORT = "MANUAL_IMPORT"
 
 
+class AcquisitionStatus(StrEnum):
+    PLANNED = "PLANNED"
+    DISCOVERED = "DISCOVERED"
+    DOWNLOADED = "DOWNLOADED"
+    VERIFIED = "VERIFIED"
+    INGESTED = "INGESTED"
+    AWAITING_MANUAL = "AWAITING_MANUAL"
+    REJECTED = "REJECTED"
+
+
+class DocumentKind(StrEnum):
+    PERIODIC_REPORT = "PERIODIC_REPORT"
+    DIVIDEND_RECORD = "DIVIDEND_RECORD"
+    CAPITAL_ACTION_TIMELINE = "CAPITAL_ACTION_TIMELINE"
+    RISK_SCREEN = "RISK_SCREEN"
+
+
+class PoolReadinessStatus(StrEnum):
+    READY = "READY"
+    BLOCKED = "BLOCKED"
+
+
 class ConflictResolutionStatus(StrEnum):
     OPEN = "OPEN"
     SUPERSEDED = "SUPERSEDED"

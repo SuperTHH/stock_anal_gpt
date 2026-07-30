@@ -16,6 +16,7 @@ from .enums import (
     ReportStatus,
     StrategyType,
 )
+from .pilot import PoolReadiness
 
 
 class FactorDetail(BaseModel):
@@ -119,12 +120,22 @@ class ReportSnapshot(BaseModel):
     data_domain_statuses: dict[str, QualityStatus]
     strategy_versions: dict[StrategyType, str]
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    universe_id: str | None = None
+    is_historical_reconstruction: bool = False
+    report_cutoff_at: datetime | None = None
+    known_at: datetime | None = None
+    generation_started_at: datetime | None = None
+    pool_readiness: dict[StrategyType, PoolReadiness] = Field(default_factory=dict)
+    manual_todo_count: int = Field(default=0, ge=0)
 
     @field_validator(
         "market_cutoff_at",
         "event_cutoff_at",
         "generated_at",
         "published_at",
+        "report_cutoff_at",
+        "known_at",
+        "generation_started_at",
     )
     @classmethod
     def times_must_be_aware(
@@ -147,4 +158,23 @@ class ReportSnapshot(BaseModel):
                 raise ValueError("published report requires a valid publication time")
             if set(self.strategy_versions) != set(StrategyType):
                 raise ValueError("published report requires all strategy versions")
+        if self.is_historical_reconstruction:
+            if (
+                not self.universe_id
+                or self.report_cutoff_at is None
+                or self.known_at is None
+                or self.generation_started_at is None
+            ):
+                raise ValueError("historical report requires universe and timeline")
+            if set(self.pool_readiness) != set(StrategyType):
+                raise ValueError("historical report requires all pool readiness")
+            if any(
+                readiness.strategy_type is not strategy
+                for strategy, readiness in self.pool_readiness.items()
+            ):
+                raise ValueError("historical pool readiness key mismatch")
+            if self.report_cutoff_at > self.known_at:
+                raise ValueError("historical report cutoff exceeds known time")
+            if self.generation_started_at > self.known_at:
+                raise ValueError("historical generation starts after known time")
         return self
