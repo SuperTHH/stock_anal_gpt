@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xbrli="http://www.xbrl.org/2003/instance"
+  xmlns:p="urn:hengce:pilot-gaap"
+  targetNamespace="urn:hengce:pilot-gaap"
+  elementFormDefault="qualified">
+  <xsd:annotation>
+    <xsd:documentation>FIXTURE DATA - NOT A REAL ISSUER</xsd:documentation>
+  </xsd:annotation>
+  <xsd:import namespace="http://www.xbrl.org/2003/instance"
+    schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <xsd:element name="Revenue" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration">
+    <xsd:annotation><xsd:documentation>Fictional revenue</xsd:documentation></xsd:annotation>
+  </xsd:element>
+  <xsd:element name="OperatingCost" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="NetProfit" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="AdjustedNetProfit" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="OperatingCashFlow" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="CapitalExpenditure" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="TotalAssets" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="CurrentAssets" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="CashAndEquivalents" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="TotalLiabilities" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="CurrentLiabilities" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="InterestBearingDebt" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="Equity" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+  <xsd:element name="InterestExpense" type="xbrli:monetaryItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="duration"/>
+  <xsd:element name="TotalShares" type="xbrli:sharesItemType"
+    substitutionGroup="xbrli:item" xbrli:periodType="instant"/>
+</xsd:schema>

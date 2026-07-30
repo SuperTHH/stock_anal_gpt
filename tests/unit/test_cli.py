@@ -6,7 +6,7 @@ import socket
 import sys
 import sysconfig
 import zipfile
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from subprocess import run
@@ -16,10 +16,24 @@ import pytest
 from typer.testing import CliRunner
 
 from hengce import cli
+from hengce.bootstrap import bootstrap_state
 from hengce.cli import app, build_market_ingestion, load_trade_dates
 from hengce.config import Settings
-from hengce.contracts.enums import DiscoveryMethod, ReportType, RunStatus
+from hengce.contracts.enums import (
+    AcquisitionStatus,
+    DiscoveryMethod,
+    DocumentKind,
+    QualityStatus,
+    ReportType,
+    RunStatus,
+)
+from hengce.contracts.pilot import (
+    AcquisitionManifestItem,
+    PilotUniverseMember,
+    PilotUniverseSnapshot,
+)
 from hengce.financials.package import LocalAttachmentInspector
+from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
 from hengce.financials.xbrl import (
     RawXbrlContext,
     RawXbrlFact,
@@ -31,6 +45,7 @@ from hengce.services.financial_ingestion import FinancialIngestionResult
 from hengce.services.initializer import InitializationResult
 from hengce.services.market_ingestion import MarketIngestionResult
 from hengce.state.financial_repository import FinancialFilingRepository
+from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
 
 POLICY_FILE = Path(__file__).parents[2] / "config" / "source_policies.json"
@@ -61,17 +76,29 @@ class FakeFinancialIngestion:
     def __init__(self, result: FinancialIngestionResult) -> None:
         self.result = result
         self.descriptors: list[object] = []
+        self.manifest_item_ids: list[str | None] = []
 
-    def run(self, descriptor: object) -> FinancialIngestionResult:
+    def run(
+        self,
+        descriptor: object,
+        *,
+        manifest_item_id: str | None = None,
+    ) -> FinancialIngestionResult:
         self.descriptors.append(descriptor)
+        self.manifest_item_ids.append(manifest_item_id)
         return self.result
 
 
 class NoisyFinancialIngestion(FakeFinancialIngestion):
-    def run(self, descriptor: object) -> FinancialIngestionResult:
+    def run(
+        self,
+        descriptor: object,
+        *,
+        manifest_item_id: str | None = None,
+    ) -> FinancialIngestionResult:
         print("parser-stdout-log")
         print("parser-stderr-log", file=sys.stderr)
-        return super().run(descriptor)
+        return super().run(descriptor, manifest_item_id=manifest_item_id)
 
 
 class FakeLocalXbrlProcessor:
@@ -175,6 +202,197 @@ def invoke_fixture_taxonomy_registration(
     )
 
 
+def seed_pilot_financial_inputs(
+    tmp_path: Path,
+    *,
+    payload: bytes,
+    source_id: str,
+    source_url: str,
+    ts_code: str,
+    report_period: str,
+    published_at: str,
+    collected_at: str,
+) -> tuple[Path, Path, str]:
+    mapping_path = tmp_path / "financial-mapping.json"
+    declarations_path = tmp_path / "entity-declarations.json"
+    manifest_item_id = "fixture-manifest-item"
+    try:
+        parsed_period = date.fromisoformat(report_period)
+        parsed_published = datetime.fromisoformat(published_at)
+        parsed_collected = datetime.fromisoformat(collected_at)
+    except ValueError:
+        mapping_path.write_text("{}", encoding="utf-8")
+        declarations_path.write_text("[]", encoding="utf-8")
+        return mapping_path, declarations_path, manifest_item_id
+    if (
+        parsed_period.isoformat() != report_period
+        or parsed_published.tzinfo is None
+        or parsed_collected.tzinfo is None
+    ):
+        mapping_path.write_text("{}", encoding="utf-8")
+        declarations_path.write_text("[]", encoding="utf-8")
+        return mapping_path, declarations_path, manifest_item_id
+
+    state = bootstrap_state(
+        Settings(data_dir=tmp_path / "data"),
+        POLICY_FILE,
+    )
+    pilot_repository = PilotRepository(state.path)
+    snapshot = pilot_repository.get_universe("cli-pilot-fixture")
+    if snapshot is None:
+        board_config = (
+            ("MAIN_SH", "600", "SH", 8),
+            ("MAIN_SZ", "000", "SZ", 8),
+            ("CHINEXT", "300", "SZ", 7),
+            ("STAR", "688", "SH", 7),
+        )
+        members: list[PilotUniverseMember] = []
+        sequence = 0
+        for board, prefix, suffix, count in board_config:
+            for rank in range(1, count + 1):
+                sequence += 1
+                code = (
+                    "699999.SH"
+                    if board == "MAIN_SH" and rank == 1
+                    else f"{prefix}{rank:03d}.{suffix}"
+                )
+                members.append(
+                    PilotUniverseMember(
+                        ts_code=code,
+                        security_name=f"虚构公司{sequence:02d}",
+                        board=board,
+                        amount=Decimal(1_000_000 - sequence),
+                        rank_in_board=rank,
+                        evidence_record_ids=(
+                            f"bar-{sequence}",
+                            f"master-{sequence}",
+                        ),
+                    )
+                )
+        snapshot = PilotUniverseSnapshot(
+            universe_id="cli-pilot-fixture",
+            market_date=date(2026, 7, 22),
+            report_cutoff_at=datetime(2026, 7, 22, 13, 30, tzinfo=UTC),
+            algorithm_version="cli-fixture-v1",
+            quotas={"MAIN_SH": 8, "MAIN_SZ": 8, "CHINEXT": 7, "STAR": 7},
+            members=tuple(members),
+            input_hashes={"market": "a" * 64, "master": "b" * 64},
+            manifest_hash="c" * 64,
+            created_at=datetime(2026, 7, 30, 9, tzinfo=UTC),
+        )
+        pilot_repository.publish_universe(snapshot)
+
+    taxonomy_hash = "a" * 64
+    try:
+        taxonomy_hash = FinancialFilingRepository(state.path).get_taxonomies(
+            ("test-gaap-2025",)
+        )[0].raw_object_hash
+    except ValueError:
+        pass
+    statement_by_name = {
+        name: (
+            "CASH_FLOW"
+            if name in {"operating_cash_flow", "capital_expenditure"}
+            else "INCOME_STATEMENT"
+            if name
+            in {
+                "revenue",
+                "operating_cost",
+                "net_profit",
+                "adjusted_net_profit",
+                "interest_expense",
+            }
+            else "BALANCE_SHEET"
+        )
+        for name in CANONICAL_PILOT_FACTS
+    }
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "mapping_version": "cli-pilot-fixture-v1",
+                "report_year_from": parsed_period.year,
+                "report_year_to": parsed_period.year,
+                "canonical_fact_set": sorted(CANONICAL_PILOT_FACTS),
+                "mappings": [
+                    {
+                        "raw_qname": (
+                            f"{{urn:hengce:pilot-cli}}"
+                            f"{name.title().replace('_', '')}"
+                        ),
+                        "canonical_fact_name": name,
+                        "statement_type": statement_by_name[name],
+                        "expected_unit_kind": (
+                            "SHARES" if name == "total_shares" else "MONETARY"
+                        ),
+                        "taxonomy_hash": taxonomy_hash,
+                        "evidence_url": (
+                            "https://www.sse.com.cn/fixture/pilot-cli.xsd"
+                        ),
+                        "reviewed_at": "2026-07-30T09:00:00+08:00",
+                    }
+                    for name in sorted(CANONICAL_PILOT_FACTS)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    declarations = [
+        {
+            "entity_scheme": f"urn:hengce:cli:{member.ts_code}",
+            "entity_identifier": member.ts_code,
+            "ts_code": member.ts_code,
+        }
+        for member in snapshot.members
+    ]
+    declarations.extend(
+        [
+            {
+                "entity_scheme": "urn:hengce:test-issuer",
+                "entity_identifier": "699999.SH",
+                "ts_code": "699999.SH",
+            },
+            {
+                "entity_scheme": "https://www.sse.com.cn/entity",
+                "entity_identifier": "699999.SH",
+                "ts_code": "699999.SH",
+            },
+        ]
+    )
+    declarations_path.write_text(json.dumps(declarations), encoding="utf-8")
+
+    content_hash = hashlib.sha256(payload).hexdigest()
+    existing = pilot_repository.get_manifest_item(manifest_item_id)
+    if existing is None and ts_code in {member.ts_code for member in snapshot.members}:
+        pilot_repository.insert_manifest(
+            [
+                AcquisitionManifestItem(
+                    item_id=manifest_item_id,
+                    universe_id=snapshot.universe_id,
+                    ts_code=ts_code,
+                    document_kind=DocumentKind.PERIODIC_REPORT,
+                    report_type=ReportType.ANNUAL,
+                    report_period=parsed_period,
+                    source_id=source_id,
+                    report_cutoff_at=snapshot.report_cutoff_at,
+                    status=AcquisitionStatus.VERIFIED,
+                    source_url=source_url,
+                    discovery_method=DiscoveryMethod.FIXTURE,
+                    published_at=parsed_published,
+                    effective_at=parsed_published,
+                    collected_at=parsed_collected,
+                    content_hash=content_hash,
+                    version="cli-fixture-v1",
+                    supersedes_id=None,
+                    raw_object_hash=content_hash,
+                    quality_status=QualityStatus.VALID,
+                    error_code=None,
+                    attempt_count=1,
+                )
+            ]
+        )
+    return mapping_path, declarations_path, manifest_item_id
+
+
 def financial_import_args(
     tmp_path: Path,
     *,
@@ -194,6 +412,16 @@ def financial_import_args(
 ) -> list[str]:
     filing = tmp_path / f"filing{suffix}"
     filing.write_bytes(payload)
+    mapping_file, declarations_file, manifest_item_id = seed_pilot_financial_inputs(
+        tmp_path,
+        payload=payload,
+        source_id=source_id,
+        source_url=source_url,
+        ts_code=ts_code,
+        report_period=report_period,
+        published_at=published_at,
+        collected_at=collected_at,
+    )
     arguments = [
         "import-financial-xbrl",
         "--file",
@@ -219,6 +447,16 @@ def financial_import_args(
     ]
     for taxonomy_id in taxonomy_ids:
         arguments.extend(["--taxonomy-id", taxonomy_id])
+    arguments.extend(
+        [
+            "--manifest-item-id",
+            manifest_item_id,
+            "--mapping-file",
+            str(mapping_file),
+            "--entity-declarations-file",
+            str(declarations_file),
+        ]
+    )
     if instance_entrypoint is not None:
         arguments.extend(["--instance-entrypoint", instance_entrypoint])
     arguments.extend(
@@ -789,6 +1027,7 @@ def test_import_financial_xbrl_uses_injected_local_composition(
     assert descriptor.discovery_method is DiscoveryMethod.MANUAL_IMPORT
     assert descriptor.taxonomy_refs == ("test-gaap-2025", "exchange-common-2025")
     assert descriptor.report_type is ReportType.ANNUAL
+    assert fake.manifest_item_ids == ["fixture-manifest-item"]
     output = json.loads(result.stdout)
     assert result.stdout == f"{json.dumps(output, ensure_ascii=False, sort_keys=True)}\n"
     assert "<xbrli:xbrl" not in result.stdout
@@ -1222,12 +1461,29 @@ def test_import_financial_xbrl_missing_taxonomy_returns_sorted_local_result(
     assert list((tmp_path / "data" / "raw").rglob("payload.bin"))
 
 
-def test_build_financial_ingestion_uses_empty_mapping_and_single_layer_dataset(
+def test_build_financial_ingestion_uses_explicit_mapping_and_single_layer_dataset(
     tmp_path: Path,
 ) -> None:
-    service = cli.build_financial_ingestion(Settings(data_dir=tmp_path / "data"))
+    mapping_file, declarations_file, _item_id = seed_pilot_financial_inputs(
+        tmp_path,
+        payload=VALID_INSTANCE,
+        source_id="sse",
+        source_url="https://www.sse.com.cn/filing.xml",
+        ts_code="699999.SH",
+        report_period="2025-12-31",
+        published_at="2026-04-30T09:00:00+08:00",
+        collected_at="2026-07-26T12:00:00+08:00",
+    )
+    service = cli.build_financial_ingestion(
+        Settings(data_dir=tmp_path / "data"),
+        mapping_file,
+        declarations_file,
+        date(2025, 12, 31),
+        "cli-pilot-fixture",
+        POLICY_FILE,
+    )
 
-    assert service.normalizer.mapping_version == "empty-v1"
+    assert service.normalizer.mapping_version == "cli-pilot-fixture-v1"
     assert service.warehouse.dataset == tmp_path / "data" / "warehouse" / "financial_facts"
 
 

@@ -194,7 +194,7 @@ class FinancialQualityValidator:
             for fact in retained_facts
             if fact.fact_id not in conflicting_fact_ids
             and fact.mapping_status is MappingStatus.MAPPED
-            and fact.canonical_fact_name in {"assets", "liabilities", "equity"}
+            and _balance_role(fact.canonical_fact_name) is not None
         ]
         facts_by_equation_key: dict[EquationKey, list[FinancialFact]] = defaultdict(list)
         for fact in equation_facts:
@@ -206,7 +206,11 @@ class FinancialQualityValidator:
             grouped_facts = facts_by_equation_key[key]
             components = {
                 name: sorted(
-                    (fact for fact in grouped_facts if fact.canonical_fact_name == name),
+                    (
+                        fact
+                        for fact in grouped_facts
+                        if _balance_role(fact.canonical_fact_name) == name
+                    ),
                     key=_fact_sort_key,
                 )
                 for name in ("assets", "liabilities", "equity")
@@ -315,6 +319,16 @@ def _canonical_fact_key(fact: FinancialFact) -> CanonicalFactKey:
         fact.report_period.isoformat(),
         fact.report_type.value,
     )
+
+
+def _balance_role(canonical_fact_name: str | None) -> str | None:
+    return {
+        "assets": "assets",
+        "total_assets": "assets",
+        "liabilities": "liabilities",
+        "total_liabilities": "liabilities",
+        "equity": "equity",
+    }.get(canonical_fact_name)
 
 
 def _canonical_identity_hash(key: CanonicalFactKey) -> str:

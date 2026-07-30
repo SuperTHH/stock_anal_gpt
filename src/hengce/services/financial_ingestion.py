@@ -9,13 +9,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hengce.contracts.enums import QualityStatus, RunStatus
+from hengce.contracts.enums import (
+    AcquisitionStatus,
+    DocumentKind,
+    QualityStatus,
+    RunStatus,
+)
 from hengce.contracts.financial import (
     FilingDescriptor,
     FinancialFact,
     FinancialFiling,
     TaxonomyPackageRef,
 )
+from hengce.contracts.pilot import AcquisitionManifestItem
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RunRecord
 from hengce.financials.mapping import FinancialFactNormalizer
@@ -28,6 +34,7 @@ from hengce.state.financial_repository import (
     FinancialArtifactRecord,
     FinancialFilingRepository,
 )
+from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
 from hengce.warehouse.financial import FinancialArtifact, FinancialFactWarehouse
 
@@ -35,6 +42,7 @@ ERROR_STATUS = {
     "RAW_PAYLOAD_INTEGRITY_ERROR": RunStatus.FAILED,
     "FINANCIAL_OVERLAY_CONFLICT": RunStatus.FAILED,
     "FINANCIAL_ENTITY_MISMATCH": RunStatus.BLOCKED,
+    "FINANCIAL_MAPPING_TAXONOMY_MISMATCH": RunStatus.BLOCKED,
     "FINANCIAL_BACKFILL_UNSUPPORTED": RunStatus.BLOCKED,
     "FINANCIAL_DESCRIPTOR_CONFLICT": RunStatus.BLOCKED,
     "FINANCIAL_TAXONOMY_MISSING": RunStatus.BLOCKED,
@@ -43,6 +51,8 @@ ERROR_STATUS = {
     "FINANCIAL_NUMERIC_FACTS_MISSING": RunStatus.PARTIAL,
     "FINANCIAL_FACT_UNMAPPED": RunStatus.PARTIAL,
     "FINANCIAL_FACT_CONFLICT": RunStatus.PARTIAL,
+    "FINANCIAL_BALANCE_COMPONENT_MISSING": RunStatus.PARTIAL,
+    "FINANCIAL_BALANCE_EQUATION_CONFLICT": RunStatus.PARTIAL,
 }
 
 _TERMINAL_STATUSES = frozenset(
@@ -88,6 +98,7 @@ class FinancialIngestionService:
         validator: FinancialQualityValidator,
         warehouse: FinancialFactWarehouse,
         state: StateRepository,
+        pilot_repository: PilotRepository | None = None,
         clock: Callable[[], datetime] = utc_now,
         stage_hook: Callable[[str], None] = no_stage_hook,
     ) -> None:
@@ -100,10 +111,27 @@ class FinancialIngestionService:
         self.validator = validator
         self.warehouse = warehouse
         self.state = state
+        self.pilot_repository = pilot_repository
         self.clock = clock
         self.stage_hook = stage_hook
 
-    def run(self, descriptor: FilingDescriptor) -> FinancialIngestionResult:
+    def run(
+        self,
+        descriptor: FilingDescriptor,
+        *,
+        manifest_item_id: str | None = None,
+    ) -> FinancialIngestionResult:
+        manifest_item = self._manifest_item(manifest_item_id, descriptor)
+        result = self._run_filing(descriptor)
+        if (
+            manifest_item is not None
+            and manifest_item.status is AcquisitionStatus.VERIFIED
+            and result.run_status is RunStatus.SUCCEEDED
+        ):
+            self._complete_manifest(manifest_item, result)
+        return result
+
+    def _run_filing(self, descriptor: FilingDescriptor) -> FinancialIngestionResult:
         filing_id = self._filing_id(descriptor)
         run_id = f"financial_xbrl:{filing_id}"
         descriptor_fingerprint = self._descriptor_fingerprint(descriptor)
@@ -160,6 +188,62 @@ class FinancialIngestionService:
             if status is None:
                 raise
             return self._terminal_error(run, filing_id, status, error_code)
+
+    def _manifest_item(
+        self,
+        manifest_item_id: str | None,
+        descriptor: FilingDescriptor,
+    ) -> AcquisitionManifestItem | None:
+        if manifest_item_id is None:
+            return None
+        if self.pilot_repository is None:
+            raise ValueError("ACQUISITION_REPOSITORY_REQUIRED")
+        item = self.pilot_repository.get_manifest_item(manifest_item_id)
+        if item is None:
+            raise ValueError("ACQUISITION_ITEM_NOT_FOUND")
+        if item.status not in {
+            AcquisitionStatus.VERIFIED,
+            AcquisitionStatus.INGESTED,
+        }:
+            raise ValueError("ACQUISITION_ITEM_NOT_VERIFIED")
+        if (
+            item.document_kind is not DocumentKind.PERIODIC_REPORT
+            or item.ts_code != descriptor.ts_code
+            or item.report_type is not descriptor.report_type
+            or item.report_period != descriptor.report_period
+            or item.source_id != descriptor.source_id
+            or str(item.source_url) != str(descriptor.source_url)
+            or item.published_at != descriptor.published_at
+            or item.collected_at != descriptor.collected_at
+            or item.raw_object_hash != descriptor.raw_object_hash
+            or item.content_hash != descriptor.raw_object_hash
+        ):
+            raise ValueError("ACQUISITION_DESCRIPTOR_MISMATCH")
+        return item
+
+    def _complete_manifest(
+        self,
+        item: AcquisitionManifestItem,
+        result: FinancialIngestionResult,
+    ) -> None:
+        assert self.pilot_repository is not None
+        filing_record = self.repository.get_filing(result.filing_id)
+        if filing_record is None or filing_record.artifact_status != "PUBLISHED":
+            raise RuntimeError("FINANCIAL_MANIFEST_PUBLICATION_MISSING")
+        updated = item.model_copy(
+            update={
+                "status": AcquisitionStatus.INGESTED,
+                "quality_status": filing_record.filing.quality_status,
+                "supersedes_id": filing_record.filing.supersedes_id,
+                "error_code": None,
+            }
+        )
+        self.pilot_repository.transition(
+            item.item_id,
+            AcquisitionStatus.VERIFIED,
+            updated,
+            self.clock(),
+        )
 
     def _ingest(
         self,
@@ -535,8 +619,19 @@ class FinancialIngestionService:
 
     @staticmethod
     def _quality_error_code(quality: FinancialQualityResult) -> str | None:
+        issue_codes = {issue.code for issue in quality.issues}
         return next(
-            (issue.code for issue in quality.issues if issue.code in ERROR_STATUS),
+            (
+                code
+                for code in (
+                    "FINANCIAL_FACT_CONFLICT",
+                    "FINANCIAL_BALANCE_EQUATION_CONFLICT",
+                    "FINANCIAL_NUMERIC_FACTS_MISSING",
+                    "FINANCIAL_FACT_UNMAPPED",
+                    "FINANCIAL_BALANCE_COMPONENT_MISSING",
+                )
+                if code in issue_codes
+            ),
             None,
         )
 

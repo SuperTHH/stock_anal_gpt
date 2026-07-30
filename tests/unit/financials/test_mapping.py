@@ -238,6 +238,35 @@ def test_normalizer_rejects_mapped_fact_with_wrong_unit_kind() -> None:
         normalizer().normalize(financial_filing(), [raw_assets(unit=shares)])
 
 
+def test_normalizer_requires_reviewed_mapping_taxonomy_hash_on_filing() -> None:
+    """Catches applying an exact QName mapping to an unreviewed taxonomy version."""
+    registry = FactMappingRegistry(
+        mapping_version="reviewed-v1",
+        mappings={
+            ASSETS_QNAME: FactMapping(
+                raw_qname=ASSETS_QNAME,
+                canonical_fact_name="assets",
+                statement_type=StatementType.BALANCE_SHEET,
+                expected_unit_kind="MONETARY",
+                taxonomy_hash="b" * 64,
+                evidence_url="https://www.sse.com.cn/fixture/test-gaap.xsd",
+                reviewed_at=NOW,
+            )
+        },
+    )
+    configured = FinancialFactNormalizer(
+        registry,
+        EntityMappingRegistry(
+            mappings={
+                ("https://example.test/entity", "699999.SH"): "699999.SH"
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="^FINANCIAL_MAPPING_TAXONOMY_MISMATCH$"):
+        configured.normalize(financial_filing(), [raw_assets()])
+
+
 @pytest.mark.parametrize(
     ("expected_unit_kind", "unit"),
     [

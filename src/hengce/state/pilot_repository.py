@@ -242,6 +242,24 @@ class PilotRepository:
             for row in rows
         )
 
+    def get_manifest_item(
+        self,
+        item_id: str,
+    ) -> AcquisitionManifestItem | None:
+        with connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM acquisition_manifest_items
+                WHERE item_id=?
+                """,
+                (item_id,),
+            ).fetchone()
+        return (
+            AcquisitionManifestItem.model_validate_json(str(row["payload_json"]))
+            if row is not None
+            else None
+        )
+
     def transition(
         self,
         item_id: str,

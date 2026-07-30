@@ -52,6 +52,9 @@ class FactMapping:
     canonical_fact_name: str
     statement_type: StatementType
     expected_unit_kind: ExpectedUnitKind
+    taxonomy_hash: str | None = None
+    evidence_url: str | None = None
+    reviewed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.expected_unit_kind not in ALLOWED_UNIT_KINDS:
@@ -102,6 +105,11 @@ class FinancialFactNormalizer:
             statement_type = StatementType.OTHER
             quality_status = QualityStatus.UNVERIFIED
         else:
+            if (
+                mapping.taxonomy_hash is not None
+                and mapping.taxonomy_hash not in filing.taxonomy_hashes
+            ):
+                raise ValueError("FINANCIAL_MAPPING_TAXONOMY_MISMATCH")
             owners = self._entity_registry.owners_for(
                 raw_fact.context.entity_scheme,
                 raw_fact.context.entity_identifier,

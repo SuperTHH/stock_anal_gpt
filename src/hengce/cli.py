@@ -22,15 +22,15 @@ from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
 from hengce.financials.mapping import (
-    EntityMappingRegistry,
-    FactMappingRegistry,
     FinancialFactNormalizer,
 )
 from hengce.financials.package import (
     SafePackageMaterializer,
     validated_attachment_snapshot,
 )
+from hengce.financials.qname_inventory import QNameInventory
 from hengce.financials.quality import FinancialQualityValidator
+from hengce.financials.registry_loader import FinancialRegistryLoader
 from hengce.financials.xbrl import ArelleXbrlProcessor
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
@@ -38,6 +38,7 @@ from hengce.services.financial_ingestion import FinancialIngestionService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
 from hengce.state.financial_repository import FinancialFilingRepository
+from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
 from hengce.warehouse.financial import FinancialFactWarehouse
 from hengce.warehouse.market import MarketWarehouse
@@ -181,14 +182,27 @@ def build_market_ingestion(
 
 def build_financial_ingestion(
     settings: Settings,
+    mapping_file: Path,
+    entity_declarations_file: Path,
+    report_period: date,
+    universe_id: str,
     policy_file: Path | None = None,
 ) -> FinancialIngestionService:
-    """Compose local-only financial ingestion with no production QName mappings."""
+    """Compose local-only financial ingestion from explicit reviewed registries."""
     state = bootstrap_state(settings, policy_file)
     raw_store = RawObjectStore(settings.data_dir / "raw")
-    mapping_registry = FactMappingRegistry(
-        mapping_version="empty-v1",
-        mappings={},
+    pilot_repository = PilotRepository(state.path)
+    universe = pilot_repository.get_universe(universe_id)
+    if universe is None:
+        raise ValueError("PILOT_UNIVERSE_NOT_FOUND")
+    loader = FinancialRegistryLoader()
+    mapping_registry = loader.load_fact_registry(
+        mapping_file,
+        report_period,
+    )
+    entity_registry = loader.build_entity_registry(
+        universe,
+        loader.load_entity_declarations(entity_declarations_file),
     )
     return FinancialIngestionService(
         guard=PolicyGuard(state),
@@ -198,11 +212,12 @@ def build_financial_ingestion(
         processor=ArelleXbrlProcessor(),
         normalizer=FinancialFactNormalizer(
             mapping_registry,
-            EntityMappingRegistry(mappings={}),
+            entity_registry,
         ),
         validator=FinancialQualityValidator(),
         warehouse=FinancialFactWarehouse(settings.data_dir / "warehouse"),
         state=state,
+        pilot_repository=pilot_repository,
     )
 
 
@@ -362,6 +377,12 @@ def import_financial_xbrl(
     collected_at: Annotated[str, typer.Option()],
     content_type: Annotated[str, typer.Option()],
     taxonomy_id: Annotated[list[str], typer.Option()],
+    manifest_item_id: Annotated[str, typer.Option()],
+    mapping_file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    entity_declarations_file: Annotated[
+        Path,
+        typer.Option(exists=True, dir_okay=False),
+    ],
     instance_entrypoint: Annotated[str | None, typer.Option()] = None,
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
     policy_file: Annotated[Path | None, typer.Option()] = None,
@@ -385,6 +406,13 @@ def import_financial_xbrl(
         taxonomy=False,
     ) as snapshot:
         validate_instance_entrypoint(snapshot.path, instance_entrypoint)
+        pilot_repository = PilotRepository(state.path)
+        manifest_item = pilot_repository.get_manifest_item(manifest_item_id)
+        if manifest_item is None:
+            raise ValueError("ACQUISITION_ITEM_NOT_FOUND")
+        snapshot_hash = hashlib.sha256(snapshot.payload).hexdigest()
+        if snapshot_hash != manifest_item.raw_object_hash:
+            raise ValueError("ACQUISITION_DESCRIPTOR_MISMATCH")
         raw_ref = RawObjectStore(settings.data_dir / "raw").put(
             source_id=source_id,
             source_url=source_url,
@@ -409,8 +437,34 @@ def import_financial_xbrl(
         instance_entrypoint=instance_entrypoint,
     )
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        result = build_financial_ingestion(settings, policy_file).run(descriptor)
+        result = build_financial_ingestion(
+            settings,
+            mapping_file,
+            entity_declarations_file,
+            parsed_report_period,
+            manifest_item.universe_id,
+            policy_file,
+        ).run(
+            descriptor,
+            manifest_item_id=manifest_item_id,
+        )
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+@app.command("inspect-financial-qnames")
+def inspect_financial_qnames(
+    instance_file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    taxonomy_file: Annotated[list[Path], typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    """Enumerate exact local QName evidence without creating canonical mappings."""
+    items = QNameInventory().inspect(instance_file, taxonomy_file)
+    typer.echo(
+        json.dumps(
+            [asdict(item) for item in items],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("check-security-universe")

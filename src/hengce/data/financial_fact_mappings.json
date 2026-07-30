@@ -1,0 +1,23 @@
+{
+  "mapping_version": "unconfigured-local-review-v1",
+  "report_year_from": 2021,
+  "report_year_to": 2026,
+  "canonical_fact_set": [
+    "adjusted_net_profit",
+    "capital_expenditure",
+    "cash_and_equivalents",
+    "current_assets",
+    "current_liabilities",
+    "equity",
+    "interest_bearing_debt",
+    "interest_expense",
+    "net_profit",
+    "operating_cash_flow",
+    "operating_cost",
+    "revenue",
+    "total_assets",
+    "total_liabilities",
+    "total_shares"
+  ],
+  "mappings": []
+}

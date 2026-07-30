@@ -562,6 +562,10 @@ def test_unsafe_local_input_is_refused_before_raw_persistence(
         attachment.write_bytes(archive.getvalue())
     else:
         attachment.write_bytes(payload)
+    mapping_file = tmp_path / "mapping.json"
+    entity_declarations_file = tmp_path / "entities.json"
+    mapping_file.write_text("{}", encoding="utf-8")
+    entity_declarations_file.write_text("[]", encoding="utf-8")
 
     arguments = [
         "import-financial-xbrl",
@@ -587,6 +591,12 @@ def test_unsafe_local_input_is_refused_before_raw_persistence(
         content_type,
         "--taxonomy-id",
         FIXTURE_TAXONOMY_ID,
+        "--manifest-item-id",
+        "fixture-manifest-item",
+        "--mapping-file",
+        str(mapping_file),
+        "--entity-declarations-file",
+        str(entity_declarations_file),
         "--data-dir",
         str(tmp_path / "data"),
     ]
@@ -690,6 +700,8 @@ def test_repository_contains_only_marked_fictional_xbrl_fixtures() -> None:
     assert fixture_files == [
         "tests/fixtures/xbrl/minimal/instance.xml",
         "tests/fixtures/xbrl/minimal/test-gaap.xsd",
+        "tests/fixtures/xbrl/pilot/instance.xml",
+        "tests/fixtures/xbrl/pilot/pilot-gaap.xsd",
     ]
 
     instance_text = (FIXTURE_ROOT / "instance.xml").read_text(encoding="utf-8")
