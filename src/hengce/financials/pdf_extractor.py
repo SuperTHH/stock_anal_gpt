@@ -20,6 +20,11 @@ _LABELED_CODE = re.compile(
     r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*([0-9]{6})"
 )
 _REPORT_PERIOD = re.compile(r"报告期\s*[：:]\s*(\d{4}-\d{2}-\d{2})")
+_WHITESPACE_FACT = re.compile(
+    r"^(?P<label>.+?)\s+"
+    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
+    r"(?:\s+.*)?$"
+)
 _UNIT = re.compile(
     r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|万元|亿元|股)"
 )
@@ -39,6 +44,7 @@ _REPORT_TYPE_MARKERS = {
     ReportType.Q3: ("第三季度报告", "三季度报告"),
 }
 _STATEMENT_TITLES = {
+    "主要财务数据": StatementType.INCOME_STATEMENT,
     "合并资产负债表": StatementType.BALANCE_SHEET,
     "合并利润表": StatementType.INCOME_STATEMENT,
     "合并现金流量表": StatementType.CASH_FLOW,
@@ -53,16 +59,21 @@ _ALIASES = {
     "有息负债": "interest_bearing_debt",
     "所有者权益合计": "equity",
     "股东权益合计": "equity",
+    "所有者权益（或股东权益）合计": "equity",
     "营业收入": "revenue",
     "营业成本": "operating_cost",
     "净利润": "net_profit",
     "扣除非经常性损益后的净利润": "adjusted_net_profit",
+    "归属于上市公司股东的扣除非经常性损益的净利润": (
+        "adjusted_net_profit"
+    ),
     "利息费用": "interest_expense",
     "经营活动产生的现金流量净额": "operating_cash_flow",
     "购建固定资产、无形资产和其他长期资产支付的现金": (
         "capital_expenditure"
     ),
     "期末总股本": "total_shares",
+    "实收资本（或股本）": "total_shares",
     "投资活动产生的现金流量净额": "investing_cash_flow",
     "筹资活动产生的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
@@ -169,45 +180,82 @@ class CninfoPdfExtractor:
         report_markers = _REPORT_TYPE_MARKERS[descriptor.report_type]
         if (
             codes != {descriptor.ts_code}
-            or periods != {descriptor.report_period.isoformat()}
+            or not _period_matches(joined, periods, descriptor)
             or not any(marker in joined for marker in report_markers)
         ):
             issues.add("PDF_LAYOUT_UNSUPPORTED")
 
         candidates: list[PdfFactCandidate] = []
         recognized_fact_line_without_unit = False
+        statement_type: StatementType | None = None
+        statement_title: str | None = None
+        unit: tuple[str, Decimal] | None = None
+        pending_label = ""
         for page_number, text in pages:
             if not text:
                 continue
-            statement_type = next(
-                (
-                    kind
-                    for title, kind in _STATEMENT_TITLES.items()
-                    if title in text
-                ),
-                None,
-            )
-            unit_match = _UNIT.search(text)
-            unit = (
-                _UNIT_DEFINITIONS[unit_match.group(1)]
-                if unit_match is not None
-                else None
-            )
             for raw_line in text.splitlines():
-                parsed_line = _parse_fact_line(raw_line)
-                if parsed_line is None:
+                line = raw_line.strip()
+                title = next(
+                    (
+                        (candidate, kind)
+                        for candidate, kind in _STATEMENT_TITLES.items()
+                        if candidate in line
+                    ),
+                    None,
+                )
+                if title is not None:
+                    statement_title = title[0]
+                    statement_type = title[1]
+                    unit = None
+                    pending_label = ""
                     continue
+                if statement_title == "主要财务数据" and re.match(
+                    r"^[（(][二三四五六七八九十]+[）)]",
+                    line,
+                ):
+                    statement_title = None
+                    statement_type = None
+                    unit = None
+                    pending_label = ""
+                    continue
+                unit_match = _UNIT.search(line)
+                if unit_match is not None:
+                    unit = _UNIT_DEFINITIONS[unit_match.group(1)]
+                    pending_label = ""
+                    continue
+
+                parsed_line = _parse_fact_line(line)
+                if parsed_line is None and pending_label:
+                    parsed_line = _parse_fact_line(f"{pending_label} {line}")
+                if parsed_line is None:
+                    combined = _normalize_label(f"{pending_label}{line}")
+                    pending_label = (
+                        combined
+                        if _could_be_alias_prefix(combined)
+                        else (
+                            _normalize_label(line)
+                            if _could_be_alias_prefix(line)
+                            else ""
+                        )
+                    )
+                    continue
+                pending_label = ""
                 canonical_name, number = parsed_line
-                if statement_type is None or unit is None:
+                if (
+                    statement_title == "主要财务数据"
+                    and canonical_name != "adjusted_net_profit"
+                ):
+                    continue
+                if statement_type is None:
+                    continue
+                if unit is None:
                     recognized_fact_line_without_unit = True
                     continue
                 currency, multiplier = unit
-                if (
-                    canonical_name == "total_shares"
-                    and currency != "SHARES"
-                    or canonical_name != "total_shares"
-                    and currency != "CNY"
-                ):
+                if canonical_name == "total_shares":
+                    currency, multiplier = "SHARES", Decimal(1)
+                elif currency != "CNY":
                     recognized_fact_line_without_unit = True
                     continue
                 candidates.append(
@@ -367,9 +415,15 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     label, separator, raw_value = line.partition("|")
     if not separator:
         label, separator, raw_value = line.partition("｜")
-    label = label.strip()
+    if not separator:
+        match = _WHITESPACE_FACT.fullmatch(line.strip())
+        if match is None:
+            return None
+        label = match.group("label")
+        raw_value = match.group("value")
+    label = _normalize_label(label)
     raw_value = raw_value.strip()
-    canonical_name = _ALIASES.get(label)
+    canonical_name = _canonical_name(label)
     if canonical_name is None or not _NUMBER.fullmatch(raw_value):
         return None
     normalized = raw_value.replace(",", "")
@@ -379,6 +433,53 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
         return canonical_name, Decimal(normalized)
     except InvalidOperation:
         return None
+
+
+def _normalize_label(label: str) -> str:
+    normalized = re.sub(r"\s+", "", label.strip())
+    normalized = re.sub(
+        r"^(?:[一二三四五六七八九十]+、|[（(][一二三四五六七八九十]+[）)])",
+        "",
+        normalized,
+    )
+    if normalized.startswith("其中："):
+        normalized = normalized.removeprefix("其中：")
+    return normalized
+
+
+def _canonical_name(label: str) -> str | None:
+    direct = _ALIASES.get(label)
+    if direct is not None:
+        return direct
+    for alias in sorted(_ALIASES, key=len, reverse=True):
+        if label.startswith(f"{alias}（") or label.startswith(f'{alias}('):
+            return _ALIASES[alias]
+    return None
+
+
+def _could_be_alias_prefix(label: str) -> bool:
+    normalized = _normalize_label(label)
+    return bool(normalized) and any(
+        alias.startswith(normalized)
+        or normalized.startswith(f"{alias}（")
+        or normalized.startswith(f"{alias}(")
+        for alias in _ALIASES
+    )
+
+
+def _period_matches(
+    text: str,
+    explicit_periods: set[str],
+    descriptor: FilingDescriptor,
+) -> bool:
+    expected = descriptor.report_period.isoformat()
+    if explicit_periods:
+        return explicit_periods == {expected}
+    period = descriptor.report_period
+    visible_date = re.compile(
+        rf"{period.year}\s*年\s*{period.month}\s*月\s*{period.day}\s*日"
+    )
+    return visible_date.search(text) is not None
 
 
 __all__ = [

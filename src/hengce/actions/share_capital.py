@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from hengce.contracts.enums import (
@@ -53,27 +53,61 @@ class ShareCapitalResolver:
         if baseline_error is not None:
             return self._blocked(baseline_fact.fact_id, baseline_error)
 
+        return self.resolve_value(
+            ts_code=baseline_fact.ts_code,
+            baseline_value=baseline_fact.fact_value,
+            baseline_date=baseline_fact.instant,
+            baseline_fact_id=baseline_fact.fact_id,
+            actions=actions,
+            as_of=as_of,
+            known_at=known_at,
+        )
+
+    def resolve_value(
+        self,
+        *,
+        ts_code: str,
+        baseline_value: Decimal,
+        baseline_date: date,
+        baseline_fact_id: str,
+        actions: Sequence[CorporateAction],
+        as_of: datetime,
+        known_at: datetime,
+    ) -> ShareCapitalResult:
+        """Resolve from an already assembled, point-in-time share fact."""
+        if not _aware(as_of) or not _aware(known_at):
+            raise ValueError("SHARE_CAPITAL_CUTOFF_INVALID")
+        if (
+            baseline_date > as_of.date()
+            or baseline_value <= 0
+            or not baseline_fact_id
+        ):
+            return self._blocked(
+                baseline_fact_id,
+                "SHARE_CAPITAL_BASELINE_INVALID",
+            )
+
         relevant = [
             action
             for action in actions
-            if self._is_visible_after_baseline(
+            if self._is_visible_after_date(
                 action,
-                baseline_fact,
+                baseline_date,
                 as_of,
                 known_at,
             )
         ]
-        if any(action.ts_code != baseline_fact.ts_code for action in relevant):
+        if any(action.ts_code != ts_code for action in relevant):
             return self._blocked(
-                baseline_fact.fact_id,
+                baseline_fact_id,
                 "SHARE_CAPITAL_MIXED_SECURITIES",
             )
         resolved, chain_error = self._resolve_versions(relevant)
         if chain_error is not None:
-            return self._blocked(baseline_fact.fact_id, chain_error)
+            return self._blocked(baseline_fact_id, chain_error)
         if any(action.quality_status not in _USABLE_QUALITY for action in resolved):
             return self._blocked(
-                baseline_fact.fact_id,
+                baseline_fact_id,
                 "SHARE_CAPITAL_ACTION_QUALITY_BLOCKED",
             )
 
@@ -81,13 +115,13 @@ class ShareCapitalResolver:
         for action in resolved:
             if action.effective_at is None:
                 return self._blocked(
-                    baseline_fact.fact_id,
+                    baseline_fact_id,
                     "SHARE_CAPITAL_ACTION_TIME_INVALID",
                 )
             key = (action.action_type, action.effective_at)
             if key in effect_keys:
                 return self._blocked(
-                    baseline_fact.fact_id,
+                    baseline_fact_id,
                     "SHARE_CAPITAL_DUPLICATE_EFFECT",
                 )
             effect_keys.add(key)
@@ -100,7 +134,7 @@ class ShareCapitalResolver:
                 action.record_id,
             ),
         )
-        total_shares = baseline_fact.fact_value
+        total_shares = baseline_value
         applied_ids: list[str] = []
         for action in ordered:
             applied_ids.append(action.record_id)
@@ -120,12 +154,12 @@ class ShareCapitalResolver:
                 total_shares -= action.share_reduction or Decimal(0)
             if total_shares <= 0:
                 return self._blocked(
-                    baseline_fact.fact_id,
+                    baseline_fact_id,
                     "SHARE_CAPITAL_NON_POSITIVE",
                 )
         return ShareCapitalResult(
             total_shares=total_shares,
-            baseline_fact_id=baseline_fact.fact_id,
+            baseline_fact_id=baseline_fact_id,
             action_record_ids=tuple(applied_ids),
             algorithm_version=self.algorithm_version,
             blocked_reasons=(),
@@ -155,9 +189,9 @@ class ShareCapitalResolver:
         return None
 
     @staticmethod
-    def _is_visible_after_baseline(
+    def _is_visible_after_date(
         action: CorporateAction,
-        baseline: FinancialFact,
+        baseline_date: date,
         as_of: datetime,
         known_at: datetime,
     ) -> bool:
@@ -166,7 +200,7 @@ class ShareCapitalResolver:
             and action.published_at <= as_of
             and action.effective_at is not None
             and action.effective_at <= as_of
-            and action.effective_at.date() > baseline.instant
+            and action.effective_at.date() > baseline_date
             and action.collected_at <= known_at
             and action.valid_from <= known_at
         )

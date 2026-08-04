@@ -142,23 +142,23 @@ manual_todo_count: int
 
 **TDD steps**
 
-- [ ] 写 `test_pilot_models.py`：验证恰好四个板块、成员代码唯一、配额合计等于成员数、
+- [x] 写 `test_pilot_models.py`：验证恰好四个板块、成员代码唯一、配额合计等于成员数、
       `manifest_hash` 为 64 位小写 SHA-256、所有时间带时区。
-- [ ] 写采集项失败测试：定期报告必须带 `report_type/report_period`，非定期报告不得
+- [x] 写采集项失败测试：定期报告必须带 `report_type/report_period`，非定期报告不得
       冒充财报；`DOWNLOADED` 之后必须有 URL、采集时间、内容哈希和 Raw Store 哈希。
-- [ ] 写状态和质量组合测试：`INGESTED` 只能搭配 `VALID/DERIVED`；
+- [x] 写状态和质量组合测试：`INGESTED` 只能搭配 `VALID/DERIVED`；
       `AWAITING_MANUAL` 必须带机器可读 `error_code`；尝试次数不得为负。
-- [ ] 写池就绪度测试：`coverage_ratio == complete_factor_count / universe_size`；
+- [x] 写池就绪度测试：`coverage_ratio == complete_factor_count / universe_size`；
       30 只样本只有 `complete_factor_count >= 24` 时可以是 `READY`。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/contracts/test_pilot_models.py tests/unit/contracts/test_strategy_models.py -q`
       并确认因模型/枚举缺失而失败。
-- [ ] 实现上述最小枚举和 Pydantic 契约；所有跨字段约束使用
+- [x] 实现上述最小枚举和 Pydantic 契约；所有跨字段约束使用
       `model_validator(mode="after")`，不在服务层重复。
-- [ ] 再运行同一测试并确认通过，然后运行
+- [x] 再运行同一测试并确认通过，然后运行
       `python -m ruff check src/hengce/contracts tests/unit/contracts` 与
       `git diff --check`。
-- [ ] 提交：`git commit -am "feat: define real-data pilot contracts"`；新增文件先
+- [x] 提交：`git commit -am "feat: define real-data pilot contracts"`；新增文件先
       `git add`。
 
 ---
@@ -225,24 +225,24 @@ AWAITING_MANUAL -> DISCOVERED | DOWNLOADED | REJECTED
 
 **TDD steps**
 
-- [ ] 写迁移测试：从只含 001–007 的临时库升级后，原表数量与内容不变，新表、索引和
+- [x] 写迁移测试：从只含 001–007 的临时库升级后，原表数量与内容不变，新表、索引和
       外键存在；重复 `migrate()` 不增加迁移或业务记录。
-- [ ] 写仓库失败测试：冻结样本的同一日期不能被不同哈希覆盖；相同哈希重复发布返回
+- [x] 写仓库失败测试：冻结样本的同一日期不能被不同哈希覆盖；相同哈希重复发布返回
       原记录。
-- [ ] 写清单测试：同一身份不可重复，批量插入使用单事务；非法跳转、并发
+- [x] 写清单测试：同一身份不可重复，批量插入使用单事务；非法跳转、并发
       `expected_from` 不一致和终态变更必须失败。
-- [ ] 写检查点测试：相同 `input_hash` 可续跑，不同 `input_hash` 必须返回
+- [x] 写检查点测试：相同 `input_hash` 可续跑，不同 `input_hash` 必须返回
       `PIPELINE_CHECKPOINT_INPUT_CHANGED`。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/state/test_pilot_repository.py tests/unit/state/test_repository.py -q`
       并确认 RED。
-- [ ] 实现 SQL 和 `PilotRepository`；写操作使用 `BEGIN IMMEDIATE`，时间以 ISO-8601
+- [x] 实现 SQL 和 `PilotRepository`；写操作使用 `BEGIN IMMEDIATE`，时间以 ISO-8601
       保存，payload 以 Pydantic JSON 往返。
-- [ ] 实现 `StateRepository.backup_to(target: Path)`，使用 SQLite backup API，不复制
+- [x] 实现 `StateRepository.backup_to(target: Path)`，使用 SQLite backup API，不复制
       活跃 WAL 文件；目标已存在时拒绝覆盖。
-- [ ] 运行目标测试、`python -m ruff check src/hengce/state tests/unit/state` 和
+- [x] 运行目标测试、`python -m ruff check src/hengce/state tests/unit/state` 和
       `git diff --check`。
-- [ ] 提交：`git commit -m "feat: persist pilot universe and acquisition state"`。
+- [x] 提交：`git commit -m "feat: persist pilot universe and acquisition state"`。
 
 ---
 
@@ -289,20 +289,20 @@ class PilotUniverseSelector:
 
 **TDD steps**
 
-- [ ] 创建全部为虚构证券名和虚构代码组合的 40 行夹具；写测试验证配额、顺序、
+- [x] 创建全部为虚构证券名和虚构代码组合的 40 行夹具；写测试验证配额、顺序、
       平局按代码、成员总数和哈希稳定。
-- [ ] 写每个硬过滤测试：范围外、上市不足一年、ST、退市、停牌/缺行、零成交额、
+- [x] 写每个硬过滤测试：范围外、上市不足一年、ST、退市、停牌/缺行、零成交额、
       重复行情、非有限数字、错误交易所后缀。
-- [ ] 写板块只有 7/8 或 6/7 时返回 `PILOT_BOARD_QUOTA_UNMET:<board>` 的测试，并
+- [x] 写板块只有 7/8 或 6/7 时返回 `PILOT_BOARD_QUOTA_UNMET:<board>` 的测试，并
       证明不会从其他板块补位。
-- [ ] 写同一输入不同顺序和不同 `created_at` 得到相同 `universe_id` 的测试；改变一条
+- [x] 写同一输入不同顺序和不同 `created_at` 得到相同 `universe_id` 的测试；改变一条
       成交额必须改变哈希。
-- [ ] 运行 `python -m pytest tests/unit/services/test_pilot_universe.py -q` 并确认 RED。
-- [ ] 实现纯函数式选择器，不访问网络或数据库。
-- [ ] 在 M1 集成测试中接上 `MarketWarehouse.read_bars()` 与
+- [x] 运行 `python -m pytest tests/unit/services/test_pilot_universe.py -q` 并确认 RED。
+- [x] 实现纯函数式选择器，不访问网络或数据库。
+- [x] 在 M1 集成测试中接上 `MarketWarehouse.read_bars()` 与
       `StateRepository.get_security_master_universe()`，验证仓库记录可直接作为输入。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: select deterministic pilot universe"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: select deterministic pilot universe"`。
 
 ---
 
@@ -344,15 +344,15 @@ class AcquisitionPlanner:
 
 **TDD steps**
 
-- [ ] 写数量测试：总数 360、财报 150、分红 150、资本行动 30、风险核验 30。
-- [ ] 写期间测试：年报期末为 12-31，Q1 为 03-31，且不存在 2025 半年报或 Q3。
-- [ ] 写来源测试：沪市仅规划 SSE，深市/创业板仅规划 SZSE，规划器从不规划商业媒体。
-- [ ] 写稳定身份测试：成员输入顺序不改变项目 ID；项目按
+- [x] 写数量测试：总数 360、财报 150、分红 150、资本行动 30、风险核验 30。
+- [x] 写期间测试：年报期末为 12-31，Q1 为 03-31，且不存在 2025 半年报或 Q3。
+- [x] 写来源测试：沪市仅规划 SSE，深市/创业板仅规划 SZSE，规划器从不规划商业媒体。
+- [x] 写稳定身份测试：成员输入顺序不改变项目 ID；项目按
       `ts_code, document_kind, report_period` 排序。
-- [ ] 运行 `python -m pytest tests/unit/acquisition/test_planner.py -q` 并确认 RED。
-- [ ] 实现规划器并复用 Task 1 契约；不添加任何联网逻辑。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: plan official pilot acquisitions"`。
+- [x] 运行 `python -m pytest tests/unit/acquisition/test_planner.py -q` 并确认 RED。
+- [x] 实现规划器并复用 Task 1 契约；不添加任何联网逻辑。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: plan official pilot acquisitions"`。
 
 ---
 
@@ -423,23 +423,23 @@ URL、未知项目或内容重复但身份冲突必须 `REJECTED`。
 
 **TDD steps**
 
-- [ ] 先写公开 HTML 夹具解析测试；证明解析器只接受可见链接，忽略脚本内 URL、
+- [x] 先写公开 HTML 夹具解析测试；证明解析器只接受可见链接，忽略脚本内 URL、
       `javascript:`、跨白名单域名和没有明确期间/类型的附件。
-- [ ] 写 fake `httpx` 测试覆盖成功下载、重定向后域名再校验、超时一次重试、
+- [x] 写 fake `httpx` 测试覆盖成功下载、重定向后域名再校验、超时一次重试、
       401/403/429、验证码 HTML、错误 MIME、超限、损坏 PDF/ZIP。
-- [ ] 写来源熔断测试：同一运行中首个限制响应后，同源剩余项目不再发请求，均进入
+- [x] 写来源熔断测试：同一运行中首个限制响应后，同源剩余项目不再发请求，均进入
       `AWAITING_MANUAL:SOURCE_ACCESS_RESTRICTED`。
-- [ ] 写人工收件箱测试：合法 PDF/XBRL 与自动路径走相同 Raw Store；文件名本身不被
+- [x] 写人工收件箱测试：合法 PDF/XBRL 与自动路径走相同 Raw Store；文件名本身不被
       当作身份；真实附件内容不得进入夹具。
-- [ ] 写政策测试：`static.cninfo.com.cn` 仅在确认为巨潮公开附件主机且用途为
+- [x] 写政策测试：`static.cninfo.com.cn` 仅在确认为巨潮公开附件主机且用途为
       `financial_pdf` 时允许；其他子域仍拒绝。更新条款复核日期为实施当天。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/acquisition tests/unit/policy/test_guard.py -q`
       并确认 RED。
-- [ ] 实现最小解析器、下载器、来源熔断和人工收件箱；生产解析器只支持已验证公开
+- [x] 实现最小解析器、下载器、来源熔断和人工收件箱；生产解析器只支持已验证公开
       页面结构，结构漂移必须失败关闭。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: add policy-guarded document acquisition"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: add policy-guarded document acquisition"`。
 
 ---
 
@@ -517,20 +517,20 @@ CLI 的 `build_financial_ingestion()` 不再使用 `empty-v1`，改为显式接�
 
 **TDD steps**
 
-- [ ] 写映射文件模式测试：重复 QName、未知单位、版本空值、报告年度不适用必须失败。
-- [ ] 写最小 XBRL 夹具，覆盖 15 个规范事实、合并口径、货币/股数单位和实体身份。
-- [ ] 写未知 QName、错误实体、单位冲突、重复规范事实和更正 `supersedes_id` 测试。
-- [ ] 写 QName inventory 测试，证明它只做枚举和证据输出，不会按标签相似度产生
+- [x] 写映射文件模式测试：重复 QName、未知单位、版本空值、报告年度不适用必须失败。
+- [x] 写最小 XBRL 夹具，覆盖 15 个规范事实、合并口径、货币/股数单位和实体身份。
+- [x] 写未知 QName、错误实体、单位冲突、重复规范事实和更正 `supersedes_id` 测试。
+- [x] 写 QName inventory 测试，证明它只做枚举和证据输出，不会按标签相似度产生
       `canonical_fact_name`。
-- [ ] 写集成测试：`VERIFIED` 清单项导入为不可变 filing/Parquet 后才转 `INGESTED`；
+- [x] 写集成测试：`VERIFIED` 清单项导入为不可变 filing/Parquet 后才转 `INGESTED`；
       相同内容重跑幂等；不同内容同版本冲突。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/financials/test_registry_loader.py tests/unit/financials/test_mapping.py tests/integration/test_pilot_xbrl_ingestion.py -q`
       并确认 RED。
-- [ ] 实现 JSON 加载器、实体声明加载和清单联动；复用 Arelle、
+- [x] 实现 JSON 加载器、实体声明加载和清单联动；复用 Arelle、
       `SafePackageMaterializer`、`FinancialQualityValidator` 与现有仓库。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: ingest mapped pilot XBRL facts"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: ingest mapped pilot XBRL facts"`。
 
 ---
 
@@ -585,18 +585,18 @@ PDF 初始质量为 `UNVERIFIED`，以下全部通过才升级为 `VALID`：
 
 **TDD steps**
 
-- [ ] 用脱敏的页面文本 JSON 写身份、期间、单位、负号、千分位和页码提取测试。
-- [ ] 写扫描版、无单位、多代码、多期间、资产负债不平、现金流不平、重复冲突事实
+- [x] 用脱敏的页面文本 JSON 写身份、期间、单位、负号、千分位和页码提取测试。
+- [x] 写扫描版、无单位、多代码、多期间、资产负债不平、现金流不平、重复冲突事实
       测试；这些情况不得返回 `VALID`。
-- [ ] 写 resolver spy 测试，证明有效 XBRL 时 PDF provider 调用次数为 0。
-- [ ] 写更正 PDF 测试：新版本指向旧 filing，旧事实保留；更正公开前查询旧值，公开
+- [x] 写 resolver spy 测试，证明有效 XBRL 时 PDF provider 调用次数为 0。
+- [x] 写更正 PDF 测试：新版本指向旧 filing，旧事实保留；更正公开前查询旧值，公开
       后且新版本有效时查询新值。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/financials/test_pdf_extractor.py tests/unit/financials/test_fallback.py tests/integration/test_m2_financial_resolution.py -q`
       并确认 RED。
-- [ ] 实现失败关闭提取、质量校验和 PDF filing 规范化；不得加入 OCR 或模糊 AI 提取。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: add validated CNINFO PDF fallback"`。
+- [x] 实现失败关闭提取、质量校验和 PDF filing 规范化；不得加入 OCR 或模糊 AI 提取。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: add validated CNINFO PDF fallback"`。
 
 ---
 
@@ -640,17 +640,17 @@ class ShareCapitalResolver:
 
 **TDD steps**
 
-- [ ] 写仓库测试：更正不覆盖旧行动；`as_of/known_at` 前后返回正确版本；错误分支链
+- [x] 写仓库测试：更正不覆盖旧行动；`as_of/known_at` 前后返回正确版本；错误分支链
       返回冲突。
-- [ ] 写股本测试：送转、配股、回购注销、现金分红、同日多行动的确定顺序和小数精度。
-- [ ] 写未来泄漏测试：公告或生效在 2026-07-22 21:30 之后的行动均不进入股本。
-- [ ] 写总回报回归测试：原始 OHLC 不变，分红送转前后总回报连续。
-- [ ] 运行
+- [x] 写股本测试：送转、配股、回购注销、现金分红、同日多行动的确定顺序和小数精度。
+- [x] 写未来泄漏测试：公告或生效在 2026-07-22 21:30 之后的行动均不进入股本。
+- [x] 写总回报回归测试：原始 OHLC 不变，分红送转前后总回报连续。
+- [x] 运行
       `python -m pytest tests/unit/state/test_action_repository.py tests/unit/actions tests/integration/test_m2_actions_acceptance.py -q`
       并确认 RED。
 - [ ] 实现仓库和解析器，所有派生结果记录输入 fact/action ID 与算法版本。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: resolve point-in-time share capital"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: resolve point-in-time share capital"`。
 
 ---
 
@@ -728,19 +728,19 @@ Q1 直接年化为全年。更正公开但不可用时阻断该事实，不回�
 
 **TDD steps**
 
-- [ ] 写装配测试覆盖五个期间、XBRL 优先、PDF 兜底、更正链和
+- [x] 写装配测试覆盖五个期间、XBRL 优先、PDF 兜底、更正链和
       `published_at <= report_cutoff_at`、`collected_at <= known_at`。
-- [ ] 写每个公式的固定 Decimal 示例及输入记录 ID 断言；检查公式版本和质量状态。
-- [ ] 写 PE 负利润、零权益、零债务、缺资本开支、缺总股本、未来分红和分红取消测试。
-- [ ] 写集成测试：真实仓库形状的虚构 filings/actions/bars 产生完整指标集，任何
+- [x] 写每个公式的固定 Decimal 示例及输入记录 ID 断言；检查公式版本和质量状态。
+- [x] 写 PE 负利润、零权益、零债务、缺资本开支、缺总股本、未来分红和分红取消测试。
+- [x] 写集成测试：真实仓库形状的虚构 filings/actions/bars 产生完整指标集，任何
       时间线违规阻断。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/financials/test_assembler.py tests/unit/financials/test_metrics.py tests/integration/test_pilot_metrics.py -q`
       并确认 RED。
-- [ ] 实现装配器和指标扩展；复用现有 `MetricValue/DerivedFinancialMetric`，不把
+- [x] 实现装配器和指标扩展；复用现有 `MetricValue/DerivedFinancialMetric`，不把
       派生值写回原始事实表。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: calculate pilot financial metrics"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: calculate pilot financial metrics"`。
 
 ---
 
@@ -828,22 +828,22 @@ class RuleNarrativeRenderer:
 
 **TDD steps**
 
-- [ ] 写三个策略输入映射测试，逐项断言每个 factor 来自 Task 9 指标且方向正确；
+- [x] 写三个策略输入映射测试，逐项断言每个 factor 来自 Task 9 指标且方向正确；
       负 PE 不作为低估值加分，未公告股息不进入稳定股息池。
-- [ ] 写 23/30、24/30、30/30 覆盖测试；一个池阻断不改变其他池结果；阻断池候选
+- [x] 写 23/30、24/30、30/30 覆盖测试；一个池阻断不改变其他池结果；阻断池候选
       必须为空。
-- [ ] 写候选 100% 谱系测试：任一关键 factor 无 source ID 时该证券不计完整且不能
+- [x] 写候选 100% 谱系测试：任一关键 factor 无 source ID 时该证券不计完整且不能
       排名。
-- [ ] 写平局、缩尾、`normalization_scope=pilot_universe` 和三个池不产生总分测试。
-- [ ] 写文案黄金测试，所有事实数字来自 factor，所有事件来自 source ID；输出中不得
+- [x] 写平局、缩尾、`normalization_scope=pilot_universe` 和三个池不产生总分测试。
+- [x] 写文案黄金测试，所有事实数字来自 factor，所有事件来自 source ID；输出中不得
       出现“建议买入”“保证收益”等指令。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/strategies tests/integration/test_m3_strategy_acceptance.py -q`
       并确认 RED。
-- [ ] 实现输入构建器、就绪度、版本化定义和规则模板；必要时将引擎归一化范围注入为
+- [x] 实现输入构建器、就绪度、版本化定义和规则模板；必要时将引擎归一化范围注入为
       显式配置，不保留隐含行业回退。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: rank independently ready pilot pools"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: rank independently ready pilot pools"`。
 
 ---
 
@@ -922,22 +922,22 @@ hengce rebuild-pilot-report \
 
 **TDD steps**
 
-- [ ] 写编排器 fake-stage 测试，证明阶段顺序、输入哈希、成功续跑、失败停点和清单
+- [x] 写编排器 fake-stage 测试，证明阶段顺序、输入哈希、成功续跑、失败停点和清单
       不重抽样。
-- [ ] 写 `manual-only` 零网络调用和 `approved-public` 仍经过 PolicyGuard 的测试。
-- [ ] 写报告发布测试：三池 READY、单池 BLOCKED、三池 BLOCKED、核心域失败、源谱系
+- [x] 写 `manual-only` 零网络调用和 `approved-public` 仍经过 PolicyGuard 的测试。
+- [x] 写报告发布测试：三池 READY、单池 BLOCKED、三池 BLOCKED、核心域失败、源谱系
       缺失、候选时间线违规、工件写入失败。
-- [ ] 写历史字段测试：`report_cutoff_at` 固定 2026-07-22 21:30，
+- [x] 写历史字段测试：`report_cutoff_at` 固定 2026-07-22 21:30，
       `known_at/generation_started_at` 为实际运行时间，晚采集但早发布的事实可以使用，
       晚发布事实禁止使用。
-- [ ] 写 CLI 测试：参数严格解析、未来 known_at 拒绝、聚合摘要不泄密、退出码
+- [x] 写 CLI 测试：参数严格解析、未来 known_at 拒绝、聚合摘要不泄密、退出码
       `0=已发布/部分发布`、`2=等待人工`、`1=失败`。
-- [ ] 运行
+- [x] 运行
       `python -m pytest tests/unit/services/test_pilot_reconstruction.py tests/unit/reports/test_publisher.py tests/integration/test_pilot_reconstruction.py tests/integration/test_pilot_report_acceptance.py tests/unit/test_cli.py -q`
       并确认 RED。
-- [ ] 实现编排器、报告发布调整和 CLI 组装；不要在 CLI 函数中堆业务逻辑。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "feat: rebuild and publish historical pilot report"`。
+- [x] 实现编排器、报告发布调整和 CLI 组装；不要在 CLI 函数中堆业务逻辑。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "feat: rebuild and publish historical pilot report"`。
 
 ---
 
@@ -975,21 +975,21 @@ hengce rebuild-pilot-report \
 
 **TDD steps**
 
-- [ ] 先扩展 API 集成测试，覆盖 READY/BLOCKED 池、历史时间字段、质量摘要和工件哈希
+- [x] 先扩展 API 集成测试，覆盖 READY/BLOCKED 池、历史时间字段、质量摘要和工件哈希
       失败；运行 `python -m pytest tests/integration/test_m4_api.py -q` 确认 RED。
-- [ ] 修改 API 到 GREEN，并运行 Ruff。
-- [ ] 扩展 TypeScript 类型，禁止 `any`；写 UI 测试覆盖真实横幅、双时间、试点边界、
+- [x] 修改 API 到 GREEN，并运行 Ruff。
+- [x] 扩展 TypeScript 类型，禁止 `any`；写 UI 测试覆盖真实横幅、双时间、试点边界、
       单池阻断、全池阻断、stale 和真实模式无 demo 回退。
-- [ ] 运行 `npm test -- --run`（工作目录 `apps/web`）并确认 RED。
-- [ ] 实现最小组件和样式；把 demo 数据改为仅在 `demoMode` 分支动态导入，生产 bundle
+- [x] 运行 `npm test -- --run`（工作目录 `apps/web`）并确认 RED。
+- [x] 实现最小组件和样式；把 demo 数据改为仅在 `demoMode` 分支动态导入，生产 bundle
       初始化路径不得执行 demo 模块。
-- [ ] 运行 `npm test -- --run` 与 `npm run build`（工作目录 `apps/web`）并确认通过。
-- [ ] 运行 `python -m pytest tests/integration/test_m4_api.py -q`、
+- [x] 运行 `npm test -- --run` 与 `npm run build`（工作目录 `apps/web`）并确认通过。
+- [x] 运行 `python -m pytest tests/integration/test_m4_api.py -q`、
       `python -m ruff check src/hengce/api tests/integration/test_m4_api.py` 和
       `git diff --check`。
-- [ ] 使用本地 API 启动页面，在 1440×900 与 1280×720 复核五页：无白屏、无横向
+- [x] 使用本地 API 启动页面，在 1440×900 与 1280×720 复核五页：无白屏、无横向
       溢出、中文无乱码、阻断信息可读、来源链接可点击。
-- [ ] 提交：`git commit -m "feat: show real pilot readiness in local UI"`。
+- [x] 提交：`git commit -m "feat: show real pilot readiness in local UI"`。
 
 ---
 
@@ -1043,17 +1043,17 @@ class PilotAcceptanceValidator:
 
 **TDD steps**
 
-- [ ] 写全通过、配额错误、清单缺项、哈希错、latest 错、候选谱系断裂和敏感文件未被
+- [x] 写全通过、配额错误、清单缺项、哈希错、latest 错、候选谱系断裂和敏感文件未被
       忽略的测试。
-- [ ] 运行 `python -m pytest tests/unit/services/test_pilot_acceptance.py -q`
+- [x] 运行 `python -m pytest tests/unit/services/test_pilot_acceptance.py -q`
       并确认 RED。
-- [ ] 实现只读验收器和 CLI 子命令 `validate-pilot-report`；不修改任何业务状态。
-- [ ] 更新 `.gitignore`，明确包含
+- [x] 实现只读验收器和 CLI 子命令 `validate-pilot-report`；不修改任何业务状态。
+- [x] 更新 `.gitignore`，明确包含
       `data/manual_inbox/`、`data/reports/`、`data/backups/` 和运行摘要。
-- [ ] 编写手册并逐条执行命令拼写检查；所有示例使用占位路径，不含 token 或真实
+- [x] 编写手册并逐条执行命令拼写检查；所有示例使用占位路径，不含 token 或真实
       候选内容。
-- [ ] 运行目标测试、Ruff 和 `git diff --check`。
-- [ ] 提交：`git commit -m "docs: add real-data pilot acceptance runbook"`。
+- [x] 运行目标测试、Ruff 和 `git diff --check`。
+- [x] 提交：`git commit -m "docs: add real-data pilot acceptance runbook"`。
 
 ---
 
@@ -1073,40 +1073,40 @@ class PilotAcceptanceValidator:
   git diff --check
   ```
 
-- [ ] 从 `apps/web` 运行：
+- [x] 从 `apps/web` 运行：
 
   ```powershell
   npm test -- --run
   npm run build
   ```
 
-- [ ] 确认 CI 测试中没有真实网络访问：搜索 `sse.com.cn`、`szse.cn`、
+- [x] 确认 CI 测试中没有真实网络访问：搜索 `sse.com.cn`、`szse.cn`、
       `cninfo.com.cn` 的调用只能出现在政策/解析夹具断言中，不能由测试 client 发出。
-- [ ] 扫描占位和泄密风险：
+- [x] 扫描占位和泄密风险：
 
   ```powershell
   rg -n "T[O]DO|T[B]D|F[I]XME|HENGCE_TUSHARE_TOKEN=|token['\"]?\s*[:=]" src tests apps docs
   git status --short --ignored
   ```
 
-- [ ] 确认 Git 跟踪文件不含 `.env`、SQLite、Parquet、PDF、ZIP、XBRL 真实附件、
+- [x] 确认 Git 跟踪文件不含 `.env`、SQLite、Parquet、PDF、ZIP、XBRL 真实附件、
       `data/reports` 或真实运行摘要。
 
 **Private real-data smoke test**
 
-- [ ] 在本机私有 `data/` 上先运行 `validate-pilot-report` 的输入预检，验证现有
+- [x] 在本机私有 `data/` 上先运行 `validate-pilot-report` 的输入预检，验证现有
       2026-07-22 行情 5198 行和双交易所主数据完整，且不打印 token。
-- [ ] 运行 `rebuild-pilot-report --acquisition-mode manual-only`，核对样本为
+- [x] 运行 `rebuild-pilot-report --acquisition-mode manual-only`，核对样本为
       30 只、配额 8/8/7/7、清单 360 项、财报项 150；记录聚合摘要但不提交。
-- [ ] 如本轮已获得公开访问授权，运行一次 `approved-public`；遇到任何 401/403/429、
+- [x] 如本轮已获得公开访问授权，运行一次 `approved-public`；遇到任何 401/403/429、
       验证码或登录墙时确认自动停止并生成 `AWAITING_MANUAL`，不尝试绕过。
 - [ ] 将允许的人工附件及侧车放入私有收件箱后续跑；核对已验证文件不重复下载，样本
       和清单哈希不变化。
-- [ ] 当某池达到 24/30 时验证该池排名和来源；未达到的池只显示覆盖阻断。即使所有池
+- [x] 当某池达到 24/30 时验证该池排名和来源；未达到的池只显示覆盖阻断。即使所有池
       阻断，也必须得到质量报告而不是虚构候选。
 - [ ] 启动本地 API/UI，逐页复核 report ID、截止时间、生成时间、样本边界、池状态、
       个股来源与质量页一致。
-- [ ] 运行 `PilotAcceptanceValidator`，保存私有聚合结果在被忽略的 `data/` 下。
+- [x] 运行 `PilotAcceptanceValidator`，保存私有聚合结果在被忽略的 `data/` 下。
 
 **Review and completion**
 

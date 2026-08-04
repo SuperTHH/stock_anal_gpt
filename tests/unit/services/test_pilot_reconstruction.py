@@ -131,3 +131,28 @@ def test_manual_only_never_invokes_public_acquisition_handler(
     assert summary.stage_statuses["05_acquire_public_documents"] == (
         "SKIPPED_MANUAL_ONLY"
     )
+
+
+def test_new_manual_inbox_content_invalidates_scan_and_downstream_checkpoints(
+    tmp_path: Path,
+) -> None:
+    runner, calls, _network = built_runner(tmp_path)
+    arguments = {
+        "market_date": MARKET_DATE,
+        "report_cutoff_at": CUTOFF,
+        "known_at": NOW,
+        "acquisition_mode": "manual-only",
+    }
+    first = runner.run(**arguments)
+    inbox = runner.data_dir / "manual_inbox"
+    inbox.mkdir()
+    (inbox / "new-report.pdf").write_bytes(b"%PDF-new")
+
+    second = runner.run(**arguments)
+
+    assert first.failed_stage is None
+    assert second.failed_stage is None
+    assert second.stage_statuses["05_acquire_public_documents"] == "REUSED"
+    assert second.stage_statuses["06_scan_manual_inbox"] == "SUCCEEDED"
+    assert calls.count("06_scan_manual_inbox") == 2
+    assert calls.count("12_write_run_summary") == 2

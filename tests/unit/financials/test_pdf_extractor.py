@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,6 +101,104 @@ def test_labeled_six_digit_a_share_code_matches_descriptor_suffix(
     )
 
     assert result.quality_status is QualityStatus.VALID
+
+
+def test_extracts_visible_cninfo_whitespace_tables_across_pages(
+    tmp_path: Path,
+) -> None:
+    """Regression for the text layout emitted by real CNINFO quarterly PDFs."""
+    path, content_hash = write_pdf(tmp_path)
+    filing = descriptor(content_hash).model_copy(
+        update={
+            "ts_code": "603986.SH",
+            "report_period": date(2026, 3, 31),
+            "report_type": ReportType.Q1,
+        }
+    )
+    page_payload = [
+        {
+            "page_number": 1,
+            "text": (
+                "证券代码：603986 证券简称：示例\n"
+                "示例股份有限公司 2026 年第一季度报告\n"
+                "一、主要财务数据\n"
+                "单位：元 币种：人民币\n"
+                "归属于上市公司股东的扣除\n"
+                "非经常性损益的净利润 170 160\n"
+            ),
+        },
+        {
+            "page_number": 5,
+            "text": (
+                "合并资产负债表\n"
+                "2026 年 3 月 31 日\n"
+                "单位：元 币种:人民币\n"
+                "货币资金 300 280\n"
+                "流动资产合计 1,200 1,100\n"
+                "资产总计 2,000 1,900\n"
+                "流动负债合计 500 480\n"
+            ),
+        },
+        {
+            "page_number": 6,
+            "text": (
+                "负债合计 800 760\n"
+                "有息负债 250 240\n"
+                "实收资本（或股本） 100,000,000 100,000,000\n"
+                "所有者权益（或股东权益）\n"
+                "合计 1,200 1,140\n"
+            ),
+        },
+        {
+            "page_number": 8,
+            "text": (
+                "合并利润表\n"
+                "2026 年 1—3 月\n"
+                "单位：元 币种:人民币\n"
+                "营业收入 1,000 900\n"
+                "营业成本 600 550\n"
+                "其中：利息费用 20 18\n"
+                "五、净利润（净亏损以“-”号\n"
+                "填列） 180 170\n"
+            ),
+        },
+        {
+            "page_number": 10,
+            "text": (
+                "合并现金流量表\n"
+                "2026 年 1—3 月\n"
+                "单位：元 币种：人民币\n"
+                "经营活动产生的现金流量\n"
+                "净额 220 210\n"
+                "购建固定资产、无形资产和其\n"
+                "他长期资产支付的现金 50 45\n"
+            ),
+        },
+        {
+            "page_number": 12,
+            "text": (
+                "投资活动产生的现金流量\n"
+                "净额 -50 -40\n"
+                "筹资活动产生的现金流量\n"
+                "净额 -20 -15\n"
+                "四、汇率变动对现金及现金等价\n"
+                "物的影响 0 0\n"
+                "五、现金及现金等价物净增加额 150 155\n"
+            ),
+        },
+    ]
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=filing,
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("2000")
+    assert result.facts["adjusted_net_profit"] == Decimal("170")
+    assert result.facts["total_shares"] == Decimal("100000000")
+    assert result.facts["operating_cash_flow"] == Decimal("220")
 
 
 @pytest.mark.parametrize(

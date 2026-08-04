@@ -165,6 +165,31 @@ def test_resolves_stock_split_rights_buyback_and_ignores_cash_dividend() -> None
     assert result.algorithm_version == "share-capital-v1"
 
 
+def test_resolves_from_assembled_point_in_time_share_value() -> None:
+    effective_at = CUTOFF - timedelta(days=2)
+    result = ShareCapitalResolver("share-capital-v1").resolve_value(
+        ts_code="699999.SH",
+        baseline_value=Decimal("1000.25"),
+        baseline_date=date(2025, 12, 31),
+        baseline_fact_id="assembled-share-fact",
+        actions=[
+            action(
+                ActionType.SPLIT,
+                "split",
+                effective_at=effective_at,
+                split_ratio=Decimal("2"),
+            )
+        ],
+        as_of=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert result.total_shares == Decimal("2000.50")
+    assert result.baseline_fact_id == "assembled-share-fact"
+    assert result.action_record_ids == ("split",)
+    assert result.blocked_reasons == ()
+
+
 def test_future_publication_or_effective_time_never_enters_share_capital() -> None:
     visible = action(
         ActionType.STOCK_DIVIDEND,

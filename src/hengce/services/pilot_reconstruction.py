@@ -103,10 +103,11 @@ class HistoricalPilotRunner:
         aggregate: dict[str, object] = {}
 
         for stage in self.STAGES:
+            stage_input_hash = self._stage_input_hash(stage, input_hash)
             checkpoint = self._load_checkpoint(market_date, stage)
             if (
                 checkpoint is not None
-                and checkpoint.get("input_hash") == input_hash
+                and checkpoint.get("input_hash") == stage_input_hash
                 and checkpoint.get("status")
                 in {"SUCCEEDED", "SKIPPED_MANUAL_ONLY"}
             ):
@@ -145,7 +146,7 @@ class HistoricalPilotRunner:
                         report_cutoff_at=report_cutoff_at,
                         known_at=known_at,
                         acquisition_mode=acquisition_mode,
-                        input_hash=input_hash,
+                        input_hash=stage_input_hash,
                         data_dir=self.data_dir,
                     )
                     output = dict(self.stage_handlers[stage](context))
@@ -177,14 +178,14 @@ class HistoricalPilotRunner:
             output_hash = _stable_hash(
                 {
                     "stage": stage,
-                    "input_hash": input_hash,
+                    "input_hash": stage_input_hash,
                     "output": output,
                 }
             )
             self._save_checkpoint(
                 market_date,
                 stage,
-                input_hash,
+                stage_input_hash,
                 output_hash,
                 status,
                 output,
@@ -211,6 +212,35 @@ class HistoricalPilotRunner:
             universe_id=universe_id,
             backup_path=backup_path,
             aggregate_summary=aggregate,
+        )
+
+    def _stage_input_hash(self, stage: str, upstream_hash: str) -> str:
+        if stage != "06_scan_manual_inbox":
+            return upstream_hash
+        inbox = self.data_dir / "manual_inbox"
+        files = (
+            sorted(path for path in inbox.rglob("*") if path.is_file())
+            if inbox.is_dir()
+            else []
+        )
+        entries = [
+            {
+                "path": path.relative_to(inbox).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in files
+        ]
+        return _stable_hash(
+            {
+                "upstream_hash": upstream_hash,
+                "manual_inbox": entries,
+                "cninfo_policy": (
+                    policy.model_dump(mode="json")
+                    if (policy := self.state.get_policy("cninfo"))
+                    is not None
+                    else None
+                ),
+            }
         )
 
     def _backup_and_migrate(self) -> dict[str, object]:

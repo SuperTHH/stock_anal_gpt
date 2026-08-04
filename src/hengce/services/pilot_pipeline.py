@@ -17,14 +17,30 @@ from hengce.contracts.enums import (
     StrategyType,
 )
 from hengce.contracts.pilot import AcquisitionManifestItem
+from hengce.financials.assembler import PointInTimeFinancialAssembler
+from hengce.financials.metrics import (
+    PilotMetricCalculator,
+    PilotMetricResult,
+)
+from hengce.financials.pdf_extractor import CninfoPdfExtractor
+from hengce.financials.query import AsOfFinancialQuery
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
 from hengce.reports.publisher import ReportPublisher
+from hengce.services.pdf_financial_ingestion import (
+    PdfFinancialIngestionService,
+)
+from hengce.services.pilot_financial_analysis import PilotFinancialAnalyzer
 from hengce.services.pilot_reconstruction import (
     PilotStageContext,
     StageHandler,
 )
 from hengce.services.pilot_universe import PilotUniverseSelector
+from hengce.state.action_repository import CorporateActionRepository
+from hengce.state.financial_repository import FinancialFilingRepository
+from hengce.state.pdf_financial_repository import (
+    PdfFinancialDocumentRepository,
+)
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.report_repository import ReportRepository
 from hengce.state.repository import StateRepository
@@ -59,6 +75,9 @@ class PilotProductionStages:
         state: StateRepository,
         data_dir: Path,
         clock: Callable[[], datetime],
+        pdf_ingestion_service: object | None = None,
+        financial_analyzer: object | None = None,
+        hard_filter_provider: object | None = None,
     ) -> None:
         self.state = state
         self.data_dir = data_dir
@@ -66,6 +85,44 @@ class PilotProductionStages:
         self.pilot_repository = PilotRepository(state.path)
         self.market_warehouse = MarketWarehouse(data_dir / "normalized")
         self.report_repository = ReportRepository(state.path)
+        self.pdf_ingestion_service = (
+            pdf_ingestion_service
+            if pdf_ingestion_service is not None
+            else PdfFinancialIngestionService(
+                raw_store=RawObjectStore(data_dir / "raw"),
+                repository=PdfFinancialDocumentRepository(state.path),
+                pilot_repository=self.pilot_repository,
+                extractor=CninfoPdfExtractor(
+                    parser_version="cninfo-pdf-pilot-v2"
+                ),
+                clock=clock,
+            )
+        )
+        pdf_repository = PdfFinancialDocumentRepository(state.path)
+        self.financial_analyzer = (
+            financial_analyzer
+            if financial_analyzer is not None
+            else PilotFinancialAnalyzer(
+                assembler=PointInTimeFinancialAssembler(
+                    query=AsOfFinancialQuery(
+                        FinancialFilingRepository(state.path),
+                        data_dir / "warehouse",
+                    ),
+                    pdf_provider=lambda ts_code, period: (
+                        pdf_repository.list_versions(ts_code, period)
+                    ),
+                ),
+                action_repository=CorporateActionRepository(state.path),
+                metric_calculator=PilotMetricCalculator(
+                    "pilot-financial-metrics-v1"
+                ),
+                market_warehouse=self.market_warehouse,
+            )
+        )
+        self._metric_cache: dict[
+            tuple[object, ...], dict[str, PilotMetricResult]
+        ] = {}
+        self.hard_filter_provider = hard_filter_provider
 
     def handlers(self) -> dict[str, StageHandler]:
         return {
@@ -265,6 +322,17 @@ class PilotProductionStages:
         self,
         context: PilotStageContext,
     ) -> Mapping[str, object]:
+        self._metric_cache.clear()
+        manifest = self.pilot_repository.list_manifest(
+            self._universe(context).universe_id
+        )
+        for item in manifest:
+            if (
+                item.status is AcquisitionStatus.DOWNLOADED
+                and item.document_kind is DocumentKind.PERIODIC_REPORT
+                and item.source_id == "cninfo"
+            ):
+                self.pdf_ingestion_service.run(item.item_id)  # type: ignore[attr-defined]
         manifest = self.pilot_repository.list_manifest(
             self._universe(context).universe_id
         )
@@ -321,8 +389,11 @@ class PilotProductionStages:
         self,
         context: PilotStageContext,
     ) -> Mapping[str, object]:
-        del context
-        return {"derived_metric_count": 0}
+        metrics = self._metric_results(context)
+        return {
+            "derived_metric_count": self._derived_metric_count(metrics),
+            "share_capital_count": self._share_capital_count(metrics),
+        }
 
     def run_pools(
         self,
@@ -353,6 +424,7 @@ class PilotProductionStages:
             universe.universe_id
         )
         results = self._pool_results(context)
+        metrics = self._metric_results(context)
         filing_count, fact_count = self._published_filing_counts()
         statuses = self._status_distribution(manifest)
         xbrl_count = sum(
@@ -377,8 +449,8 @@ class PilotProductionStages:
             "corporate_action_count": self._table_count(
                 "corporate_action_versions"
             ),
-            "share_capital_count": 0,
-            "derived_metric_count": 0,
+            "share_capital_count": self._share_capital_count(metrics),
+            "derived_metric_count": self._derived_metric_count(metrics),
             "narrative_template_versions": dict(
                 _NARRATIVE_TEMPLATE_VERSIONS
             ),
@@ -426,7 +498,11 @@ class PilotProductionStages:
                     if quality_summary["corporate_action_count"]
                     else QualityStatus.MISSING
                 ),
-                "metrics": QualityStatus.MISSING,
+                "metrics": (
+                    QualityStatus.VALID
+                    if quality_summary["derived_metric_count"]
+                    else QualityStatus.MISSING
+                ),
             },
             strategy_evidence={
                 strategy: result.evidence
@@ -467,8 +543,12 @@ class PilotProductionStages:
             "corporate_action_count": quality_summary[
                 "corporate_action_count"
             ],
-            "share_capital_count": 0,
-            "derived_metric_count": 0,
+            "share_capital_count": quality_summary[
+                "share_capital_count"
+            ],
+            "derived_metric_count": quality_summary[
+                "derived_metric_count"
+            ],
             "pool_coverage": {
                 strategy.value: str(result.readiness.coverage_ratio)
                 for strategy, result in results.items()
@@ -535,18 +615,14 @@ class PilotProductionStages:
         context: PilotStageContext,
     ) -> dict[StrategyType, IndependentPoolResult]:
         universe = self._universe(context)
-        hard_filters = {
-            member.ts_code: HardFilterResult(
-                passed=True,
-                reasons=(),
-                filter_version="pilot-universe-hard-filters-v1",
-                source_record_ids=member.evidence_record_ids,
-            )
-            for member in universe.members
-        }
+        hard_filters = (
+            self.hard_filter_provider(context, universe)  # type: ignore[operator]
+            if self.hard_filter_provider is not None
+            else self._production_hard_filters(universe)
+        )
         inputs = PilotStrategyInputBuilder().build(
             universe,
-            metrics={},
+            metrics=self._metric_results(context),
             hard_filters=hard_filters,
             report_cutoff_at=context.report_cutoff_at,
             known_at=context.known_at,
@@ -560,6 +636,80 @@ class PilotProductionStages:
             known_at=context.known_at,
         )
 
+    def _production_hard_filters(
+        self,
+        universe: object,
+    ) -> dict[str, HardFilterResult]:
+        manifest = self.pilot_repository.list_manifest(
+            universe.universe_id  # type: ignore[attr-defined]
+        )
+        risk_items = {
+            item.ts_code: item
+            for item in manifest
+            if item.document_kind is DocumentKind.RISK_SCREEN
+        }
+        results: dict[str, HardFilterResult] = {}
+        for member in universe.members:  # type: ignore[attr-defined]
+            risk = risk_items.get(member.ts_code)
+            passed = bool(
+                risk is not None
+                and risk.status is AcquisitionStatus.INGESTED
+                and risk.quality_status
+                in {QualityStatus.VALID, QualityStatus.DERIVED}
+            )
+            results[member.ts_code] = HardFilterResult(
+                passed=passed,
+                reasons=() if passed else ("HF-RISK-SCREEN-MISSING",),
+                filter_version="pilot-official-risk-screen-v1",
+                source_record_ids=(
+                    (*member.evidence_record_ids, risk.item_id)
+                    if risk is not None
+                    else member.evidence_record_ids
+                ),
+            )
+        return results
+
+    def _metric_results(
+        self,
+        context: PilotStageContext,
+    ) -> dict[str, PilotMetricResult]:
+        universe = self._universe(context)
+        key = (
+            universe.universe_id,
+            context.market_date,
+            context.report_cutoff_at,
+            context.known_at,
+        )
+        if key not in self._metric_cache:
+            self._metric_cache[key] = self.financial_analyzer.calculate(  # type: ignore[attr-defined]
+                universe=universe,
+                market_date=context.market_date,
+                report_cutoff_at=context.report_cutoff_at,
+                known_at=context.known_at,
+            )
+        return self._metric_cache[key]
+
+    @staticmethod
+    def _derived_metric_count(
+        results: Mapping[str, PilotMetricResult],
+    ) -> int:
+        return sum(
+            metric.value is not None
+            and metric.quality_status is QualityStatus.DERIVED
+            for result in results.values()
+            for metric in result.metrics.values()
+        )
+
+    @staticmethod
+    def _share_capital_count(
+        results: Mapping[str, PilotMetricResult],
+    ) -> int:
+        return sum(
+            result.metrics.get("market_cap") is not None
+            and result.metrics["market_cap"].value is not None
+            for result in results.values()
+        )
+
     def _published_filing_counts(self) -> tuple[int, int]:
         try:
             with sqlite3.connect(self.state.path) as connection:
@@ -570,13 +720,26 @@ class PilotProductionStages:
                     WHERE artifact_status='PUBLISHED'
                     """
                 ).fetchone()
+                pdf_rows = connection.execute(
+                    "SELECT payload_json FROM pdf_financial_documents"
+                ).fetchall()
         except sqlite3.Error:
             return 0, 0
-        return (
+        xbrl = (
             (int(row[0]), int(row[1]))
             if row is not None
             else (0, 0)
         )
+        pdf_fact_count = 0
+        for raw_payload, in pdf_rows:
+            try:
+                payload = json.loads(str(raw_payload))
+            except json.JSONDecodeError:
+                continue
+            facts = payload.get("facts")
+            if isinstance(facts, dict):
+                pdf_fact_count += len(facts)
+        return xbrl[0] + len(pdf_rows), xbrl[1] + pdf_fact_count
 
     def _table_count(self, table: str) -> int:
         if table not in {"corporate_action_versions"}:
