@@ -1110,7 +1110,7 @@ class PilotAcceptanceValidator:
 
 **Review and completion**
 
-- [ ] 使用 `superpowers:requesting-code-review` 进行规格符合性和代码质量评审。
+- [x] 使用 `superpowers:requesting-code-review` 进行规格符合性和代码质量评审。
 - [ ] 对每个 Critical/Important 意见先复现或增加测试，再修复；重新运行全量验证。
 - [ ] 使用 `superpowers:verification-before-completion` 检查最终测试输出、工作树和
       私有数据隔离证据。
