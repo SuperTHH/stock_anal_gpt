@@ -25,6 +25,12 @@ _WHITESPACE_FACT = re.compile(
     r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
     r"(?:\s+.*)?$"
 )
+_NOTE_COLUMN_FACT = re.compile(
+    r"^(?P<label>.+?)\s+"
+    r"[一二三四五六七八九十]+、\d+(?:[（(]\d+[）)])?\s+"
+    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
+    r"(?:\s+.*)?$"
+)
 _UNIT = re.compile(
     r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|万元|亿元|股)"
 )
@@ -45,11 +51,25 @@ _REPORT_TYPE_MARKERS = {
 }
 _STATEMENT_TITLES = {
     "主要财务数据": StatementType.INCOME_STATEMENT,
+    "主要会计数据": StatementType.INCOME_STATEMENT,
     "合并资产负债表": StatementType.BALANCE_SHEET,
     "合并利润表": StatementType.INCOME_STATEMENT,
     "合并现金流量表": StatementType.CASH_FLOW,
     "股本信息": StatementType.BALANCE_SHEET,
 }
+_CONSOLIDATED_STATEMENT_TITLES = frozenset(
+    {"合并资产负债表", "合并利润表", "合并现金流量表"}
+)
+_EXTRACTION_BOUNDARIES = (
+    "母公司资产负债表",
+    "母公司利润表",
+    "母公司现金流量表",
+    "合并所有者权益变动表",
+    "母公司所有者权益变动表",
+    "主要财务指标",
+    "主要会计数据、财务指标发生变动的情况、原因",
+    "主要会计数据、财务指标发生变动的情况及原因",
+)
 _ALIASES = {
     "资产总计": "total_assets",
     "流动资产合计": "current_assets",
@@ -189,10 +209,21 @@ class CninfoPdfExtractor:
         if not visible_text:
             return self._result((), {"PDF_LAYOUT_UNSUPPORTED"}, pdf_content_hash)
         joined = "\n".join(visible_text)
-        codes = set(_SUFFIXED_CODE.findall(joined))
-        codes.update(
+        cover_labeled_codes = {
+            f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
+            for symbol in _LABELED_CODE.findall(visible_text[0])
+        }
+        cover_codes = cover_labeled_codes or set(
+            _SUFFIXED_CODE.findall(visible_text[0])
+        )
+        labeled_codes = {
             f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
             for symbol in _LABELED_CODE.findall(joined)
+        }
+        codes = (
+            cover_codes
+            or labeled_codes
+            or set(_SUFFIXED_CODE.findall(joined))
         )
         periods = set(_REPORT_PERIOD.findall(joined))
         report_markers = _REPORT_TYPE_MARKERS[descriptor.report_type]
@@ -207,6 +238,8 @@ class CninfoPdfExtractor:
         recognized_fact_line_without_unit = False
         statement_type: StatementType | None = None
         statement_title: str | None = None
+        pending_statement: tuple[str, StatementType] | None = None
+        pending_statement_lines = 0
         unit: tuple[str, Decimal] | None = None
         pending_label = ""
         for page_number, text in pages:
@@ -214,19 +247,50 @@ class CninfoPdfExtractor:
                 continue
             for raw_line in text.splitlines():
                 line = raw_line.strip()
+                normalized_heading = _normalized_heading(line)
+                if normalized_heading in _EXTRACTION_BOUNDARIES:
+                    statement_title = None
+                    statement_type = None
+                    pending_statement = None
+                    pending_statement_lines = 0
+                    unit = None
+                    pending_label = ""
+                    continue
                 title = next(
                     (
                         (candidate, kind)
                         for candidate, kind in _STATEMENT_TITLES.items()
-                        if candidate in line
+                        if candidate == normalized_heading
                     ),
                     None,
                 )
                 if title is not None:
-                    statement_title = title[0]
-                    statement_type = title[1]
+                    statement_title = None
+                    statement_type = None
                     unit = None
                     pending_label = ""
+                    if title[0] in _CONSOLIDATED_STATEMENT_TITLES:
+                        pending_statement = title
+                        pending_statement_lines = 4
+                    else:
+                        statement_title = title[0]
+                        statement_type = title[1]
+                        pending_statement = None
+                        pending_statement_lines = 0
+                    continue
+                if pending_statement is not None:
+                    if _statement_period_heading_matches(
+                        line,
+                        descriptor=descriptor,
+                        statement_type=pending_statement[1],
+                    ):
+                        statement_title, statement_type = pending_statement
+                        pending_statement = None
+                        pending_statement_lines = 0
+                    elif line:
+                        pending_statement_lines -= 1
+                        if pending_statement_lines <= 0:
+                            pending_statement = None
                     continue
                 if statement_title == "主要财务数据" and re.match(
                     r"^[（(][二三四五六七八九十]+[）)]",
@@ -287,7 +351,7 @@ class CninfoPdfExtractor:
                 pending_label = ""
                 canonical_name, number = parsed_line
                 if (
-                    statement_title == "主要财务数据"
+                    statement_title in {"主要财务数据", "主要会计数据"}
                     and canonical_name != "adjusted_net_profit"
                 ):
                     continue
@@ -515,7 +579,9 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     if not separator:
         label, separator, raw_value = line.partition("｜")
     if not separator:
-        match = _WHITESPACE_FACT.fullmatch(line.strip())
+        match = _NOTE_COLUMN_FACT.fullmatch(line.strip())
+        if match is None:
+            match = _WHITESPACE_FACT.fullmatch(line.strip())
         if match is None:
             return None
         label = match.group("label")
@@ -544,6 +610,34 @@ def _normalize_label(label: str) -> str:
     if normalized.startswith("其中："):
         normalized = normalized.removeprefix("其中：")
     return normalized
+
+
+def _normalized_heading(line: str) -> str:
+    normalized = re.sub(r"\s+", "", line.strip())
+    return re.sub(
+        r"^(?:[（(]?[一二三四五六七八九十0-9]+[）)、.．])",
+        "",
+        normalized,
+    )
+
+
+def _statement_period_heading_matches(
+    line: str,
+    *,
+    descriptor: FilingDescriptor,
+    statement_type: StatementType,
+) -> bool:
+    normalized = re.sub(r"\s+", "", line.strip())
+    period = descriptor.report_period
+    if statement_type is StatementType.BALANCE_SHEET:
+        return re.fullmatch(
+            rf"{period.year}年0?{period.month}月0?{period.day}日",
+            normalized,
+        ) is not None
+    return re.fullmatch(
+        rf"{period.year}年0?1(?:—|－|-|至)0?{period.month}月",
+        normalized,
+    ) is not None
 
 
 def _canonical_name(label: str) -> str | None:

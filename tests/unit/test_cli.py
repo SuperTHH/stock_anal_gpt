@@ -528,6 +528,8 @@ def test_wheel_contains_default_seed_and_installed_cli_initializes_state(tmp_pat
             "install",
             "--ignore-installed",
             "--no-deps",
+            "--no-index",
+            "--disable-pip-version-check",
             "--prefix",
             str(target),
             str(wheel),

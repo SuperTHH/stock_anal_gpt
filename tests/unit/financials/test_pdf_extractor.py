@@ -201,6 +201,281 @@ def test_extracts_visible_cninfo_whitespace_tables_across_pages(
     assert result.facts["operating_cash_flow"] == Decimal("220")
 
 
+def test_ignores_parent_company_statements_after_consolidated_statements(
+    tmp_path: Path,
+) -> None:
+    """Catches parent-only rows turning valid consolidated facts into conflicts."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.extend(
+        [
+            {
+                "page_number": 46,
+                "text": (
+                    "母公司 资产负债表\n"
+                    "单位：人民币万元\n"
+                    "资产总计 | 1,900\n"
+                    "负债合计 | 750\n"
+                    "所有者权益合计 | 1,150\n"
+                ),
+            },
+            {
+                "page_number": 47,
+                "text": (
+                    "母公司 利润表\n"
+                    "单位：人民币万元\n"
+                    "营业收入 | 900\n"
+                    "净利润 | 160\n"
+                ),
+            },
+            {
+                "page_number": 48,
+                "text": (
+                    "母公司 现金流量表\n"
+                    "单位：人民币万元\n"
+                    "经营活动产生的现金流量净额 | 200\n"
+                    "投资活动产生的现金流量净额 | (40)\n"
+                    "筹资活动产生的现金流量净额 | (10)\n"
+                    "汇率变动对现金及现金等价物的影响 | 0\n"
+                    "现金及现金等价物净增加额 | 150\n"
+                ),
+            },
+            {
+                "page_number": 49,
+                "text": (
+                    "相关现金流量已经适当地包括在合并利润表和合并现金流量表中。\n"
+                    "单位：人民币万元\n"
+                    "货币资金 | 999\n"
+                ),
+            },
+        ]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+
+
+def test_standalone_narrative_statement_title_does_not_reactivate_extraction(
+    tmp_path: Path,
+) -> None:
+    """A line-wrapped title mention needs a matching statement period."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.append(
+        {
+            "page_number": 50,
+            "text": (
+                "母公司利润表\n"
+                "本说明涉及下列项目\n"
+                "合并利润表\n"
+                "单位：人民币万元\n"
+                "营业收入 | 999\n"
+                "营业成本 | 888\n"
+                "净利润 | 777\n"
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["revenue"] == Decimal("10000000")
+
+
+def test_statement_period_embedded_in_narrative_does_not_activate_extraction(
+    tmp_path: Path,
+) -> None:
+    """A correct date inside prose is not a structural statement heading."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.append(
+        {
+            "page_number": 51,
+            "text": (
+                "母公司资产负债表\n"
+                "合并资产负债表\n"
+                "截至2025 年 12 月 31 日，本说明不构成财务报表\n"
+                "单位：人民币万元\n"
+                "资产总计 | 9,999\n"
+                "负债合计 | 8,888\n"
+                "所有者权益合计 | 1,111\n"
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_labeled_issuer_code_ignores_unlabeled_peer_codes(
+    tmp_path: Path,
+) -> None:
+    """Catches peer tickers in a valid annual report breaking issuer identity."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "699998.SH",
+        "证券代码：699998",
+    )
+    page_payload[0]["text"] += "\n可比公司证券为 688228.SH 和 688432.SH"
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["net_profit"] == Decimal("1800000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_cover_issuer_code_ignores_later_labeled_peer_code(
+    tmp_path: Path,
+) -> None:
+    """A peer's labeled ticker in the body cannot override the cover issuer."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "699998.SH",
+        "证券代码：699998",
+    )
+    page_payload[-1]["text"] += "\n上交所科创板证券代码：688981"
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+
+
+def test_suffixed_cover_issuer_code_outranks_later_labeled_peer_code(
+    tmp_path: Path,
+) -> None:
+    """A labeled peer in the body cannot replace a suffixed cover issuer."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[-1]["text"] += "\n上交所科创板证券代码：688981"
+
+    correct = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+    wrong = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash).model_copy(
+            update={"ts_code": "688981.SH"}
+        ),
+    )
+
+    assert correct.quality_status is QualityStatus.VALID
+    assert correct.issues == ()
+    assert wrong.quality_status is QualityStatus.UNVERIFIED
+    assert "PDF_LAYOUT_UNSUPPORTED" in wrong.issues
+
+
+def test_main_financial_data_stops_before_change_reason_percentages(
+    tmp_path: Path,
+) -> None:
+    """Catches a percentage in the change-reasons table conflicting with profit."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n主要财务数据\n"
+        "单位：人民币万元\n"
+        "扣除非经常性损益后的净利润 | 170\n"
+        "主要会计数据、财务指标发生变动的情况、原因\n"
+        "扣除非经常性损益后的净利润 | 21.83\n"
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+def test_extracts_current_value_after_annual_report_note_column(
+    tmp_path: Path,
+) -> None:
+    """Catches treating an annual-report note number as the reported value."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "货币资金 | 300",
+        "货币资金 七、1 300 280",
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "营业收入 | 1,000",
+        "营业收入 七、61 1,000 900",
+    )
+    page_payload[4]["text"] = page_payload[4]["text"].replace(
+        "期末总股本 | 100,000,000",
+        "期末总股本 七、53 100,000,000 90,000,000",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+    assert result.facts["total_shares"] == Decimal("100000000")
+
+
+def test_extracts_adjusted_profit_from_annual_main_accounting_data(
+    tmp_path: Path,
+) -> None:
+    """Catches annual adjusted profit being lost outside the formal statements."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n（一）主要会计数据\n"
+        "单位：人民币万元\n"
+        "净利润 | 160\n"
+        "扣除非经常性损益后的净利润 | 170\n"
+        "（二）主要财务指标\n"
+        "扣除非经常性损益后的净利润 | 21.83\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+    assert result.facts["net_profit"] == Decimal("1800000")
+
+
 def test_derives_interest_bearing_debt_only_from_complete_visible_components(
     tmp_path: Path,
 ) -> None:
