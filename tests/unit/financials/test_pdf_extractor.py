@@ -201,6 +201,196 @@ def test_extracts_visible_cninfo_whitespace_tables_across_pages(
     assert result.facts["operating_cash_flow"] == Decimal("220")
 
 
+@pytest.mark.parametrize(
+    ("report_type", "report_period", "cover_marker", "statement_header"),
+    [
+        (
+            ReportType.ANNUAL,
+            date(2025, 12, 31),
+            "2025年年度报告",
+            "项目 2025年度 2024年度",
+        ),
+        (
+            ReportType.Q1,
+            date(2025, 3, 31),
+            "2025年第一季度报告",
+            "项目 本期发生额 上期发生额",
+        ),
+    ],
+)
+def test_income_and_cash_flow_accept_structural_table_header(
+    tmp_path: Path,
+    report_type: ReportType,
+    report_period: date,
+    cover_marker: str,
+    statement_header: str,
+) -> None:
+    """SZSE tables may identify the period in columns instead of a title line."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = (
+        "FIXTURE DATA - NOT A REAL ISSUER\n"
+        "虚构公司 699998.SH\n"
+        f"{cover_marker}\n报告期：{report_period.isoformat()}"
+    )
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "2025 年 12 月 31 日",
+        f"{report_period.year} 年 {report_period.month} 月 {report_period.day} 日",
+    )
+    for index in (2, 3):
+        lines = page_payload[index]["text"].splitlines()
+        page_payload[index]["text"] = "\n".join(
+            [lines[0], lines[2], statement_header, *lines[3:]]
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash).model_copy(
+            update={"report_type": report_type, "report_period": report_period}
+        ),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_blank_financing_cash_flow_row_is_explicit_zero(
+    tmp_path: Path,
+) -> None:
+    """A visible blank total row is zero, not an absent disclosure."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "筹资活动产生的现金流量净额 | (20)",
+        "筹资活动产生的现金流量净额",
+    ).replace(
+        "现金及现金等价物净增加额 | 150",
+        "现金及现金等价物净增加额 | 170",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["financing_cash_flow"] == Decimal(0)
+
+
+def test_cny_thousand_unit_scales_statement_facts(
+    tmp_path: Path,
+) -> None:
+    """SZSE reports commonly disclose all statement values in CNY thousands."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for item in page_payload[1:4]:
+        item["text"] = item["text"].replace(
+            "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143",
+            "\u5355\u4f4d\uff1a\u5343\u5143",
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("2000000")
+    assert result.facts["operating_cash_flow"] == Decimal("220000")
+
+
+def test_zero_padded_visible_q1_period_identifies_report(
+    tmp_path: Path,
+) -> None:
+    """A visible 03/31 date must identify a Q1 filing without a sidecar period line."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = (
+        "FIXTURE DATA - NOT A REAL ISSUER\n"
+        "\u865a\u6784\u516c\u53f8 699998.SH\n"
+        "2025 \u5e74\u7b2c\u4e00\u5b63\u5ea6\u62a5\u544a"
+    )
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "2025 \u5e74 12 \u6708 31 \u65e5",
+        "2025 \u5e74 03 \u6708 31 \u65e5",
+    )
+    for index in (2, 3):
+        lines = page_payload[index]["text"].splitlines()
+        page_payload[index]["text"] = "\n".join(
+            [
+                lines[0],
+                lines[2],
+                "\u9879\u76ee \u672c\u671f\u53d1\u751f\u989d \u4e0a\u671f\u53d1\u751f\u989d",
+                *lines[3:],
+            ]
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash).model_copy(
+            update={
+                "report_type": ReportType.Q1,
+                "report_period": date(2025, 3, 31),
+            }
+        ),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+
+
+def test_balance_sheet_accepts_reporting_date_inside_table_header(
+    tmp_path: Path,
+) -> None:
+    """Some annual balance sheets put the reporting date in the column header."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    lines = page_payload[1]["text"].splitlines()
+    page_payload[1]["text"] = "\n".join(
+        [
+            lines[0],
+            lines[2],
+            "\u9879\u76ee 2025 \u5e74 12 \u6708 31 \u65e5 2025 \u5e74 1 \u6708 1 \u65e5",
+            *lines[3:],
+        ]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_cash_exchange_effect_accepts_value_before_cross_page_label_suffix(
+    tmp_path: Path,
+) -> None:
+    """A page break may place the final label word after the row's values."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "\u6c47\u7387\u53d8\u52a8\u5bf9\u73b0\u91d1\u53ca"
+        "\u73b0\u91d1\u7b49\u4ef7\u7269\u7684\u5f71\u54cd | 0",
+        "\u56db\u3001\u6c47\u7387\u53d8\u52a8\u5bf9\u73b0\u91d1"
+        "\u53ca\u73b0\u91d1\u7b49\u4ef7\u7269\u7684 0 0",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["cash_exchange_effect"] == Decimal(0)
+
+
 def test_ignores_parent_company_statements_after_consolidated_statements(
     tmp_path: Path,
 ) -> None:
@@ -366,6 +556,39 @@ def test_cover_issuer_code_ignores_later_labeled_peer_code(
     assert result.issues == ()
 
 
+def test_early_labeled_issuer_code_ignores_later_labeled_peer_codes(
+    tmp_path: Path,
+) -> None:
+    """A cover without a ticker may identify the issuer in early front matter."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "699998.SH",
+        "\u865a\u6784\u516c\u53f8",
+    )
+    page_payload.insert(
+        1,
+        {
+            "page_number": 10,
+            "text": "A\u80a1\u80a1\u7968\u4ee3\u7801 699998",
+        },
+    )
+    page_payload.append(
+        {
+            "page_number": 48,
+            "text": "\u540c\u884c\u516c\u53f8\u80a1\u7968\u4ee3\u7801\uff1a688981",
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+
+
 def test_suffixed_cover_issuer_code_outranks_later_labeled_peer_code(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +697,123 @@ def test_extracts_adjusted_profit_from_annual_main_accounting_data(
     assert result.issues == ()
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
     assert result.facts["net_profit"] == Decimal("1800000")
+
+
+def test_extracts_split_inline_yuan_adjusted_profit_from_szse_main_data(
+    tmp_path: Path,
+) -> None:
+    """SZSE main-data labels may put the inline yuan unit on its own line."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n五、主要会计数据和财务指标\n"
+        "归属于上市公司股东\n"
+        "的扣除非经常性损益\n"
+        "的净利润（元）\n"
+        "1,700,000 1,600,000 6.25%\n"
+        "六、主要财务指标\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+@pytest.mark.parametrize(
+    ("inline_unit", "expected"),
+    [
+        ("\u5343\u5143", Decimal("1700000")),
+        ("\u4e07\u5143", Decimal("17000000")),
+    ],
+)
+def test_scales_split_inline_cny_unit_adjusted_profit(
+    tmp_path: Path,
+    inline_unit: str,
+    expected: Decimal,
+) -> None:
+    """Main-data facts retain the multiplier embedded in a split label."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n\u4e94\u3001\u4e3b\u8981\u4f1a\u8ba1\u6570\u636e\u548c\u8d22\u52a1\u6307\u6807\n"
+        "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\n"
+        "\u7684\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\n"
+        f"\u7684\u51c0\u5229\u6da6\uff08{inline_unit}\uff09\n"
+        "1,700 1,600 6.25%\n"
+        "\u516d\u3001\u4e3b\u8981\u8d22\u52a1\u6307\u6807\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u540e\u7684\u51c0\u5229\u6da6 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == expected
+
+
+def test_quarterly_breakdown_does_not_conflict_with_annual_main_data(
+    tmp_path: Path,
+) -> None:
+    """Annual reports often follow annual facts with a quarterly breakdown."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n五、主要会计数据\n"
+        "单位：人民币万元\n"
+        "扣除非经常性损益后的净利润 | 170\n"
+        "六、分季度主要财务指标\n"
+        "单位：人民币万元\n"
+        "扣除非经常性损益后的净利润 | 20\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+def test_plain_share_capital_label_is_total_shares_inside_balance_sheet(
+    tmp_path: Path,
+) -> None:
+    """SZSE balance sheets label issued share capital as plain `股本`."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[4]["text"] = page_payload[4]["text"].replace(
+        "期末总股本 | 100,000,000",
+        "股本 100,000,000 90,000,000",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["total_shares"] == Decimal("100000000")
 
 
 def test_derives_interest_bearing_debt_only_from_complete_visible_components(

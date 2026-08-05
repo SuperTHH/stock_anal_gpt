@@ -32,13 +32,15 @@ _NOTE_COLUMN_FACT = re.compile(
     r"(?:\s+.*)?$"
 )
 _UNIT = re.compile(
-    r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|万元|亿元|股)"
+    r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|千元|万元|亿元|股)"
 )
+_INLINE_CNY_UNIT = re.compile(r"[（(](元|千元|万元|亿元)[）)]")
 _UNIT_DEFINITIONS = {
     "人民币元": ("CNY", Decimal(1)),
     "人民币万元": ("CNY", Decimal(10_000)),
     "人民币亿元": ("CNY", Decimal(100_000_000)),
     "元": ("CNY", Decimal(1)),
+    "千元": ("CNY", Decimal(1_000)),
     "万元": ("CNY", Decimal(10_000)),
     "亿元": ("CNY", Decimal(100_000_000)),
     "股": ("SHARES", Decimal(1)),
@@ -52,6 +54,7 @@ _REPORT_TYPE_MARKERS = {
 _STATEMENT_TITLES = {
     "主要财务数据": StatementType.INCOME_STATEMENT,
     "主要会计数据": StatementType.INCOME_STATEMENT,
+    "主要会计数据和财务指标": StatementType.INCOME_STATEMENT,
     "合并资产负债表": StatementType.BALANCE_SHEET,
     "合并利润表": StatementType.INCOME_STATEMENT,
     "合并现金流量表": StatementType.CASH_FLOW,
@@ -67,6 +70,7 @@ _EXTRACTION_BOUNDARIES = (
     "合并所有者权益变动表",
     "母公司所有者权益变动表",
     "主要财务指标",
+    "分季度主要财务指标",
     "主要会计数据、财务指标发生变动的情况、原因",
     "主要会计数据、财务指标发生变动的情况及原因",
 )
@@ -99,6 +103,7 @@ _ALIASES = {
     ),
     "期末总股本": "total_shares",
     "实收资本（或股本）": "total_shares",
+    "股本": "total_shares",
     "投资活动产生的现金流量净额": "investing_cash_flow",
     "筹资活动产生的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
@@ -220,8 +225,19 @@ class CninfoPdfExtractor:
             f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
             for symbol in _LABELED_CODE.findall(joined)
         }
+        front_matter_labeled_codes = {
+            f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
+            for symbol in _LABELED_CODE.findall(
+                "\n".join(
+                    text
+                    for page_number, text in pages
+                    if page_number <= 20 and text and text.strip()
+                )
+            )
+        }
         codes = (
             cover_codes
+            or front_matter_labeled_codes
             or labeled_codes
             or set(_SUFFIXED_CODE.findall(joined))
         )
@@ -240,12 +256,14 @@ class CninfoPdfExtractor:
         statement_title: str | None = None
         pending_statement: tuple[str, StatementType] | None = None
         pending_statement_lines = 0
+        pending_statement_unit: tuple[str, Decimal] | None = None
         unit: tuple[str, Decimal] | None = None
         pending_label = ""
         for page_number, text in pages:
             if not text:
                 continue
-            for raw_line in text.splitlines():
+            raw_lines = text.splitlines()
+            for raw_line in raw_lines:
                 line = raw_line.strip()
                 normalized_heading = _normalized_heading(line)
                 if normalized_heading in _EXTRACTION_BOUNDARIES:
@@ -253,6 +271,7 @@ class CninfoPdfExtractor:
                     statement_type = None
                     pending_statement = None
                     pending_statement_lines = 0
+                    pending_statement_unit = None
                     unit = None
                     pending_label = ""
                     continue
@@ -272,11 +291,13 @@ class CninfoPdfExtractor:
                     if title[0] in _CONSOLIDATED_STATEMENT_TITLES:
                         pending_statement = title
                         pending_statement_lines = 4
+                        pending_statement_unit = None
                     else:
                         statement_title = title[0]
                         statement_type = title[1]
                         pending_statement = None
                         pending_statement_lines = 0
+                        pending_statement_unit = None
                     continue
                 if pending_statement is not None:
                     if _statement_period_heading_matches(
@@ -285,12 +306,32 @@ class CninfoPdfExtractor:
                         statement_type=pending_statement[1],
                     ):
                         statement_title, statement_type = pending_statement
+                        unit = pending_statement_unit
                         pending_statement = None
                         pending_statement_lines = 0
+                        pending_statement_unit = None
+                    elif (pending_unit_match := _UNIT.search(line)) is not None:
+                        pending_statement_unit = _UNIT_DEFINITIONS[
+                            pending_unit_match.group(1)
+                        ]
+                    elif (
+                        pending_statement_unit is not None
+                        and _statement_table_header_matches(
+                            line,
+                            descriptor=descriptor,
+                            statement_type=pending_statement[1],
+                        )
+                    ):
+                        statement_title, statement_type = pending_statement
+                        unit = pending_statement_unit
+                        pending_statement = None
+                        pending_statement_lines = 0
+                        pending_statement_unit = None
                     elif line:
                         pending_statement_lines -= 1
                         if pending_statement_lines <= 0:
                             pending_statement = None
+                            pending_statement_unit = None
                     continue
                 if statement_title == "主要财务数据" and re.match(
                     r"^[（(][二三四五六七八九十]+[）)]",
@@ -333,9 +374,44 @@ class CninfoPdfExtractor:
                     pending_label = ""
                     continue
 
+                blank_cash_flow_component = _blank_cash_flow_component(line)
+                if (
+                    blank_cash_flow_component is not None
+                    and statement_type is StatementType.CASH_FLOW
+                    and unit is not None
+                ):
+                    currency, multiplier = unit
+                    if currency != "CNY":
+                        recognized_fact_line_without_unit = True
+                        continue
+                    candidates.append(
+                        PdfFactCandidate(
+                            canonical_fact_name=blank_cash_flow_component,
+                            value=Decimal(0),
+                            unit_multiplier=multiplier,
+                            currency=currency,
+                            page_number=page_number,
+                            statement_type=statement_type,
+                            source_text_hash=hashlib.sha256(
+                                raw_line.strip().encode("utf-8")
+                            ).hexdigest(),
+                        )
+                    )
+                    pending_label = ""
+                    continue
+
+                fact_source_line = line
                 parsed_line = _parse_fact_line(line)
+                if (
+                    parsed_line is None
+                    and statement_type is StatementType.CASH_FLOW
+                ):
+                    parsed_line = _parse_truncated_cash_exchange(line)
+                    if parsed_line is not None:
+                        fact_source_line = line
                 if parsed_line is None and pending_label:
-                    parsed_line = _parse_fact_line(f"{pending_label} {line}")
+                    fact_source_line = f"{pending_label} {line}"
+                    parsed_line = _parse_fact_line(fact_source_line)
                 if parsed_line is None:
                     combined = _normalize_label(f"{pending_label}{line}")
                     pending_label = (
@@ -351,16 +427,40 @@ class CninfoPdfExtractor:
                 pending_label = ""
                 canonical_name, number = parsed_line
                 if (
-                    statement_title in {"主要财务数据", "主要会计数据"}
+                    statement_title
+                    in {
+                        "主要财务数据",
+                        "主要会计数据",
+                        "主要会计数据和财务指标",
+                    }
                     and canonical_name != "adjusted_net_profit"
                 ):
                     continue
                 if statement_type is None:
                     continue
                 if unit is None:
-                    recognized_fact_line_without_unit = True
-                    continue
-                currency, multiplier = unit
+                    if (
+                        canonical_name == "adjusted_net_profit"
+                        and statement_title
+                        in {
+                            "主要财务数据",
+                            "主要会计数据",
+                            "主要会计数据和财务指标",
+                        }
+                        and (
+                            inline_unit_match := _INLINE_CNY_UNIT.search(
+                                fact_source_line
+                            )
+                        )
+                    ):
+                        currency, multiplier = _UNIT_DEFINITIONS[
+                            inline_unit_match.group(1)
+                        ]
+                    else:
+                        recognized_fact_line_without_unit = True
+                        continue
+                else:
+                    currency, multiplier = unit
                 if canonical_name == "total_shares":
                     currency, multiplier = "SHARES", Decimal(1)
                 elif currency != "CNY":
@@ -600,6 +700,23 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
         return None
 
 
+def _parse_truncated_cash_exchange(line: str) -> tuple[str, Decimal] | None:
+    match = _WHITESPACE_FACT.fullmatch(line.strip())
+    if match is None:
+        return None
+    expected_label = "汇率变动对现金及现金等价物的影响"
+    if _normalize_label(match.group("label")) != expected_label.removesuffix(
+        "影响"
+    ):
+        return None
+    parsed = _parse_fact_line(
+        f"{expected_label} {match.group('value')}"
+    )
+    if parsed is None or parsed[0] != "cash_exchange_effect":
+        return None
+    return parsed
+
+
 def _normalize_label(label: str) -> str:
     normalized = re.sub(r"\s+", "", label.strip())
     normalized = re.sub(
@@ -630,14 +747,43 @@ def _statement_period_heading_matches(
     normalized = re.sub(r"\s+", "", line.strip())
     period = descriptor.report_period
     if statement_type is StatementType.BALANCE_SHEET:
-        return re.fullmatch(
-            rf"{period.year}年0?{period.month}月0?{period.day}日",
-            normalized,
-        ) is not None
+        date_pattern = (
+            rf"{period.year}年0?{period.month}月0?{period.day}日"
+        )
+        return (
+            re.fullmatch(date_pattern, normalized) is not None
+            or (
+                normalized.startswith("项目")
+                and re.search(date_pattern, normalized) is not None
+            )
+        )
     return re.fullmatch(
         rf"{period.year}年0?1(?:—|－|-|至)0?{period.month}月",
         normalized,
     ) is not None
+
+
+def _statement_table_header_matches(
+    line: str,
+    *,
+    descriptor: FilingDescriptor,
+    statement_type: StatementType,
+) -> bool:
+    if statement_type is StatementType.BALANCE_SHEET:
+        return False
+    normalized = re.sub(r"\s+", "", line.strip())
+    year = descriptor.report_period.year
+    if descriptor.report_type is ReportType.ANNUAL:
+        return re.fullmatch(
+            rf"项目(?:附注)?{year}年度{year - 1}年度",
+            normalized,
+        ) is not None
+    if descriptor.report_type is ReportType.Q1:
+        return normalized in {
+            "项目本期发生额上期发生额",
+            f"项目{year}年第一季度{year - 1}年第一季度",
+        }
+    return False
 
 
 def _canonical_name(label: str) -> str | None:
@@ -668,6 +814,14 @@ def _blank_debt_component(line: str) -> str | None:
     return None
 
 
+def _blank_cash_flow_component(line: str) -> str | None:
+    normalized = _normalize_label(line)
+    canonical = _ALIASES.get(normalized)
+    if canonical in _CASH_FLOW_RECONCILIATION:
+        return canonical
+    return None
+
+
 def _period_matches(
     text: str,
     explicit_periods: set[str],
@@ -678,7 +832,7 @@ def _period_matches(
         return explicit_periods == {expected}
     period = descriptor.report_period
     visible_date = re.compile(
-        rf"{period.year}\s*年\s*{period.month}\s*月\s*{period.day}\s*日"
+        rf"{period.year}\s*年\s*0?{period.month}\s*月\s*0?{period.day}\s*日"
     )
     return visible_date.search(text) is not None
 
