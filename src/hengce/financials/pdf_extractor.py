@@ -19,6 +19,10 @@ _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
 _LABELED_CODE = re.compile(
     r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*([0-9]{6})"
 )
+_LABELED_CODE_DETAIL = re.compile(
+    r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*"
+    r"([0-9]{6})(?:\.([A-Z]{2,4}))?"
+)
 _REPORT_PERIOD = re.compile(r"报告期\s*[：:]\s*(\d{4}-\d{2}-\d{2})")
 _WHITESPACE_FACT = re.compile(
     r"^(?P<label>.+?)\s+"
@@ -27,14 +31,20 @@ _WHITESPACE_FACT = re.compile(
 )
 _NOTE_COLUMN_FACT = re.compile(
     r"^(?P<label>.+?)\s+"
-    r"[一二三四五六七八九十]+、\d+(?:[（(]\d+[）)])?\s+"
+    r"[一二三四五六七八九十]+、\d+(?:[（(]\d+[）)])?[A-Za-z]?\s+"
     r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
     r"(?:\s+.*)?$"
+)
+_NUMERIC_NOTE_COLUMN_FACT = re.compile(
+    r"^(?P<label>.+?)\s+\d{1,3}\s+"
+    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)\s+"
+    r"[-+]?\(?[\d,]+(?:\.\d+)?\)?(?:\s+.*)?$"
 )
 _UNIT = re.compile(
     r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|千元|万元|亿元|股)"
 )
 _INLINE_CNY_UNIT = re.compile(r"[（(](元|千元|万元|亿元)[）)]")
+_BARE_CNY_UNIT = re.compile(r"(人民币(?:元|万元|亿元))")
 _UNIT_DEFINITIONS = {
     "人民币元": ("CNY", Decimal(1)),
     "人民币万元": ("CNY", Decimal(10_000)),
@@ -67,6 +77,9 @@ _EXTRACTION_BOUNDARIES = (
     "母公司资产负债表",
     "母公司利润表",
     "母公司现金流量表",
+    "资产负债表",
+    "利润表",
+    "现金流量表",
     "合并所有者权益变动表",
     "母公司所有者权益变动表",
     "主要财务指标",
@@ -105,9 +118,16 @@ _ALIASES = {
     "实收资本（或股本）": "total_shares",
     "股本": "total_shares",
     "投资活动产生的现金流量净额": "investing_cash_flow",
+    "投资活动使用的现金流量净额": "investing_cash_flow",
     "筹资活动产生的现金流量净额": "financing_cash_flow",
+    "筹资活动使用的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
+    "现金及现金等价物净减少额": "net_cash_change",
+    "现金及现金等价物净增加/(减少)额": "net_cash_change",
+    "现金及现金等价物净增加/（减少）额": "net_cash_change",
+    "现金及现金等价物净(减少)/增加额": "net_cash_change",
+    "现金及现金等价物净（减少）/增加额": "net_cash_change",
 }
 _INTEREST_BEARING_DEBT_COMPONENTS = frozenset(
     {
@@ -214,27 +234,40 @@ class CninfoPdfExtractor:
         if not visible_text:
             return self._result((), {"PDF_LAYOUT_UNSUPPORTED"}, pdf_content_hash)
         joined = "\n".join(visible_text)
-        cover_labeled_codes = {
-            f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
-            for symbol in _LABELED_CODE.findall(visible_text[0])
-        }
+        exchange_suffix = descriptor.ts_code.rpartition(".")[2]
+        cover_labeled_codes = _a_share_labeled_codes(
+            visible_text[0], exchange_suffix
+        )
+        if (
+            descriptor.ts_code in cover_labeled_codes
+            and all(
+                code == descriptor.ts_code
+                or _is_secondary_share_class_code(code)
+                for code in cover_labeled_codes
+            )
+        ):
+            cover_labeled_codes = {descriptor.ts_code}
         cover_codes = cover_labeled_codes or set(
             _SUFFIXED_CODE.findall(visible_text[0])
         )
-        labeled_codes = {
-            f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
-            for symbol in _LABELED_CODE.findall(joined)
-        }
-        front_matter_labeled_codes = {
-            f"{symbol}.{descriptor.ts_code.rpartition('.')[2]}"
-            for symbol in _LABELED_CODE.findall(
-                "\n".join(
-                    text
-                    for page_number, text in pages
-                    if page_number <= 20 and text and text.strip()
-                )
+        labeled_codes = _a_share_labeled_codes(joined, exchange_suffix)
+        front_matter_labeled_codes = _a_share_labeled_codes(
+            "\n".join(
+                text
+                for page_number, text in pages
+                if page_number <= 20 and text and text.strip()
+            ),
+            exchange_suffix,
+        )
+        if (
+            descriptor.ts_code in front_matter_labeled_codes
+            and all(
+                code == descriptor.ts_code
+                or _is_secondary_share_class_code(code)
+                for code in front_matter_labeled_codes
             )
-        }
+        ):
+            front_matter_labeled_codes = {descriptor.ts_code}
         codes = (
             cover_codes
             or front_matter_labeled_codes
@@ -306,7 +339,17 @@ class CninfoPdfExtractor:
                         statement_type=pending_statement[1],
                     ):
                         statement_title, statement_type = pending_statement
-                        unit = pending_statement_unit
+                        inline_unit_match = _UNIT.search(line)
+                        bare_unit_match = _BARE_CNY_UNIT.search(line)
+                        unit = pending_statement_unit or (
+                            _UNIT_DEFINITIONS[inline_unit_match.group(1)]
+                            if inline_unit_match is not None
+                            else (
+                                _UNIT_DEFINITIONS[bare_unit_match.group(1)]
+                                if bare_unit_match is not None
+                                else None
+                            )
+                        )
                         pending_statement = None
                         pending_statement_lines = 0
                         pending_statement_unit = None
@@ -407,6 +450,8 @@ class CninfoPdfExtractor:
                     and statement_type is StatementType.CASH_FLOW
                 ):
                     parsed_line = _parse_truncated_cash_exchange(line)
+                    if parsed_line is None:
+                        parsed_line = _parse_truncated_capital_expenditure(line)
                     if parsed_line is not None:
                         fact_source_line = line
                 if parsed_line is None and pending_label:
@@ -681,6 +726,8 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     if not separator:
         match = _NOTE_COLUMN_FACT.fullmatch(line.strip())
         if match is None:
+            match = _NUMERIC_NOTE_COLUMN_FACT.fullmatch(line.strip())
+        if match is None:
             match = _WHITESPACE_FACT.fullmatch(line.strip())
         if match is None:
             return None
@@ -717,6 +764,31 @@ def _parse_truncated_cash_exchange(line: str) -> tuple[str, Decimal] | None:
     return parsed
 
 
+def _parse_truncated_capital_expenditure(
+    line: str,
+) -> tuple[str, Decimal] | None:
+    label, separator, raw_value = line.partition("|")
+    if not separator:
+        match = _WHITESPACE_FACT.fullmatch(line.strip())
+        if match is None:
+            return None
+        label = match.group("label")
+        raw_value = match.group("value")
+    truncated_label = (
+        "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6\u957f"
+    )
+    if _normalize_label(label) != truncated_label:
+        return None
+    full_label = (
+        "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6"
+        "\u957f\u671f\u8d44\u4ea7\u652f\u4ed8\u7684\u73b0\u91d1"
+    )
+    parsed = _parse_fact_line(f"{full_label} | {raw_value.strip()}")
+    if parsed is None or parsed[0] != "capital_expenditure":
+        return None
+    return parsed
+
+
 def _normalize_label(label: str) -> str:
     normalized = re.sub(r"\s+", "", label.strip())
     normalized = re.sub(
@@ -726,6 +798,8 @@ def _normalize_label(label: str) -> str:
     )
     if normalized.startswith("其中："):
         normalized = normalized.removeprefix("其中：")
+    if normalized.startswith(("减：", "减:")):
+        normalized = normalized[2:]
     return normalized
 
 
@@ -751,12 +825,22 @@ def _statement_period_heading_matches(
             rf"{period.year}年0?{period.month}月0?{period.day}日"
         )
         return (
-            re.fullmatch(date_pattern, normalized) is not None
+            re.fullmatch(
+                rf"{date_pattern}(?:人民币(?:元|万元|亿元))?",
+                normalized,
+            )
+            is not None
             or (
                 normalized.startswith("项目")
                 and re.search(date_pattern, normalized) is not None
             )
         )
+    if descriptor.report_type is ReportType.ANNUAL:
+        if re.fullmatch(
+            rf"{period.year}年度(?:人民币(?:元|万元|亿元))?",
+            normalized,
+        ) is not None:
+            return True
     return re.fullmatch(
         rf"{period.year}年0?1(?:—|－|-|至)0?{period.month}月",
         normalized,
@@ -770,7 +854,10 @@ def _statement_table_header_matches(
     statement_type: StatementType,
 ) -> bool:
     if statement_type is StatementType.BALANCE_SHEET:
-        return False
+        return (
+            descriptor.report_type is ReportType.Q1
+            and re.sub(r"\s+", "", line.strip()) == "项目期末余额期初余额"
+        )
     normalized = re.sub(r"\s+", "", line.strip())
     year = descriptor.report_period.year
     if descriptor.report_type is ReportType.ANNUAL:
@@ -791,7 +878,11 @@ def _canonical_name(label: str) -> str | None:
     if direct is not None:
         return direct
     for alias in sorted(_ALIASES, key=len, reverse=True):
-        if label.startswith(f"{alias}（") or label.startswith(f'{alias}('):
+        if (
+            label.startswith(f"{alias}（")
+            or label.startswith(f"{alias}(")
+            or label.startswith(f"{alias}/(")
+        ):
             return _ALIASES[alias]
     return None
 
@@ -831,10 +922,32 @@ def _period_matches(
     if explicit_periods:
         return explicit_periods == {expected}
     period = descriptor.report_period
+    if descriptor.report_type is ReportType.Q1:
+        q1_title = re.compile(
+            rf"{period.year}\s*年\s*第一季度报告"
+        )
+        if q1_title.search(text) is not None:
+            return True
     visible_date = re.compile(
         rf"{period.year}\s*年\s*0?{period.month}\s*月\s*0?{period.day}\s*日"
     )
     return visible_date.search(text) is not None
+
+
+def _a_share_labeled_codes(text: str, default_suffix: str) -> set[str]:
+    codes: set[str] = set()
+    for symbol, explicit_suffix in _LABELED_CODE_DETAIL.findall(text):
+        if explicit_suffix and explicit_suffix not in {"SH", "SZ"}:
+            continue
+        codes.add(f"{symbol}.{explicit_suffix or default_suffix}")
+    return codes
+
+
+def _is_secondary_share_class_code(ts_code: str) -> bool:
+    symbol, _, exchange = ts_code.partition(".")
+    return (exchange == "SZ" and symbol.startswith("2")) or (
+        exchange == "SH" and symbol.startswith("9")
+    )
 
 
 def _physical_page_number(page: object, enumeration_index: int) -> int:

@@ -987,6 +987,341 @@ def test_unsupported_or_ambiguous_pdf_never_becomes_valid(
     assert expected_issue in result.issues
 
 
+def test_q1_title_and_generic_balance_header_identify_implicit_period(
+    tmp_path: Path,
+) -> None:
+    """Some official Q1 statements omit the date but retain structural headers."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = (
+        "FIXTURE DATA - NOT A REAL ISSUER\n"
+        "\u8bc1\u5238\u4ee3\u7801\uff1a699998\n"
+        "2025\u5e74\u7b2c\u4e00\u5b63\u5ea6\u62a5\u544a"
+    )
+    page_payload[1]["text"] = (
+        "\u5408\u5e76\u8d44\u4ea7\u8d1f\u503a\u8868\n"
+        "\u7f16\u5236\u5355\u4f4d\uff1a\u865a\u6784\u516c\u53f8\n"
+        "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143\n"
+        "\u9879\u76ee \u671f\u672b\u4f59\u989d \u671f\u521d\u4f59\u989d\n"
+        + "\n".join(page_payload[1]["text"].splitlines()[3:])
+    )
+    for index in (2, 3):
+        lines = page_payload[index]["text"].splitlines()
+        page_payload[index]["text"] = "\n".join(
+            [
+                lines[0],
+                "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143",
+                "\u9879\u76ee \u672c\u671f\u53d1\u751f\u989d \u4e0a\u671f\u53d1\u751f\u989d",
+                *lines[3:],
+            ]
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash).model_copy(
+            update={
+                "report_type": ReportType.Q1,
+                "report_period": date(2025, 3, 31),
+            }
+        ),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_cover_accepts_issuer_alongside_second_share_class_code(
+    tmp_path: Path,
+) -> None:
+    """An issuer's B-share code must not invalidate its A-share filing."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "\u865a\u6784\u516c\u53f8 699998.SH",
+        (
+            "\u8bc1\u5238\u4ee3\u7801\uff1a699998\n"
+            "\u8bc1\u5238\u4ee3\u7801\uff1a999998"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+
+
+def test_front_matter_accepts_issuer_alongside_second_share_class_code(
+    tmp_path: Path,
+) -> None:
+    """Dual share-class codes may appear after a code-free report cover."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "\u865a\u6784\u516c\u53f8 699998.SH",
+        "\u865a\u6784\u516c\u53f8",
+    )
+    page_payload.insert(
+        1,
+        {
+            "page_number": 2,
+            "text": (
+                "\u8bc1\u5238\u4ee3\u7801\uff1a699998\n"
+                "\u8bc1\u5238\u4ee3\u7801\uff1a999998"
+            ),
+        },
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+
+
+def test_foreign_suffixed_code_does_not_override_front_matter_issuer(
+    tmp_path: Path,
+) -> None:
+    """A supplier's explicitly foreign ticker is not an A-share issuer code."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "\u865a\u6784\u516c\u53f8 699998.SH",
+        "\u865a\u6784\u516c\u53f8",
+    )
+    page_payload.insert(
+        1,
+        {
+            "page_number": 8,
+            "text": "\u4e3b\u8981\u4f9b\u5e94\u5546\u80a1\u7968\u4ee3\u7801 005930.KS",
+        },
+    )
+    page_payload.insert(
+        2,
+        {
+            "page_number": 11,
+            "text": "\u80a1\u7968\u7b80\u79f0 \u865a\u6784 \u80a1\u7968\u4ee3\u7801 699998",
+        },
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+
+
+def test_annual_heading_with_inline_unit_activates_statements(
+    tmp_path: Path,
+) -> None:
+    """Audited reports may combine the annual period and CNY unit on one line."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for index in (2, 3):
+        lines = page_payload[index]["text"].splitlines()
+        page_payload[index]["text"] = "\n".join(
+            [lines[0], "2025\u5e74\u5ea6 \u4eba\u6c11\u5e01\u5143", *lines[3:]]
+        )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u8425\u4e1a\u6210\u672c | 600",
+        "\u51cf\uff1a\u8425\u4e1a\u6210\u672c | 600",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["operating_cost"] == Decimal("600")
+
+
+def test_balance_date_with_inline_unit_activates_statement(
+    tmp_path: Path,
+) -> None:
+    """Audited balance sheets may combine their date and CNY unit."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    lines = page_payload[1]["text"].splitlines()
+    page_payload[1]["text"] = "\n".join(
+        [lines[0], "2025\u5e7412\u670831\u65e5 \u4eba\u6c11\u5e01\u5143", *lines[3:]]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+
+
+def test_net_profit_with_loss_qualifier_maps_to_canonical_fact(
+    tmp_path: Path,
+) -> None:
+    """Audited statements may label net profit as net profit / (loss)."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u51c0\u5229\u6da6 | 180",
+        "\u51c0\u5229\u6da6 / (\u4e8f\u635f) | 180",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["net_profit"] == Decimal("1800000")
+
+
+def test_standalone_company_statement_stops_consolidated_extraction(
+    tmp_path: Path,
+) -> None:
+    """Parent-company statements must not conflict with consolidated facts."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.append(
+        {
+            "page_number": 46,
+            "text": (
+                "\u8d44\u4ea7\u8d1f\u503a\u8868\n"
+                "2025\u5e7412\u670831\u65e5 \u4eba\u6c11\u5e01\u5143\n"
+                "\u8d44\u4ea7\u603b\u8ba1 | 9,999\n"
+                "\u8d1f\u503a\u5408\u8ba1 | 8,888\n"
+                "\u6240\u6709\u8005\u6743\u76ca\u5408\u8ba1 | 1,111"
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_numeric_note_column_uses_current_statement_value(
+    tmp_path: Path,
+) -> None:
+    """Pure numeric note references must not be mistaken for fact values."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "\u8d27\u5e01\u8d44\u91d1 | 300",
+        "\u8d27\u5e01\u8d44\u91d1 1 300 250",
+    )
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "\u7ecf\u8425\u6d3b\u52a8\u4ea7\u751f\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d | 220",
+        "\u7ecf\u8425\u6d3b\u52a8\u4ea7\u751f\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d 64 220 210",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_cashflow_use_and_net_change_aliases_reconcile(
+    tmp_path: Path,
+) -> None:
+    """Audited cash-flow wording can use 'used' and explicit decrease labels."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = (
+        page_payload[3]["text"]
+        .replace(
+            "\u6295\u8d44\u6d3b\u52a8\u4ea7\u751f\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d | (50)",
+            "\u6295\u8d44\u6d3b\u52a8\u4f7f\u7528\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d | (50)",
+        )
+        .replace(
+            "\u7b79\u8d44\u6d3b\u52a8\u4ea7\u751f\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d | (20)",
+            "\u7b79\u8d44\u6d3b\u52a8\u4f7f\u7528\u7684\u73b0\u91d1\u6d41\u91cf\u51c0\u989d | (20)",
+        )
+        .replace(
+            "\u73b0\u91d1\u53ca\u73b0\u91d1\u7b49\u4ef7\u7269\u51c0\u589e\u52a0\u989d | 150",
+            "\u73b0\u91d1\u53ca\u73b0\u91d1\u7b49\u4ef7\u7269\u51c0\u51cf\u5c11\u989d | 150",
+        )
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+
+
+def test_note_reference_with_letter_suffix_precedes_cash_value(
+    tmp_path: Path,
+) -> None:
+    """Audit note references such as 62(1)b are not statement values."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "\u73b0\u91d1\u53ca\u73b0\u91d1\u7b49\u4ef7\u7269\u51c0\u589e\u52a0\u989d | 150",
+        (
+            "\u73b0\u91d1\u53ca\u73b0\u91d1\u7b49\u4ef7\u7269\u51c0\u51cf\u5c11\u989d "
+            "\u4e94\u300162(1)b 150 155"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["net_cash_change"] == Decimal("1500000")
+
+
+def test_truncated_capital_expenditure_label_with_value_is_supported(
+    tmp_path: Path,
+) -> None:
+    """CNINFO text extraction can drop the tail of a long capex row label."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        (
+            "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6"
+            "\u957f\u671f\u8d44\u4ea7\u652f\u4ed8\u7684\u73b0\u91d1 | 50"
+        ),
+        (
+            "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6"
+            "\u957f | 50"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
 def test_content_hash_mismatch_is_rejected_before_text_extraction(
     tmp_path: Path,
 ) -> None:
