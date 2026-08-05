@@ -354,6 +354,14 @@ def test_first_manual_scan_moves_planned_attachment_through_discovery(
     assert stored.status is AcquisitionStatus.DOWNLOADED
     assert stored.discovery_method is DiscoveryMethod.MANUAL_IMPORT
 
+    output = stages.ingest_documents(context)
+
+    pending = pilot_repository.get_manifest_item(selected.item_id)
+    assert pending is not None
+    assert pending.status is AcquisitionStatus.DOWNLOADED
+    assert output["pdf_used_count"] == 0
+    assert output["downloaded_pending_ingestion_count"] == 1
+
 
 def test_production_ingestion_routes_non_periodic_official_evidence(
     tmp_path: Path,

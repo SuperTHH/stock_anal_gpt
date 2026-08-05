@@ -3,6 +3,8 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hengce.contracts.enums import (
     AcquisitionStatus,
     DiscoveryMethod,
@@ -20,7 +22,7 @@ from hengce.services.pdf_financial_ingestion import (
 NOW = datetime(2026, 7, 22, 21, 30, tzinfo=UTC)
 
 
-def item() -> AcquisitionManifestItem:
+def item(source_id: str = "cninfo") -> AcquisitionManifestItem:
     return AcquisitionManifestItem(
         item_id="periodic-1",
         universe_id="universe-1",
@@ -28,7 +30,7 @@ def item() -> AcquisitionManifestItem:
         document_kind=DocumentKind.PERIODIC_REPORT,
         report_type=ReportType.ANNUAL,
         report_period=date(2025, 12, 31),
-        source_id="cninfo",
+        source_id=source_id,
         report_cutoff_at=NOW,
         status=AcquisitionStatus.DOWNLOADED,
         source_url="https://static.cninfo.com.cn/finalpage/report.pdf",
@@ -143,6 +145,54 @@ def test_valid_pdf_is_persisted_before_manifest_becomes_ingested(
         (AcquisitionStatus.VERIFIED, AcquisitionStatus.INGESTED),
     ]
     assert manifest.current.quality_status is QualityStatus.VALID
+
+
+def test_exchange_pdf_source_is_preserved_in_descriptor(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"%PDF test")
+    manifest = PilotRepo(item("szse"))
+    documents = PdfRepo()
+    extractor = Extractor()
+    original_extract = extractor.extract
+
+    def capture_descriptor(*, pdf_path: Path, descriptor: object) -> PdfExtractionResult:
+        assert descriptor.source_id == "szse"  # type: ignore[attr-defined]
+        return original_extract(pdf_path=pdf_path, descriptor=descriptor)
+
+    extractor.extract = capture_descriptor  # type: ignore[method-assign]
+    service = PdfFinancialIngestionService(
+        raw_store=SimpleNamespace(validate_content_hash=lambda _hash: payload),
+        repository=documents,
+        pilot_repository=manifest,
+        extractor=extractor,
+        clock=lambda: NOW,
+    )
+
+    result = service.run("periodic-1")
+
+    assert result.ingested
+
+
+def test_xbrl_location_is_rejected_by_pdf_ingestion(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"<?xml version='1.0'?><xbrl></xbrl>")
+    manifest = PilotRepo(
+        item("szse").model_copy(
+            update={
+                "source_url": "https://www.szse.cn/disclosure/report.xbrl"
+            }
+        )
+    )
+    service = PdfFinancialIngestionService(
+        raw_store=SimpleNamespace(validate_content_hash=lambda _hash: payload),
+        repository=PdfRepo(),
+        pilot_repository=manifest,
+        extractor=Extractor(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ValueError, match="^PDF_ACQUISITION_ITEM_INVALID$"):
+        service.run("periodic-1")
 
 
 def test_unverified_pdf_fails_closed_to_manual_queue(tmp_path: Path) -> None:

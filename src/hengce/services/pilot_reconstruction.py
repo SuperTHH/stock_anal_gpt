@@ -234,12 +234,14 @@ class HistoricalPilotRunner:
             {
                 "upstream_hash": upstream_hash,
                 "manual_inbox": entries,
-                "cninfo_policy": (
-                    policy.model_dump(mode="json")
-                    if (policy := self.state.get_policy("cninfo"))
-                    is not None
-                    else None
-                ),
+                "official_pdf_policies": {
+                    source_id: (
+                        policy.model_dump(mode="json")
+                        if (policy := self.state.get_policy(source_id)) is not None
+                        else None
+                    )
+                    for source_id in ("cninfo", "sse", "szse")
+                },
             }
         )
 

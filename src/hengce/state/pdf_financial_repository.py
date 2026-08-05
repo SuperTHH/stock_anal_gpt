@@ -4,13 +4,14 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from hengce.contracts.enums import QualityStatus
+from hengce.financials.sources import OFFICIAL_PDF_SOURCE_IDS
 from hengce.services.financial_resolution import FinancialDocument
 
 from .db import connect
 
 
 class PdfFinancialDocumentRepository:
-    """Immutable, point-in-time store for validated CNINFO PDF facts."""
+    """Immutable, point-in-time store for validated official PDF facts."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -22,7 +23,7 @@ class PdfFinancialDocumentRepository:
     ) -> FinancialDocument:
         validated = FinancialDocument.model_validate(document.model_dump())
         if (
-            validated.source_id != "cninfo"
+            validated.source_id not in OFFICIAL_PDF_SOURCE_IDS
             or validated.source_kind != "PDF"
             or validated.quality_status is not QualityStatus.VALID
             or validated.normalization_metadata.get("report_period")

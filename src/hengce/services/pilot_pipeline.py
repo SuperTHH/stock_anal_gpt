@@ -29,6 +29,7 @@ from hengce.financials.metrics import (
 from hengce.financials.pdf_extractor import CninfoPdfExtractor
 from hengce.financials.query import AsOfFinancialQuery
 from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
+from hengce.financials.sources import is_official_pdf_location
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
 from hengce.reports.publisher import ReportPublisher
@@ -329,7 +330,7 @@ class PilotProductionStages:
             if (
                 item.status is AcquisitionStatus.DOWNLOADED
                 and item.document_kind is DocumentKind.PERIODIC_REPORT
-                and item.source_id == "cninfo"
+                and is_official_pdf_location(item.source_id, item.source_url)
             ):
                 self.pdf_ingestion_service.run(item.item_id)  # type: ignore[attr-defined]
             elif (
@@ -343,11 +344,14 @@ class PilotProductionStages:
         manifest = self.pilot_repository.list_manifest(self._universe(context).universe_id)
         ingested = tuple(item for item in manifest if item.status is AcquisitionStatus.INGESTED)
         xbrl_count = sum(
-            item.document_kind is DocumentKind.PERIODIC_REPORT and item.source_id in {"sse", "szse"}
+            item.document_kind is DocumentKind.PERIODIC_REPORT
+            and item.source_id in {"sse", "szse"}
+            and not is_official_pdf_location(item.source_id, item.source_url)
             for item in ingested
         )
         pdf_count = sum(
-            item.document_kind is DocumentKind.PERIODIC_REPORT and item.source_id == "cninfo"
+            item.document_kind is DocumentKind.PERIODIC_REPORT
+            and is_official_pdf_location(item.source_id, item.source_url)
             for item in ingested
         )
         downloaded_count = sum(
@@ -423,12 +427,13 @@ class PilotProductionStages:
             item.status is AcquisitionStatus.INGESTED
             and item.document_kind is DocumentKind.PERIODIC_REPORT
             and item.source_id in {"sse", "szse"}
+            and not is_official_pdf_location(item.source_id, item.source_url)
             for item in manifest
         )
         pdf_count = sum(
             item.status is AcquisitionStatus.INGESTED
             and item.document_kind is DocumentKind.PERIODIC_REPORT
-            and item.source_id == "cninfo"
+            and is_official_pdf_location(item.source_id, item.source_url)
             for item in manifest
         )
         quality_summary: dict[str, object] = {

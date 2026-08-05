@@ -368,6 +368,27 @@ def test_balance_sheet_accepts_reporting_date_inside_table_header(
     assert result.facts["total_assets"] == Decimal("20000000")
 
 
+def test_annual_balance_sheet_accepts_period_end_opening_balance_header(
+    tmp_path: Path,
+) -> None:
+    """Annual reports may label balance columns without repeating the date."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    lines = page_payload[1]["text"].splitlines()
+    page_payload[1]["text"] = "\n".join(
+        [lines[0], lines[2], "项目 期末余额 期初余额", *lines[3:]]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
 def test_cash_exchange_effect_accepts_value_before_cross_page_label_suffix(
     tmp_path: Path,
 ) -> None:
@@ -724,6 +745,33 @@ def test_extracts_split_inline_yuan_adjusted_profit_from_szse_main_data(
     )
 
     assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+def test_split_adjusted_profit_prefers_pending_full_label(
+    tmp_path: Path,
+) -> None:
+    """A final split line reading 'net profit' must retain its label prefix."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n五、主要会计数据和财务指标\n"
+        "归属于上市公司股东的扣除非经常性损益的\n"
+        "净利润（元） 1,700,000 1,600,000 6.25%\n"
+        "六、主要财务指标\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.issues == ()
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
 
@@ -1361,6 +1409,31 @@ def test_build_document_preserves_per_fact_pdf_lineage_and_collection_time(
     assert lineage.currency == "CNY"
     assert lineage.parser_version == "cninfo-pdf-pilot-v1"
     assert lineage.pdf_content_hash == content_hash
+
+
+def test_build_document_preserves_exchange_pdf_source(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    filing_descriptor = descriptor(content_hash).model_copy(
+        update={
+            "source_id": "szse",
+            "source_url": "https://disc.static.szse.cn/disc/fixture.PDF",
+        }
+    )
+    configured = extractor(pages())
+    extracted = configured.extract(
+        pdf_path=path,
+        descriptor=filing_descriptor,
+    )
+
+    document = configured.build_document(
+        filing_id="pdf-szse-fixture-v1",
+        descriptor=filing_descriptor,
+        extracted=extracted,
+        supersedes_id=None,
+    )
+
+    assert document.source_id == "szse"
+    assert str(document.source_url) == str(filing_descriptor.source_url)
 
 
 def test_zero_based_reader_page_numbers_become_one_based_lineage(

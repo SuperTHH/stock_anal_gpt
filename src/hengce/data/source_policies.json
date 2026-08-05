@@ -19,16 +19,21 @@
   {
     "source_id": "sse",
     "source_name": "上海证券交易所",
-    "allowed_domains": ["sse.com.cn", "www.sse.com.cn"],
+    "allowed_domains": ["sse.com.cn", "www.sse.com.cn", "static.sse.com.cn"],
     "allowed_schemes": ["https"],
-    "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+    "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "financial_pdf", "official_event"],
+    "domain_purposes": {
+      "sse.com.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "www.sse.com.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "static.sse.com.cn": ["financial_pdf"]
+    },
     "fetch_frequency": "policy_defined",
     "full_text_rule": "necessary_public_attachment",
     "attachment_rule": "pdf_xbrl_only",
     "rate_limit_per_minute": 6,
     "robots_policy": "respect",
     "terms_url": "https://www.sse.com.cn/home/legal/",
-    "terms_reviewed_at": "2026-07-24T00:00:00+08:00",
+    "terms_reviewed_at": "2026-08-05T00:00:00+08:00",
     "review_status": "APPROVED",
     "connection_status": "UNKNOWN",
     "enabled": true
@@ -36,16 +41,21 @@
   {
     "source_id": "szse",
     "source_name": "深圳证券交易所",
-    "allowed_domains": ["szse.cn", "www.szse.cn"],
+    "allowed_domains": ["szse.cn", "www.szse.cn", "disc.static.szse.cn"],
     "allowed_schemes": ["https"],
-    "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+    "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "financial_pdf", "official_event"],
+    "domain_purposes": {
+      "szse.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "www.szse.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "disc.static.szse.cn": ["financial_pdf"]
+    },
     "fetch_frequency": "policy_defined",
     "full_text_rule": "necessary_public_attachment",
     "attachment_rule": "pdf_xbrl_only",
     "rate_limit_per_minute": 6,
     "robots_policy": "respect",
     "terms_url": "https://www.szse.cn/application/laws/",
-    "terms_reviewed_at": "2026-07-24T00:00:00+08:00",
+    "terms_reviewed_at": "2026-08-05T00:00:00+08:00",
     "review_status": "APPROVED",
     "connection_status": "UNKNOWN",
     "enabled": true

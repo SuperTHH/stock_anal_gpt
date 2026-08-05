@@ -13,6 +13,7 @@ from hengce.contracts.enums import (
 )
 from hengce.contracts.financial import FilingDescriptor
 from hengce.financials.pdf_extractor import CninfoPdfExtractor
+from hengce.financials.sources import is_official_pdf_location
 from hengce.raw_store.store import RawObjectStore
 from hengce.state.pdf_financial_repository import (
     PdfFinancialDocumentRepository,
@@ -30,7 +31,7 @@ class PdfFinancialIngestionResult:
 
 
 class PdfFinancialIngestionService:
-    """Validate and persist one manually supplied CNINFO PDF, fail closed."""
+    """Validate and persist one manually supplied official PDF, fail closed."""
 
     def __init__(
         self,
@@ -62,7 +63,7 @@ class PdfFinancialIngestionService:
         if (
             item.status is not AcquisitionStatus.DOWNLOADED
             or item.document_kind is not DocumentKind.PERIODIC_REPORT
-            or item.source_id != "cninfo"
+            or not is_official_pdf_location(item.source_id, item.source_url)
             or item.report_period is None
             or item.report_type is None
             or item.source_url is None
@@ -74,7 +75,7 @@ class PdfFinancialIngestionService:
             raise ValueError("PDF_ACQUISITION_ITEM_INVALID")
 
         descriptor = FilingDescriptor(
-            source_id="cninfo",
+            source_id=item.source_id,
             source_url=item.source_url,
             ts_code=item.ts_code,
             exchange="SSE" if item.ts_code.endswith(".SH") else "SZSE",

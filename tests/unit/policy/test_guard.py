@@ -160,6 +160,54 @@ def test_cninfo_public_attachment_host_is_exact_and_financial_pdf_only(
     assert cninfo["terms_reviewed_at"] == "2026-07-30T00:00:00+08:00"
 
 
+@pytest.mark.parametrize(
+    ("source_id", "allowed_url", "nearby_url"),
+    [
+        (
+            "sse",
+            "https://static.sse.com.cn/disclosure/listedinfo/announcement/a.pdf",
+            "https://evil.static.sse.com.cn/disclosure/a.pdf",
+        ),
+        (
+            "szse",
+            "https://disc.static.szse.cn/disc/disk03/finalpage/a.PDF",
+            "https://static.szse.cn/disc/a.PDF",
+        ),
+    ],
+)
+def test_exchange_public_pdf_hosts_are_exact_and_financial_pdf_only(
+    tmp_path: Path,
+    source_id: str,
+    allowed_url: str,
+    nearby_url: str,
+) -> None:
+    payload = json.loads(
+        files("hengce").joinpath("data", "source_policies.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    policy = next(item for item in payload if item["source_id"] == source_id)
+    repository = StateRepository(tmp_path / "state.sqlite3")
+    repository.migrate()
+    repository.upsert_policy(SourcePolicy.model_validate(policy))
+    guard = PolicyGuard(repository)
+
+    guard.validate(
+        source_id,
+        allowed_url,
+        "financial_pdf",
+        "acquisition.manual_inbox",
+    )
+    with pytest.raises(PolicyDenied, match="^DOMAIN_NOT_ALLOWED$"):
+        guard.validate(
+            source_id,
+            nearby_url,
+            "financial_pdf",
+            "acquisition.manual_inbox",
+        )
+    assert policy["terms_reviewed_at"] == "2026-08-05T00:00:00+08:00"
+
+
 def test_guard_persists_rate_reservations_across_repository_instances(
     tmp_path: Path,
 ) -> None:

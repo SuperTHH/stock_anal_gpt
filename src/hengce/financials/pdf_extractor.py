@@ -444,7 +444,13 @@ class CninfoPdfExtractor:
                     continue
 
                 fact_source_line = line
-                parsed_line = _parse_fact_line(line)
+                parsed_line = None
+                if pending_label:
+                    fact_source_line = f"{pending_label} {line}"
+                    parsed_line = _parse_fact_line(fact_source_line)
+                if parsed_line is None:
+                    fact_source_line = line
+                    parsed_line = _parse_fact_line(line)
                 if (
                     parsed_line is None
                     and statement_type is StatementType.CASH_FLOW
@@ -454,9 +460,6 @@ class CninfoPdfExtractor:
                         parsed_line = _parse_truncated_capital_expenditure(line)
                     if parsed_line is not None:
                         fact_source_line = line
-                if parsed_line is None and pending_label:
-                    fact_source_line = f"{pending_label} {line}"
-                    parsed_line = _parse_fact_line(fact_source_line)
                 if parsed_line is None:
                     combined = _normalize_label(f"{pending_label}{line}")
                     pending_label = (
@@ -634,7 +637,7 @@ class CninfoPdfExtractor:
         return FinancialDocument(
             filing_id=filing_id,
             ts_code=descriptor.ts_code,
-            source_id="cninfo",
+            source_id=descriptor.source_id,
             source_kind="PDF",
             source_url=descriptor.source_url,
             published_at=descriptor.published_at,
@@ -854,10 +857,7 @@ def _statement_table_header_matches(
     statement_type: StatementType,
 ) -> bool:
     if statement_type is StatementType.BALANCE_SHEET:
-        return (
-            descriptor.report_type is ReportType.Q1
-            and re.sub(r"\s+", "", line.strip()) == "项目期末余额期初余额"
-        )
+        return re.sub(r"\s+", "", line.strip()) == "项目期末余额期初余额"
     normalized = re.sub(r"\s+", "", line.strip())
     year = descriptor.report_period.year
     if descriptor.report_type is ReportType.ANNUAL:

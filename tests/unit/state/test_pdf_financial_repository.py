@@ -21,11 +21,12 @@ def document(
     valid_from: datetime,
     supersedes_id: str | None = None,
     value: str = "100",
+    source_id: str = "cninfo",
 ) -> FinancialDocument:
     return FinancialDocument(
         filing_id=filing_id,
         ts_code="600001.SH",
-        source_id="cninfo",
+        source_id=source_id,
         source_kind="PDF",
         source_url=f"https://static.cninfo.com.cn/{filing_id}.pdf",
         published_at=published_at,
@@ -84,6 +85,35 @@ def test_pdf_versions_are_immutable_and_visible_point_in_time(
         original,
         correction,
     )
+
+
+@pytest.mark.parametrize("source_id", ["cninfo", "sse", "szse"])
+def test_repository_accepts_approved_official_pdf_sources(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    repo = repository(tmp_path)
+    official = document(
+        f"pdf-{source_id}",
+        published_at=datetime(2026, 3, 30, tzinfo=UTC),
+        valid_from=datetime(2026, 3, 31, tzinfo=UTC),
+        source_id=source_id,
+    )
+
+    assert repo.save(PERIOD, official) == official
+
+
+def test_repository_rejects_non_official_pdf_source(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    commercial = document(
+        "pdf-commercial",
+        published_at=datetime(2026, 3, 30, tzinfo=UTC),
+        valid_from=datetime(2026, 3, 31, tzinfo=UTC),
+        source_id="commercial",
+    )
+
+    with pytest.raises(ValueError, match="^PDF_FINANCIAL_DOCUMENT_INVALID$"):
+        repo.save(PERIOD, commercial)
 
 
 def test_pdf_repository_rejects_conflicts_and_broken_correction_chain(

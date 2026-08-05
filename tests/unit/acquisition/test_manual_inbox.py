@@ -94,7 +94,24 @@ def inbox(tmp_path: Path) -> ManualInbox:
     state.migrate()
     state.upsert_policies(
         [
-            policy(source_id="sse", domain="www.sse.com.cn", purposes=["xbrl"]),
+            policy(
+                source_id="sse",
+                domain="www.sse.com.cn",
+                purposes=["xbrl", "financial_pdf"],
+            ).model_copy(
+                update={
+                    "allowed_domains": ["www.sse.com.cn", "static.sse.com.cn"],
+                    "domain_purposes": {
+                        "www.sse.com.cn": ["xbrl"],
+                        "static.sse.com.cn": ["financial_pdf"],
+                    },
+                }
+            ),
+            policy(
+                source_id="szse",
+                domain="disc.static.szse.cn",
+                purposes=["financial_pdf"],
+            ),
             policy(
                 source_id="cninfo",
                 domain="static.cninfo.com.cn",
@@ -174,6 +191,46 @@ def test_scan_imports_valid_xbrl_and_cninfo_pdf_through_raw_store(
     assert all(item.status is AcquisitionStatus.DOWNLOADED for item in result.accepted)
     assert all(item.content_hash == item.raw_object_hash for item in result.accepted)
     assert len(list((tmp_path / "raw").rglob("payload.bin"))) == 2
+
+
+def test_scan_preserves_explicit_exchange_pdf_source(tmp_path: Path) -> None:
+    root = tmp_path / "inbox"
+    item = manifest_item(ts_code="000001.SZ")
+    write_pair(
+        root,
+        attachment_name="official.pdf",
+        payload=fictional_pdf(),
+        item=item,
+        source_url="https://disc.static.szse.cn/disc/report.PDF",
+        content_type="application/pdf",
+        overrides={"source_id": "szse"},
+    )
+
+    result = inbox(tmp_path).scan(root, [item])
+
+    assert result.rejected == ()
+    assert [accepted.source_id for accepted in result.accepted] == ["szse"]
+
+
+def test_explicit_pdf_source_must_match_url_policy(tmp_path: Path) -> None:
+    root = tmp_path / "inbox"
+    item = manifest_item(ts_code="000001.SZ")
+    write_pair(
+        root,
+        attachment_name="mismatch.pdf",
+        payload=fictional_pdf(),
+        item=item,
+        source_url="https://static.cninfo.com.cn/finalpage/report.pdf",
+        content_type="application/pdf",
+        overrides={"source_id": "szse"},
+    )
+
+    result = inbox(tmp_path).scan(root, [item])
+
+    assert result.accepted == ()
+    assert [rejection.error_code for rejection in result.rejected] == [
+        "MANUAL_SOURCE_POLICY_DENIED"
+    ]
 
 
 def test_filename_is_not_used_as_document_identity(tmp_path: Path) -> None:

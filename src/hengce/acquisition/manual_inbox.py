@@ -26,6 +26,7 @@ class _ManualSidecar(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     item_id: str
+    source_id: str | None = None
     source_url: AnyHttpUrl
     ts_code: str
     document_kind: DocumentKind
@@ -245,8 +246,17 @@ class ManualInbox:
         item: AcquisitionManifestItem,
         sidecar: _ManualSidecar,
     ) -> str | None:
-        for source_id in dict.fromkeys((item.source_id, "cninfo")):
-            purpose = "financial_pdf" if source_id == "cninfo" else "xbrl"
+        purpose = (
+            "financial_pdf"
+            if sidecar.content_type.casefold() == "application/pdf"
+            else "xbrl"
+        )
+        candidates = (
+            (sidecar.source_id,)
+            if sidecar.source_id is not None
+            else tuple(dict.fromkeys((item.source_id, "cninfo")))
+        )
+        for source_id in candidates:
             try:
                 self.guard.validate(
                     source_id,
