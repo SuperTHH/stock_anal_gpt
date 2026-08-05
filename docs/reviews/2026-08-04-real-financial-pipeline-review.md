@@ -1,121 +1,109 @@
 # Real financial pipeline code review
 
-- Review date: 2026-08-04
+- Review updated: 2026-08-05
 - Branch: `codex/real-data-minimal-loop`
-- Reviewed commit: `d469a13a74e4556371d0813c341e7f7135349e55`
+- Baseline reviewed commit: `0beeff0fbd715157d06403ff211feb8054561374`
 - Pull request: <https://github.com/SuperTHH/stock_anal_gpt/pull/3>
-- Scope: real financial ingestion, point-in-time metrics, independent strategy pools,
-  checkpoint resumption, and private-data isolation
+- Scope: official evidence import, PDF fallback facts, point-in-time filters,
+  independent strategy pools, report lineage, and private-data isolation
 
 ## Outcome
 
-**Changes requested before merge.** The implementation path is now wired and fail-closed,
-and CI is green, but the private pilot still has no verified financial filing, corporate-action
-timeline, or official risk screen. Consequently all three pools correctly remain `BLOCKED`.
-The remaining open parser/import work is material because production cannot reach `READY`
-without it.
+**Code changes approved after fixes; real candidate publication remains data-blocked.**
+The production path is fail-closed and now has importers for reviewed dividend, capital-action,
+and risk evidence. A real CNINFO quarterly report is persisted with 24 facts, including a
+versioned interest-bearing-debt component derivation. The current private pilot still has only
+1 of 150 periodic reports and no reviewed action or risk evidence, so all three pools correctly
+remain `BLOCKED`; no candidate is fabricated.
 
-GitHub Copilot review was requested through the documented REST reviewer identity
-`copilot-pull-request-reviewer[bot]`. GitHub returned no review and no line comments, so this
-document does not claim an independent Copilot approval.
+This review was performed against the working-tree implementation and regression tests in the
+current session. The prior GitHub Copilot reviewer request returned no review or line comments,
+so this document does not claim an independent bot approval.
 
-## Findings fixed during review
+## Important findings fixed during review
 
-### Important — complete metrics could bypass missing official risk evidence
+### Non-periodic official evidence stopped at DOWNLOADED
 
-Previously `_pool_results()` marked every sampled security as hard-filter-passed. A complete
-metric payload could therefore publish candidates without an ingested official risk screen.
-
-Resolution:
-
-- production hard filters now require an `INGESTED` and usable `RISK_SCREEN` manifest item;
-- missing evidence produces `HF-RISK-SCREEN-MISSING` and blocks every pool;
-- an injected provider remains available only for isolated integration tests;
-- regression test:
-  `test_complete_metrics_cannot_bypass_missing_official_risk_screen`.
-
-### Important — resumed ingestion could reuse stale in-memory metrics
-
-The metric cache key contained only universe and cutoff identities. If the same runner object
-processed a newly added manual attachment, stage 9 could reuse results calculated before the
-attachment was ingested.
+Stage 7 previously handled only CNINFO periodic-report PDFs. Reviewed dividend, capital-action,
+and risk files could enter the private inbox but never become versioned facts.
 
 Resolution:
 
-- stage 7 clears the metric cache before processing downloaded documents;
-- stage 6 checkpoint input now includes deterministic manual-inbox content hashes and the
-  reviewed CNINFO policy, so new files or a policy change invalidate downstream checkpoints;
-- regression test:
-  `test_new_manual_inbox_content_invalidates_scan_and_downstream_checkpoints`.
+- added hash-bound, manually reviewed `official-action-evidence-v1` and
+  `official-risk-screen-v1` sidecars;
+- added atomic corporate-action batch persistence and an append-only risk repository;
+- route all three non-periodic document kinds through the production ingestion stage;
+- invalid schemas, hashes, times, chains, and kinds return to `AWAITING_MANUAL`.
 
-### Important — a second PDF correction leaked a SQLite integrity exception
+### The real CNINFO sample lacked a direct debt total
 
-The immutable PDF store had a unique successor index, but a branched correction chain surfaced
-as a raw `sqlite3.IntegrityError` instead of a stable domain error.
+The real 603986.SH 2026 Q1 PDF did not print one `interest_bearing_debt` row, although it
+explicitly disclosed all five reviewed components.
 
 Resolution:
 
-- the repository now detects an existing successor before insert and raises
-  `PDF_FINANCIAL_BRANCH_CONFLICT`;
-- regression test:
-  `test_pdf_repository_rejects_conflicts_and_broken_correction_chain`.
+- derive the total only when short-term borrowings, current portions of non-current
+  liabilities, long-term borrowings, bonds payable, and lease liabilities are all visibly
+  present;
+- treat an explicitly blank visible component row as zero, while an absent row still blocks;
+- retain component IDs and `interest-bearing-debt-components-v1` in normalization metadata;
+- correct pypdf's zero-based physical page number before storing fact lineage.
 
-## Open material findings
+### Risk screens could leak before `effective_at`
 
-### Important — non-periodic official documents have no production parser/import path
+Risk queries constrained publication, collection, and review time but omitted the effective
+cutoff. A future-effective risk status could therefore be visible too early.
 
-`DIVIDEND_RECORD`, `CAPITAL_ACTION_TIMELINE`, and `RISK_SCREEN` are planned and can enter the
-manual inbox, but stage 7 currently ingests only CNINFO periodic-report PDFs. The action
-repository and share-capital calculator exist, yet no production adapter converts these three
-official document kinds into versioned actions and risk evidence.
+Resolution: `visible_screen()` now requires `effective_at <= as_of`; the regression test proves
+the record is invisible before and visible at the effective cutoff.
 
-Impact:
+### READY candidates had attachment-level but not fact-level lineage
 
-- stable-dividend factors cannot become complete from private production data;
-- official risk hard filters intentionally keep every pool blocked;
-- the Task 8 implementation checkbox remains open in the execution plan.
+Production reports listed acquisition-manifest IDs, while candidate factors reference exact
+XBRL/PDF fact IDs, market inputs, corporate actions, and risk records. Once a pool became READY,
+the publisher would reject those unresolved IDs.
 
-Required follow-up:
+Resolution:
 
-- define reviewed, versioned schemas for dividend/action/risk extraction;
-- implement fail-closed importers with official attachment hashes and publication times;
-- add correction-chain and point-in-time integration tests before allowing `INGESTED`.
+- report publication now resolves official manifest records plus exact market, security-master,
+  XBRL, PDF fact, corporate-action, and risk source records;
+- blocked reports retain a concise source list, while READY reports include only referenced
+  fact-level records;
+- a READY three-pool integration test proves the report publishes when every factor ID resolves.
 
-### Important — current real CNINFO sample lacks a required canonical fact
+### Closing-price IDs were shared across all 30 securities
 
-The private `603986.SH` 2026 Q1 PDF yields 18 deterministic candidates and passes statement
-equations, but it does not directly disclose the required `interest_bearing_debt` canonical
-fact. The system correctly returns `PDF_REQUIRED_FACTS_MISSING` and does not persist the filing.
+The prior ID contained only the market date. Different securities therefore referenced the
+same apparent input identity.
 
-Required follow-up:
+Resolution: the identity is now `closing-price:<date>:<ts_code>` in both derived metrics and
+report sources, with a regression assertion on the exact ID.
 
-- prefer an official exchange XBRL instance with reviewed mappings when available; or
-- add a separately reviewed, versioned debt-component derivation specification. Do not infer
-  the value from loosely matched PDF labels.
+## Remaining external-data blocker
 
-### Important — real coverage remains below the publication threshold
+Real coverage remains below the 24/30 publication threshold:
 
-No strategy has the required 24/30 complete, eligible securities. Current private acceptance:
+- universe: 30, with board quotas 8/8/7/7;
+- manifest: 360, including 150 periodic reports;
+- ingested: 1; manual todo: 359;
+- verified financial facts: 24; XBRL used: 0; PDF used: 1;
+- corporate actions: 0; risk screens: 0; derived metrics: 0;
+- all three pools: `BLOCKED`, coverage 0, candidates 0.
 
-- manifest: 360; manual todo: 360;
-- verified financial facts: 0;
-- pool coverage: 0 for all three pools;
-- candidates: 0;
-- acceptance errors: 0.
-
-This is an external-data completion blocker, not a reason to lower the 80% threshold or publish
-sample candidates.
+This is an input-completion blocker, not a reason to lower the threshold or publish sample
+candidates. Each security needs the required five point-in-time filings and official risk
+evidence; the stable-dividend pool additionally needs reviewed 2021-2025 dividend records.
 
 ## Verification evidence
 
-- GitHub Actions: Windows Python, Ubuntu Python, static checks, and frontend all passed for
-  `d469a13`.
-- Local collection: 649 tests.
-- Local bounded shards: 647 passed; one existing Windows capability test skipped.
-- One wheel-install smoke built successfully and pip printed `Successfully installed`, but the
-  pip process did not exit inside the current Windows sandbox; it is not counted as locally
-  complete. The corresponding GitHub Windows job passed.
-- Ruff: passed.
-- `git diff --check`: passed.
-- Frontend: 8 tests passed; production build passed.
-- Real attachments, `.env`, SQLite, Parquet, reports, and run summaries remain Git-ignored.
+- targeted acquisition, evidence, PDF, repository, and production-pipeline tests passed;
+- all tests except the Windows wheel-install smoke test: 663 passed, 1 platform capability test
+  skipped, 1 deselected;
+- the undeselected root run reached 86% without failures but timed out after 10 minutes in the
+  existing wheel-install subprocess, so it is not reported as a complete full-suite pass;
+- Ruff passed; `git diff --check` passed;
+- frontend: 8 tests passed; production build passed;
+- the private 12-stage rebuild and acceptance validator passed with zero acceptance errors;
+- five real-mode UI pages were reviewed at 1440x900 and 1280x720 with no white screen,
+  horizontal overflow, or Chinese mojibake; the quality page exposes the official CNINFO link;
+- real attachments, `.env`, SQLite, Parquet, reports, and run summaries remain Git-ignored.

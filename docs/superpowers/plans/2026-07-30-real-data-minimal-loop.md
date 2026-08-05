@@ -648,7 +648,7 @@ class ShareCapitalResolver:
 - [x] 运行
       `python -m pytest tests/unit/state/test_action_repository.py tests/unit/actions tests/integration/test_m2_actions_acceptance.py -q`
       并确认 RED。
-- [ ] 实现仓库和解析器，所有派生结果记录输入 fact/action ID 与算法版本。
+- [x] 实现仓库和解析器，所有派生结果记录输入 fact/action ID 与算法版本。
 - [x] 运行目标测试、Ruff 和 `git diff --check`。
 - [x] 提交：`git commit -m "feat: resolve point-in-time share capital"`。
 
@@ -1073,6 +1073,10 @@ class PilotAcceptanceValidator:
   git diff --check
   ```
 
+  2026-08-05 复核：无排除项的根目录运行在 86% 时停留于既有 Windows wheel 安装
+  子进程，并在 10 分钟上限超时；不能记为全量通过。排除该单项后的完整结果为
+  `666 passed, 1 skipped, 1 deselected`，Ruff 与差异检查通过。
+
 - [x] 从 `apps/web` 运行：
 
   ```powershell
@@ -1100,19 +1104,19 @@ class PilotAcceptanceValidator:
       30 只、配额 8/8/7/7、清单 360 项、财报项 150；记录聚合摘要但不提交。
 - [x] 如本轮已获得公开访问授权，运行一次 `approved-public`；遇到任何 401/403/429、
       验证码或登录墙时确认自动停止并生成 `AWAITING_MANUAL`，不尝试绕过。
-- [ ] 将允许的人工附件及侧车放入私有收件箱后续跑；核对已验证文件不重复下载，样本
+- [x] 将允许的人工附件及侧车放入私有收件箱后续跑；核对已验证文件不重复下载，样本
       和清单哈希不变化。
 - [x] 当某池达到 24/30 时验证该池排名和来源；未达到的池只显示覆盖阻断。即使所有池
       阻断，也必须得到质量报告而不是虚构候选。
-- [ ] 启动本地 API/UI，逐页复核 report ID、截止时间、生成时间、样本边界、池状态、
+- [x] 启动本地 API/UI，逐页复核 report ID、截止时间、生成时间、样本边界、池状态、
       个股来源与质量页一致。
 - [x] 运行 `PilotAcceptanceValidator`，保存私有聚合结果在被忽略的 `data/` 下。
 
 **Review and completion**
 
 - [x] 使用 `superpowers:requesting-code-review` 进行规格符合性和代码质量评审。
-- [ ] 对每个 Critical/Important 意见先复现或增加测试，再修复；重新运行全量验证。
-- [ ] 使用 `superpowers:verification-before-completion` 检查最终测试输出、工作树和
+- [x] 对每个 Critical/Important 意见先复现或增加测试，再修复；重新运行全量验证。
+- [x] 使用 `superpowers:verification-before-completion` 检查最终测试输出、工作树和
       私有数据隔离证据。
 - [ ] 更新 PR 描述，列明真实数据仍在本机、哪些池 READY/BLOCKED、人工待办数量和
       后续全市场扩展不在本 PR 范围内。

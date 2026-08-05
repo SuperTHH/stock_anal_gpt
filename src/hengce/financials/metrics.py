@@ -615,7 +615,10 @@ class PilotMetricCalculator:
         metrics["free_cash_flow"] = free_cash_flow
 
         market_ids = (
-            f"closing-price:{report_cutoff_at.date().isoformat()}",
+            (
+                f"closing-price:{report_cutoff_at.date().isoformat()}:"
+                f"{series.ts_code}"
+            ),
             share_capital.baseline_fact_id,
             *share_capital.action_record_ids,
         )

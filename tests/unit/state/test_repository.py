@@ -135,13 +135,18 @@ def test_security_master_snapshot_round_trips_exchange_boards_and_lineage(
     repository.migrate()
     repository.upsert_policy(security_master_policy())
     records = [
-        security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR"),
+        security("600000.SH", "MAIN_SH"),
+        security("688001.SH", "STAR"),
     ]
 
     snapshot = repository.save_security_master_snapshot(
-        records, source_id="sse", source_url="https://www.sse.com.cn/master.csv",
-        collected_at=datetime(2026, 7, 24, 9, 0, tzinfo=UTC), content_hash="a" * 64,
-        version="2026-07-24", quality_lineage={"filter": "a_share_cny_four_boards", "row_count": 2},
+        records,
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, 9, 0, tzinfo=UTC),
+        content_hash="a" * 64,
+        version="2026-07-24",
+        quality_lineage={"filter": "a_share_cny_four_boards", "row_count": 2},
     )
 
     assert snapshot.source_id == "sse"
@@ -301,9 +306,12 @@ def test_security_master_snapshot_rejects_duplicates_without_persisting(tmp_path
     with pytest.raises(ValueError, match="SECURITY_MASTER_DUPLICATE_TS_CODE"):
         repository.save_security_master_snapshot(
             [security("600000.SH", "MAIN_SH"), security("600000.SH", "MAIN_SH")],
-            source_id="sse", source_url="https://example.test/master.csv",
-            collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="b" * 64,
-            version="v1", quality_lineage={},
+            source_id="sse",
+            source_url="https://example.test/master.csv",
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+            content_hash="b" * 64,
+            version="v1",
+            quality_lineage={},
         )
 
     assert repository.get_security_master_snapshot("sse", "b" * 64) is None
@@ -315,15 +323,21 @@ def test_latest_security_master_snapshot_uses_most_recent_collection(tmp_path: P
     repository.upsert_policy(security_master_policy())
     repository.save_security_master_snapshot(
         [security("600000.SH", "MAIN_SH")],
-        source_id="sse", source_url="https://www.sse.com.cn/master.csv",
-        collected_at=datetime(2026, 7, 23, tzinfo=UTC), content_hash="d" * 64,
-        version="v1", quality_lineage={},
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 23, tzinfo=UTC),
+        content_hash="d" * 64,
+        version="v1",
+        quality_lineage={},
     )
     newer = repository.save_security_master_snapshot(
         [security("688001.SH", "STAR")],
-        source_id="sse", source_url="https://www.sse.com.cn/master.csv",
-        collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="e" * 64,
-        version="v2", quality_lineage={},
+        source_id="sse",
+        source_url="https://www.sse.com.cn/master.csv",
+        collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+        content_hash="e" * 64,
+        version="v2",
+        quality_lineage={},
     )
 
     assert repository.get_latest_security_master_snapshot("sse") == newer
@@ -429,9 +443,7 @@ def test_latest_security_master_snapshot_rejects_invalid_newest_without_fallback
         collected_hour=8,
         securities=[security("600000.SH", "MAIN_SH")],
     )
-    invalid_security = security("688001.SH", "STAR").model_copy(
-        update={"is_in_scope": False}
-    )
+    invalid_security = security("688001.SH", "STAR").model_copy(update={"is_in_scope": False})
     with sqlite3.connect(repository.path) as connection:
         cursor = connection.execute(
             """
@@ -545,9 +557,7 @@ def test_universe_rejects_duplicate_codes_across_components(
 ) -> None:
     duplicate_components = StateRepository(tmp_path / "duplicate-components.sqlite3")
     duplicate_components.migrate()
-    duplicate_components.upsert_policies(
-        [exchange_policy("sse"), exchange_policy("szse")]
-    )
+    duplicate_components.upsert_policies([exchange_policy("sse"), exchange_policy("szse")])
     sse = save_exchange_snapshot(
         duplicate_components,
         "sse",
@@ -649,9 +659,7 @@ def test_universe_hash_is_deterministic(tmp_path: Path) -> None:
         },
     ]
     expected_digest = hashlib.sha256(
-        json.dumps(
-            expected_identity, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(expected_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
     assert first.universe_hash == second.universe_hash
@@ -710,9 +718,12 @@ def test_security_master_snapshot_rolls_back_metadata_when_row_insert_fails(tmp_
     with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
         repository.save_security_master_snapshot(
             [security("600000.SH", "MAIN_SH"), security("688001.SH", "STAR")],
-            source_id="sse", source_url="https://www.sse.com.cn/master.csv",
-            collected_at=datetime(2026, 7, 24, tzinfo=UTC), content_hash="c" * 64,
-            version="v1", quality_lineage={},
+            source_id="sse",
+            source_url="https://www.sse.com.cn/master.csv",
+            collected_at=datetime(2026, 7, 24, tzinfo=UTC),
+            content_hash="c" * 64,
+            version="v1",
+            quality_lineage={},
         )
 
     assert repository.get_security_master_snapshot("sse", "c" * 64) is None
@@ -750,12 +761,8 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
     repository.migrate()
 
     with sqlite3.connect(repository.path) as connection:
-        migrations = {
-            row[0] for row in connection.execute("SELECT version FROM schema_migrations")
-        }
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(rate_reservations)")
-        }
+        migrations = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(rate_reservations)")}
         lease_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(ingestion_leases)")
         }
@@ -769,9 +776,10 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
         "006_financial_filings",
         "007_reports",
         "008_real_data_pilot",
-            "009_pilot_actions",
-            "010_pdf_financial_documents",
-        }
+        "009_pilot_actions",
+        "010_pdf_financial_documents",
+        "011_official_risk_screens",
+    }
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
     assert lease_columns == {
         "trade_date",
@@ -968,9 +976,12 @@ def test_expired_ingestion_lease_can_be_taken_over_and_terminal_release_is_safe(
     assert repository.acquire_ingestion_lease(
         date(2026, 7, 24), owner_id="first", now=now, lease_seconds=60
     ).acquired
-    assert repository.acquire_ingestion_lease(
-        date(2026, 7, 24), owner_id="second", now=now, lease_seconds=60
-    ).acquired is False
+    assert (
+        repository.acquire_ingestion_lease(
+            date(2026, 7, 24), owner_id="second", now=now, lease_seconds=60
+        ).acquired
+        is False
+    )
     assert repository.acquire_ingestion_lease(
         date(2026, 7, 24), owner_id="second", now=now.replace(minute=2), lease_seconds=60
     ).acquired
@@ -1014,9 +1025,9 @@ def test_expired_lease_takeover_terminalizes_linked_running_record_before_new_ru
 
     assert takeover.acquired
     assert takeover.abandoned_run_id == abandoned.run_id
-    persisted = {
-        run.run_id: run for run in repository.list_runs(run_type="market_daily")
-    }[abandoned.run_id]
+    persisted = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}[
+        abandoned.run_id
+    ]
     assert persisted.run_status == "FAILED"
     assert persisted.finished_at == started.replace(minute=2)
     assert persisted.error_code == "MARKET_INGESTION_LEASE_EXPIRED"
@@ -1220,14 +1231,17 @@ def test_stale_owner_cannot_finalize_new_owner_lease_or_run(tmp_path: Path) -> N
     )
     repository.record_run(second)
 
-    assert repository.finalize_ingestion_run(
-        trade_date,
-        owner_id="first",
-        lifecycle_state="SUCCEEDED",
-        terminal_run=first.model_copy(
-            update={"finished_at": started.replace(minute=3), "run_status": RunStatus.SUCCEEDED}
-        ),
-    ) is False
+    assert (
+        repository.finalize_ingestion_run(
+            trade_date,
+            owner_id="first",
+            lifecycle_state="SUCCEEDED",
+            terminal_run=first.model_copy(
+                update={"finished_at": started.replace(minute=3), "run_status": RunStatus.SUCCEEDED}
+            ),
+        )
+        is False
+    )
 
     lease = repository.get_ingestion_state(trade_date)
     runs = {run.run_id: run for run in repository.list_runs(run_type="market_daily")}
@@ -1242,16 +1256,18 @@ def test_only_current_lease_owner_can_stage_or_read_artifact(tmp_path: Path) -> 
     repository.migrate()
     trade_date = date(2026, 7, 24)
     now = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
-    repository.acquire_ingestion_lease(
-        trade_date, owner_id="owner", now=now, lease_seconds=60
-    )
+    repository.acquire_ingestion_lease(trade_date, owner_id="owner", now=now, lease_seconds=60)
 
-    assert repository.stage_ingestion_artifact(
-        trade_date, owner_id="other", staged_result_json="{}"
-    ) is False
-    assert repository.stage_ingestion_artifact(
-        trade_date, owner_id="owner", staged_result_json='{"ready":true}'
-    ) is True
+    assert (
+        repository.stage_ingestion_artifact(trade_date, owner_id="other", staged_result_json="{}")
+        is False
+    )
+    assert (
+        repository.stage_ingestion_artifact(
+            trade_date, owner_id="owner", staged_result_json='{"ready":true}'
+        )
+        is True
+    )
     stored = repository.get_ingestion_state(trade_date)
 
     assert stored is not None
@@ -1274,12 +1290,15 @@ def test_lease_renewal_prevents_expiry_takeover_until_renewed_expiry(tmp_path: P
         now=started.replace(second=50),
         lease_seconds=60,
     )
-    assert repository.acquire_ingestion_lease(
-        trade_date,
-        owner_id="other",
-        now=started.replace(minute=1, second=1),
-        lease_seconds=60,
-    ).acquired is False
+    assert (
+        repository.acquire_ingestion_lease(
+            trade_date,
+            owner_id="other",
+            now=started.replace(minute=1, second=1),
+            lease_seconds=60,
+        ).acquired
+        is False
+    )
     assert repository.acquire_ingestion_lease(
         trade_date,
         owner_id="other",

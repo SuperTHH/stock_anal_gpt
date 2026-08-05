@@ -290,6 +290,67 @@ def test_future_download_timestamp_is_rejected(tmp_path: Path) -> None:
     result = inbox(tmp_path).scan(root, [item])
 
     assert result.accepted == ()
-    assert [rejection.error_code for rejection in result.rejected] == [
-        "MANUAL_TIMELINE_INVALID"
-    ]
+    assert [rejection.error_code for rejection in result.rejected] == ["MANUAL_TIMELINE_INVALID"]
+
+
+def test_reviewed_evidence_block_survives_acquisition_sidecar_validation(
+    tmp_path: Path,
+) -> None:
+    """Catches the manual scanner rejecting versioned action/risk review payloads."""
+    root = tmp_path / "inbox"
+    item = manifest_item()
+    write_pair(
+        root,
+        attachment_name="reviewed.xbrl",
+        payload=XML,
+        item=item,
+        source_url="https://www.sse.com.cn/disclosure/reviewed.xbrl",
+        content_type="application/xbrl+xml",
+        overrides={
+            "evidence": {
+                "schema_version": "official-risk-screen-v1",
+                "attachment_sha256": "a" * 64,
+            }
+        },
+    )
+
+    result = inbox(tmp_path).scan(root, [item])
+
+    assert [accepted.item_id for accepted in result.accepted] == [item.item_id]
+    assert result.rejected == ()
+
+
+def test_already_downloaded_attachment_is_not_imported_or_counted_again(
+    tmp_path: Path,
+) -> None:
+    """Catches a stage-7 retry turning the same Raw object into a new transition."""
+    root = tmp_path / "inbox"
+    planned = manifest_item()
+    downloaded = AcquisitionManifestItem.model_validate(
+        {
+            **planned.model_dump(),
+            "status": AcquisitionStatus.DOWNLOADED,
+            "source_url": "https://www.sse.com.cn/disclosure/reviewed.xbrl",
+            "discovery_method": DiscoveryMethod.MANUAL_IMPORT,
+            "published_at": "2026-03-30T10:00:00+00:00",
+            "collected_at": DOWNLOADED,
+            "content_hash": "a" * 64,
+            "version": "v1",
+            "raw_object_hash": "a" * 64,
+            "quality_status": QualityStatus.UNVERIFIED,
+            "error_code": None,
+        }
+    )
+    write_pair(
+        root,
+        attachment_name="reviewed.xbrl",
+        payload=XML,
+        item=downloaded,
+        source_url="https://www.sse.com.cn/disclosure/reviewed.xbrl",
+        content_type="application/xbrl+xml",
+    )
+
+    result = inbox(tmp_path).scan(root, [downloaded])
+
+    assert result.accepted == ()
+    assert result.rejected == ()

@@ -35,6 +35,7 @@ class _ManualSidecar(BaseModel):
     downloaded_at: datetime
     attachment_name: str
     content_type: str
+    evidence: dict[str, object] | None = None
 
     @field_validator("published_at", "downloaded_at")
     @classmethod
@@ -116,6 +117,12 @@ class ManualInbox:
                         error_code="MANUAL_ITEM_NOT_FOUND",
                     )
                 )
+                continue
+            if item.status in {
+                AcquisitionStatus.DOWNLOADED,
+                AcquisitionStatus.VERIFIED,
+                AcquisitionStatus.INGESTED,
+            }:
                 continue
             error = self._validate_identity(item, sidecar, attachment_path)
             if error is not None:

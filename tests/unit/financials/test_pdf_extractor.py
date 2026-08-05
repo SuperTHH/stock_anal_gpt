@@ -201,6 +201,125 @@ def test_extracts_visible_cninfo_whitespace_tables_across_pages(
     assert result.facts["operating_cash_flow"] == Decimal("220")
 
 
+def test_derives_interest_bearing_debt_only_from_complete_visible_components(
+    tmp_path: Path,
+) -> None:
+    """Catches rejecting a filing whose debt total is reproducible from explicit rows."""
+    path, content_hash = write_pdf(tmp_path)
+    filing = descriptor(content_hash).model_copy(
+        update={
+            "ts_code": "603986.SH",
+            "report_period": date(2026, 3, 31),
+            "report_type": ReportType.Q1,
+        }
+    )
+    page_payload = [
+        {
+            "page_number": 1,
+            "text": (
+                "证券代码：603986 证券简称：示例\n"
+                "示例股份有限公司 2026 年第一季度报告\n"
+                "一、主要财务数据\n"
+                "单位：元 币种：人民币\n"
+                "归属于上市公司股东的扣除非经常性损益的净利润 170\n"
+            ),
+        },
+        {
+            "page_number": 5,
+            "text": (
+                "合并资产负债表\n"
+                "2026 年 3 月 31 日\n"
+                "单位：元 币种:人民币\n"
+                "货币资金 300\n"
+                "流动资产合计 1,200\n"
+                "资产总计 2,000\n"
+                "短期借款 100\n"
+                "一年内到期的非流动负债 50\n"
+                "长期借款\n"
+                "应付债券\n"
+                "租赁负债 25\n"
+                "流动负债合计 500\n"
+                "负债合计 800\n"
+                "实收资本（或股本） 100,000,000\n"
+                "所有者权益（或股东权益）合计 1,200\n"
+            ),
+        },
+        {
+            "page_number": 8,
+            "text": (
+                "合并利润表\n"
+                "2026 年 1—3 月\n"
+                "单位：元 币种:人民币\n"
+                "营业收入 1,000\n"
+                "营业成本 600\n"
+                "其中：利息费用 20\n"
+                "净利润 180\n"
+            ),
+        },
+        {
+            "page_number": 10,
+            "text": (
+                "合并现金流量表\n"
+                "2026 年 1—3 月\n"
+                "单位：元 币种：人民币\n"
+                "经营活动产生的现金流量净额 220\n"
+                "购建固定资产、无形资产和其他长期资产支付的现金 50\n"
+                "投资活动产生的现金流量净额 -50\n"
+                "筹资活动产生的现金流量净额 -20\n"
+                "汇率变动对现金及现金等价物的影响 0\n"
+                "现金及现金等价物净增加额 150\n"
+            ),
+        },
+    ]
+
+    configured = extractor(page_payload)
+    result = configured.extract(pdf_path=path, descriptor=filing)
+    document = configured.build_document(
+        filing_id="component-debt-fixture",
+        descriptor=filing,
+        extracted=result,
+        supersedes_id=None,
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.facts["interest_bearing_debt"] == Decimal("175")
+    assert document.normalization_metadata[
+        "interest_bearing_debt_derivation_version"
+    ] == "interest-bearing-debt-components-v1"
+    assert document.normalization_metadata[
+        "interest_bearing_debt_components"
+    ] == (
+        "bonds_payable,current_portion_noncurrent_liabilities,"
+        "lease_liabilities,long_term_borrowings,short_term_borrowings"
+    )
+
+
+def test_incomplete_debt_components_never_create_an_estimated_total(
+    tmp_path: Path,
+) -> None:
+    """Catches treating an absent debt row as zero when the row is not visible."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "有息负债 | 250",
+        (
+            "短期借款 | 100\n"
+            "一年内到期的非流动负债 | 50\n"
+            "长期借款 | 0\n"
+            "应付债券 | 0"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.UNVERIFIED
+    assert "PDF_REQUIRED_FACTS_MISSING" in result.issues
+    assert "interest_bearing_debt" not in result.facts
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_issue"),
     [
@@ -292,3 +411,33 @@ def test_build_document_preserves_per_fact_pdf_lineage_and_collection_time(
     assert lineage.currency == "CNY"
     assert lineage.parser_version == "cninfo-pdf-pilot-v1"
     assert lineage.pdf_content_hash == content_hash
+
+
+def test_zero_based_reader_page_numbers_become_one_based_lineage(
+    tmp_path: Path,
+) -> None:
+    """Catches pypdf's zero-based page index violating the lineage contract."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for index, page in enumerate(page_payload):
+        page["page_number"] = index
+    configured = extractor(page_payload)
+    filing_descriptor = descriptor(content_hash)
+
+    extracted = configured.extract(
+        pdf_path=path,
+        descriptor=filing_descriptor,
+    )
+    document = configured.build_document(
+        filing_id="zero-based-pages",
+        descriptor=filing_descriptor,
+        extracted=extracted,
+        supersedes_id=None,
+    )
+
+    assert document.fact_lineage["total_assets"].page_number == 2
+    assert document.fact_lineage["adjusted_net_profit"].page_number == 3
+    assert all(
+        lineage.page_number > 0
+        for lineage in document.fact_lineage.values()
+    )

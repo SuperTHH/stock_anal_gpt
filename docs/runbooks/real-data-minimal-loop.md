@@ -137,8 +137,78 @@ data/manual_inbox/
 }
 ```
 
-系统自行计算附件哈希，不接受侧车声明的哈希或版本。侧车身份必须与清单项完全一致，
-时间必须含 UTC 偏移，URL 必须通过 `SourcePolicy`。不要编辑数据库状态来跳过校验。
+系统自行计算附件哈希和清单版本。侧车身份必须与清单项完全一致，时间必须含 UTC
+偏移，URL 必须通过 `SourcePolicy`。不要编辑数据库状态来跳过校验。
+
+`DIVIDEND_RECORD`、`CAPITAL_ACTION_TIMELINE` 和 `RISK_SCREEN` 还必须在同一个侧车中
+加入经过人工逐项复核的 `evidence`。证据中的 `attachment_sha256` 不是用来覆盖系统
+哈希，而是把复核结果绑定到原附件；两者不一致时附件会退回 `AWAITING_MANUAL`。可用
+以下命令计算占位值，输出哈希但不输出附件正文：
+
+```powershell
+(Get-FileHash -LiteralPath '<PRIVATE_ATTACHMENT_PATH>' -Algorithm SHA256).Hash.ToLowerInvariant()
+```
+
+分红和股本行动使用固定模式 `official-action-evidence-v1`。以下仅为字段结构示例：
+
+```json
+{
+  "evidence": {
+    "schema_version": "official-action-evidence-v1",
+    "attachment_sha256": "<64_LOWERCASE_HEX>",
+    "reviewed_at": "<OFFSET_AWARE_ISO_TIME_NOT_BEFORE_DOWNLOADED_AT>",
+    "extraction_method": "MANUAL_REVIEW",
+    "actions": [
+      {
+        "action_key": "<STABLE_LOCAL_KEY>",
+        "action_type": "CASH_DIVIDEND",
+        "record_date": "<YYYY-MM-DD>",
+        "ex_date": "<YYYY-MM-DD>",
+        "pay_date": "<YYYY-MM-DD_OR_NULL>",
+        "cash_dividend_per_share": "<DECIMAL_OR_NULL>",
+        "cash_dividend_total": "<DECIMAL_OR_NULL>",
+        "fiscal_year": 2025,
+        "stock_dividend_ratio": null,
+        "split_ratio": null,
+        "rights_ratio": null,
+        "rights_price": null,
+        "share_reduction": null,
+        "action_status": "IMPLEMENTED",
+        "supersedes_record_id": null
+      }
+    ]
+  }
+}
+```
+
+`action_type` 只允许 `CASH_DIVIDEND`、`STOCK_DIVIDEND`、`SPLIT`、`RIGHTS_ISSUE`
+和 `BUYBACK_CANCELLATION`；对应数值必须直接来自附件且为正数。更正使用上一版本实际
+生成的 `record_id` 作为 `supersedes_record_id`，不得覆盖旧记录。一个附件中的行动以
+单一事务写入，任一项无效则全部退回人工队列。
+
+风险筛查使用固定模式 `official-risk-screen-v1`：
+
+```json
+{
+  "evidence": {
+    "schema_version": "official-risk-screen-v1",
+    "attachment_sha256": "<64_LOWERCASE_HEX>",
+    "reviewed_at": "<OFFSET_AWARE_ISO_TIME_NOT_BEFORE_DOWNLOADED_AT>",
+    "extraction_method": "MANUAL_REVIEW",
+    "audit_opinion_standard": true,
+    "major_investigation_open": false,
+    "delisting_risk": false,
+    "st_status": null,
+    "is_suspended": false,
+    "publication_order_known": true,
+    "supersedes_record_id": null
+  }
+}
+```
+
+所有风险字段都必须由官方附件明确支持。缺字段、模式版本不符、未来复核时间或附件哈希
+不符均失败关闭；系统不会因为“附件存在”就默认通过硬过滤。
+
 准备完成后用完全相同的市场日期、截止时间和采集模式重新运行；系统复用不可变样本、
 清单和已经验证的 Raw 对象。
 

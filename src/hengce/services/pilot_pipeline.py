@@ -16,7 +16,11 @@ from hengce.contracts.enums import (
     QualityStatus,
     StrategyType,
 )
-from hengce.contracts.pilot import AcquisitionManifestItem
+from hengce.contracts.official_event import ReportSource
+from hengce.contracts.pilot import (
+    AcquisitionManifestItem,
+    PilotUniverseSnapshot,
+)
 from hengce.financials.assembler import PointInTimeFinancialAssembler
 from hengce.financials.metrics import (
     PilotMetricCalculator,
@@ -24,13 +28,17 @@ from hengce.financials.metrics import (
 )
 from hengce.financials.pdf_extractor import CninfoPdfExtractor
 from hengce.financials.query import AsOfFinancialQuery
+from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
 from hengce.reports.publisher import ReportPublisher
+from hengce.services.official_evidence_ingestion import (
+    OfficialEvidenceIngestionService,
+)
 from hengce.services.pdf_financial_ingestion import (
     PdfFinancialIngestionService,
 )
-from hengce.services.pilot_financial_analysis import PilotFinancialAnalyzer
+from hengce.services.pilot_financial_analysis import PILOT_FINANCIAL_PERIODS, PilotFinancialAnalyzer
 from hengce.services.pilot_reconstruction import (
     PilotStageContext,
     StageHandler,
@@ -44,6 +52,7 @@ from hengce.state.pdf_financial_repository import (
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.report_repository import ReportRepository
 from hengce.state.repository import StateRepository
+from hengce.state.risk_repository import OfficialRiskScreenRepository
 from hengce.strategies.deep_value import DEEP_VALUE_V1
 from hengce.strategies.filters import HardFilterResult
 from hengce.strategies.pilot_inputs import PilotStrategyInputBuilder
@@ -61,8 +70,7 @@ _DEFINITIONS = {
     StrategyType.STABLE_DIVIDEND: STABLE_DIVIDEND_V1,
 }
 _NARRATIVE_TEMPLATE_VERSIONS = {
-    strategy.value: "pilot-rule-narrative-v1"
-    for strategy in StrategyType
+    strategy.value: "pilot-rule-narrative-v1" for strategy in StrategyType
 }
 
 
@@ -76,6 +84,7 @@ class PilotProductionStages:
         data_dir: Path,
         clock: Callable[[], datetime],
         pdf_ingestion_service: object | None = None,
+        official_evidence_ingestion_service: object | None = None,
         financial_analyzer: object | None = None,
         hard_filter_provider: object | None = None,
     ) -> None:
@@ -83,45 +92,56 @@ class PilotProductionStages:
         self.data_dir = data_dir
         self.clock = clock
         self.pilot_repository = PilotRepository(state.path)
+        self.risk_repository = OfficialRiskScreenRepository(state.path)
+        self.action_repository = CorporateActionRepository(state.path)
         self.market_warehouse = MarketWarehouse(data_dir / "normalized")
         self.report_repository = ReportRepository(state.path)
+        self.pdf_repository = PdfFinancialDocumentRepository(state.path)
+        self.financial_repository = FinancialFilingRepository(state.path)
+        self.financial_query = AsOfFinancialQuery(
+            self.financial_repository,
+            data_dir / "warehouse",
+        )
         self.pdf_ingestion_service = (
             pdf_ingestion_service
             if pdf_ingestion_service is not None
             else PdfFinancialIngestionService(
                 raw_store=RawObjectStore(data_dir / "raw"),
-                repository=PdfFinancialDocumentRepository(state.path),
+                repository=self.pdf_repository,
                 pilot_repository=self.pilot_repository,
-                extractor=CninfoPdfExtractor(
-                    parser_version="cninfo-pdf-pilot-v2"
-                ),
+                extractor=CninfoPdfExtractor(parser_version="cninfo-pdf-pilot-v3"),
                 clock=clock,
             )
         )
-        pdf_repository = PdfFinancialDocumentRepository(state.path)
+        self.official_evidence_ingestion_service = (
+            official_evidence_ingestion_service
+            if official_evidence_ingestion_service is not None
+            else OfficialEvidenceIngestionService(
+                raw_store=RawObjectStore(data_dir / "raw"),
+                pilot_repository=self.pilot_repository,
+                action_repository=self.action_repository,
+                risk_repository=self.risk_repository,
+                manual_inbox=data_dir / "manual_inbox",
+                clock=clock,
+            )
+        )
+        self.financial_assembler = PointInTimeFinancialAssembler(
+            query=self.financial_query,
+            pdf_provider=lambda ts_code, period: self.pdf_repository.list_versions(
+                ts_code, period
+            ),
+        )
         self.financial_analyzer = (
             financial_analyzer
             if financial_analyzer is not None
             else PilotFinancialAnalyzer(
-                assembler=PointInTimeFinancialAssembler(
-                    query=AsOfFinancialQuery(
-                        FinancialFilingRepository(state.path),
-                        data_dir / "warehouse",
-                    ),
-                    pdf_provider=lambda ts_code, period: (
-                        pdf_repository.list_versions(ts_code, period)
-                    ),
-                ),
-                action_repository=CorporateActionRepository(state.path),
-                metric_calculator=PilotMetricCalculator(
-                    "pilot-financial-metrics-v1"
-                ),
+                assembler=self.financial_assembler,
+                action_repository=self.action_repository,
+                metric_calculator=PilotMetricCalculator("pilot-financial-metrics-v1"),
                 market_warehouse=self.market_warehouse,
             )
         )
-        self._metric_cache: dict[
-            tuple[object, ...], dict[str, PilotMetricResult]
-        ] = {}
+        self._metric_cache: dict[tuple[object, ...], dict[str, PilotMetricResult]] = {}
         self.hard_filter_provider = hard_filter_provider
 
     def handlers(self) -> dict[str, StageHandler]:
@@ -146,10 +166,7 @@ class PilotProductionStages:
         bars = self.market_warehouse.read_bars(context.market_date)
         if not bars:
             raise ValueError("PILOT_MARKET_DATA_MISSING")
-        partition = (
-            self.market_warehouse.dataset
-            / f"trade_date={context.market_date.isoformat()}"
-        )
+        partition = self.market_warehouse.dataset / f"trade_date={context.market_date.isoformat()}"
         artifacts = sorted(partition.glob("part-*.parquet"))
         if len(artifacts) != 1:
             raise ValueError("PILOT_MARKET_ARTIFACT_INVALID")
@@ -175,10 +192,9 @@ class PilotProductionStages:
         bars = self.market_warehouse.read_bars(context.market_date)
         master = self.state.get_security_master_universe()
         artifacts = sorted(
-            (
-                self.market_warehouse.dataset
-                / f"trade_date={context.market_date.isoformat()}"
-            ).glob("part-*.parquet")
+            (self.market_warehouse.dataset / f"trade_date={context.market_date.isoformat()}").glob(
+                "part-*.parquet"
+            )
         )
         if len(artifacts) != 1:
             raise ValueError("PILOT_MARKET_ARTIFACT_INVALID")
@@ -187,9 +203,7 @@ class PilotProductionStages:
             context.market_date,
             len(bars),
         )
-        existing = self.pilot_repository.get_universe_for_date(
-            context.market_date
-        )
+        existing = self.pilot_repository.get_universe_for_date(context.market_date)
         if existing is None:
             universe = PilotUniverseSelector().select(
                 market_date=context.market_date,
@@ -203,14 +217,10 @@ class PilotProductionStages:
             universe = self.pilot_repository.publish_universe(universe)
         else:
             universe = existing
-            if (
-                universe.report_cutoff_at != context.report_cutoff_at
-                or universe.input_hashes
-                != {
-                    "market": market_hash,
-                    "security_master": master.universe_hash,
-                }
-            ):
+            if universe.report_cutoff_at != context.report_cutoff_at or universe.input_hashes != {
+                "market": market_hash,
+                "security_master": master.universe_hash,
+            }:
                 raise ValueError("PILOT_UNIVERSE_INPUT_CHANGED")
         return {
             "universe_id": universe.universe_id,
@@ -228,28 +238,19 @@ class PilotProductionStages:
             universe,
             context.report_cutoff_at,
         )
-        existing = self.pilot_repository.list_manifest(
-            universe.universe_id
-        )
+        existing = self.pilot_repository.list_manifest(universe.universe_id)
         if not existing:
             self.pilot_repository.insert_manifest(expected)
-            existing = self.pilot_repository.list_manifest(
-                universe.universe_id
-            )
-        if {item.item_id for item in existing} != {
-            item.item_id for item in expected
-        }:
+            existing = self.pilot_repository.list_manifest(universe.universe_id)
+        if {item.item_id for item in existing} != {item.item_id for item in expected}:
             raise ValueError("ACQUISITION_MANIFEST_ID_SET_CHANGED")
         return {
             "universe_id": universe.universe_id,
             "manifest_total": len(existing),
             "periodic_report_count": sum(
-                item.document_kind is DocumentKind.PERIODIC_REPORT
-                for item in existing
+                item.document_kind is DocumentKind.PERIODIC_REPORT for item in existing
             ),
-            "manifest_status_distribution": self._status_distribution(
-                existing
-            ),
+            "manifest_status_distribution": self._status_distribution(existing),
         }
 
     def acquire_public_documents(
@@ -268,29 +269,33 @@ class PilotProductionStages:
         context: PilotStageContext,
     ) -> Mapping[str, object]:
         universe = self._universe(context)
-        manifest = self.pilot_repository.list_manifest(
-            universe.universe_id
-        )
+        manifest = self.pilot_repository.list_manifest(universe.universe_id)
         result = ManualInbox(
             guard=PolicyGuard(self.state),
             raw_store=RawObjectStore(self.data_dir / "raw"),
             clock=self.clock,
         ).scan(self.data_dir / "manual_inbox", manifest)
         for accepted in result.accepted:
-            current = self.pilot_repository.get_manifest_item(
-                accepted.item_id
-            )
+            current = self.pilot_repository.get_manifest_item(accepted.item_id)
             if current is None:
                 raise ValueError("ACQUISITION_ITEM_NOT_FOUND")
+            if current.status is AcquisitionStatus.PLANNED:
+                discovered = current.model_copy(
+                    update={"status": AcquisitionStatus.DISCOVERED}
+                )
+                current = self.pilot_repository.transition(
+                    current.item_id,
+                    AcquisitionStatus.PLANNED,
+                    discovered,
+                    context.known_at,
+                )
             self.pilot_repository.transition(
                 accepted.item_id,
                 current.status,
                 accepted,
                 context.known_at,
             )
-        for item in self.pilot_repository.list_manifest(
-            universe.universe_id
-        ):
+        for item in self.pilot_repository.list_manifest(universe.universe_id):
             if item.status is not AcquisitionStatus.PLANNED:
                 continue
             awaiting = item.model_copy(
@@ -306,16 +311,12 @@ class PilotProductionStages:
                 awaiting,
                 context.known_at,
             )
-        manifest = self.pilot_repository.list_manifest(
-            universe.universe_id
-        )
+        manifest = self.pilot_repository.list_manifest(universe.universe_id)
         return {
             "accepted_manual_attachment_count": len(result.accepted),
             "rejected_manual_attachment_count": len(result.rejected),
             "manual_todo_count": self._manual_todo_count(manifest),
-            "manifest_status_distribution": self._status_distribution(
-                manifest
-            ),
+            "manifest_status_distribution": self._status_distribution(manifest),
         }
 
     def ingest_documents(
@@ -323,9 +324,7 @@ class PilotProductionStages:
         context: PilotStageContext,
     ) -> Mapping[str, object]:
         self._metric_cache.clear()
-        manifest = self.pilot_repository.list_manifest(
-            self._universe(context).universe_id
-        )
+        manifest = self.pilot_repository.list_manifest(self._universe(context).universe_id)
         for item in manifest:
             if (
                 item.status is AcquisitionStatus.DOWNLOADED
@@ -333,22 +332,22 @@ class PilotProductionStages:
                 and item.source_id == "cninfo"
             ):
                 self.pdf_ingestion_service.run(item.item_id)  # type: ignore[attr-defined]
-        manifest = self.pilot_repository.list_manifest(
-            self._universe(context).universe_id
-        )
-        ingested = tuple(
-            item
-            for item in manifest
-            if item.status is AcquisitionStatus.INGESTED
-        )
+            elif (
+                item.status is AcquisitionStatus.DOWNLOADED
+                and item.document_kind is not DocumentKind.PERIODIC_REPORT
+                and self.official_evidence_ingestion_service is not None
+            ):
+                self.official_evidence_ingestion_service.run(  # type: ignore[attr-defined]
+                    item.item_id
+                )
+        manifest = self.pilot_repository.list_manifest(self._universe(context).universe_id)
+        ingested = tuple(item for item in manifest if item.status is AcquisitionStatus.INGESTED)
         xbrl_count = sum(
-            item.document_kind is DocumentKind.PERIODIC_REPORT
-            and item.source_id in {"sse", "szse"}
+            item.document_kind is DocumentKind.PERIODIC_REPORT and item.source_id in {"sse", "szse"}
             for item in ingested
         )
         pdf_count = sum(
-            item.document_kind is DocumentKind.PERIODIC_REPORT
-            and item.source_id == "cninfo"
+            item.document_kind is DocumentKind.PERIODIC_REPORT and item.source_id == "cninfo"
             for item in ingested
         )
         downloaded_count = sum(
@@ -364,9 +363,7 @@ class PilotProductionStages:
             "pdf_used_count": pdf_count,
             "downloaded_pending_ingestion_count": downloaded_count,
             "manual_todo_count": self._manual_todo_count(manifest),
-            "manifest_status_distribution": self._status_distribution(
-                manifest
-            ),
+            "manifest_status_distribution": self._status_distribution(manifest),
         }
 
     def assemble_facts(
@@ -378,9 +375,7 @@ class PilotProductionStages:
         return {
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
-            "corporate_action_count": self._table_count(
-                "corporate_action_versions"
-            ),
+            "corporate_action_count": self._table_count("corporate_action_versions"),
             "share_capital_count": 0,
             "fallback_reason_counts": {},
         }
@@ -410,8 +405,7 @@ class PilotProductionStages:
                 for strategy, result in results.items()
             },
             "pool_candidate_counts": {
-                strategy.value: len(result.candidates)
-                for strategy, result in results.items()
+                strategy.value: len(result.candidates) for strategy, result in results.items()
             },
         }
 
@@ -420,9 +414,7 @@ class PilotProductionStages:
         context: PilotStageContext,
     ) -> Mapping[str, object]:
         universe = self._universe(context)
-        manifest = self.pilot_repository.list_manifest(
-            universe.universe_id
-        )
+        manifest = self.pilot_repository.list_manifest(universe.universe_id)
         results = self._pool_results(context)
         metrics = self._metric_results(context)
         filing_count, fact_count = self._published_filing_counts()
@@ -446,14 +438,10 @@ class PilotProductionStages:
             "fallback_reason_counts": {},
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
-            "corporate_action_count": self._table_count(
-                "corporate_action_versions"
-            ),
+            "corporate_action_count": self._table_count("corporate_action_versions"),
             "share_capital_count": self._share_capital_count(metrics),
             "derived_metric_count": self._derived_metric_count(metrics),
-            "narrative_template_versions": dict(
-                _NARRATIVE_TEMPLATE_VERSIONS
-            ),
+            "narrative_template_versions": dict(_NARRATIVE_TEMPLATE_VERSIONS),
         }
         identity = {
             "market_date": context.market_date.isoformat(),
@@ -467,9 +455,7 @@ class PilotProductionStages:
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        report_id = (
-            f"pilot-{context.market_date.isoformat()}-{digest[:16]}"
-        )
+        report_id = f"pilot-{context.market_date.isoformat()}-{digest[:16]}"
         publication = ReportPublisher(
             self.report_repository,
             self.data_dir / "reports",
@@ -480,19 +466,14 @@ class PilotProductionStages:
             event_cutoff_at=context.report_cutoff_at,
             generated_at=context.known_at,
             candidate_pools={
-                strategy: list(result.candidates)
-                for strategy, result in results.items()
+                strategy: list(result.candidates) for strategy, result in results.items()
             },
             data_domain_statuses={
                 "market": QualityStatus.VALID,
                 "security_master": QualityStatus.VALID,
                 "pilot_universe": QualityStatus.VALID,
                 "manifest": QualityStatus.VALID,
-                "financials": (
-                    QualityStatus.VALID
-                    if fact_count > 0
-                    else QualityStatus.MISSING
-                ),
+                "financials": (QualityStatus.VALID if fact_count > 0 else QualityStatus.MISSING),
                 "actions": (
                     QualityStatus.VALID
                     if quality_summary["corporate_action_count"]
@@ -510,14 +491,21 @@ class PilotProductionStages:
                 if result.evidence is not None
             },
             strategy_versions={
-                strategy: definition.version
-                for strategy, definition in _DEFINITIONS.items()
+                strategy: definition.version for strategy, definition in _DEFINITIONS.items()
             },
-            source_records=(),
-            pool_readiness={
-                strategy: result.readiness
-                for strategy, result in results.items()
-            },
+            source_records=self._report_source_records(
+                context,
+                universe,
+                manifest,
+                referenced_ids=frozenset(
+                    source_id
+                    for result in results.values()
+                    for candidate in result.candidates
+                    for factor in candidate.factor_details
+                    for source_id in factor.source_record_ids
+                ),
+            ),
+            pool_readiness={strategy: result.readiness for strategy, result in results.items()},
             universe_id=universe.universe_id,
             report_cutoff_at=context.report_cutoff_at,
             known_at=context.known_at,
@@ -540,15 +528,9 @@ class PilotProductionStages:
             "pdf_used_count": pdf_count,
             "fallback_reason_counts": {},
             "financial_fact_count": fact_count,
-            "corporate_action_count": quality_summary[
-                "corporate_action_count"
-            ],
-            "share_capital_count": quality_summary[
-                "share_capital_count"
-            ],
-            "derived_metric_count": quality_summary[
-                "derived_metric_count"
-            ],
+            "corporate_action_count": quality_summary["corporate_action_count"],
+            "share_capital_count": quality_summary["share_capital_count"],
+            "derived_metric_count": quality_summary["derived_metric_count"],
             "pool_coverage": {
                 strategy.value: str(result.readiness.coverage_ratio)
                 for strategy, result in results.items()
@@ -558,8 +540,7 @@ class PilotProductionStages:
                 for strategy, result in results.items()
             },
             "pool_candidate_counts": {
-                strategy.value: len(result.candidates)
-                for strategy, result in results.items()
+                strategy.value: len(result.candidates) for strategy, result in results.items()
             },
         }
 
@@ -587,9 +568,7 @@ class PilotProductionStages:
         digest = hashlib.sha256(encoded).hexdigest()
         root = self.data_dir / "run_summaries"
         root.mkdir(parents=True, exist_ok=True)
-        target = root / (
-            f"pilot-{context.market_date.isoformat()}-{digest}.json"
-        )
+        target = root / (f"pilot-{context.market_date.isoformat()}-{digest}.json")
         if target.exists() and target.read_bytes() != encoded:
             raise ValueError("PILOT_RUN_SUMMARY_IMMUTABILITY_CONFLICT")
         if not target.exists():
@@ -601,9 +580,7 @@ class PilotProductionStages:
         }
 
     def _universe(self, context: PilotStageContext):
-        universe = self.pilot_repository.get_universe_for_date(
-            context.market_date
-        )
+        universe = self.pilot_repository.get_universe_for_date(context.market_date)
         if universe is None:
             raise ValueError("PILOT_UNIVERSE_NOT_FOUND")
         if universe.report_cutoff_at != context.report_cutoff_at:
@@ -618,7 +595,7 @@ class PilotProductionStages:
         hard_filters = (
             self.hard_filter_provider(context, universe)  # type: ignore[operator]
             if self.hard_filter_provider is not None
-            else self._production_hard_filters(universe)
+            else self._production_hard_filters(universe, context)
         )
         inputs = PilotStrategyInputBuilder().build(
             universe,
@@ -639,6 +616,7 @@ class PilotProductionStages:
     def _production_hard_filters(
         self,
         universe: object,
+        context: PilotStageContext,
     ) -> dict[str, HardFilterResult]:
         manifest = self.pilot_repository.list_manifest(
             universe.universe_id  # type: ignore[attr-defined]
@@ -651,19 +629,50 @@ class PilotProductionStages:
         results: dict[str, HardFilterResult] = {}
         for member in universe.members:  # type: ignore[attr-defined]
             risk = risk_items.get(member.ts_code)
-            passed = bool(
+            usable_manifest = bool(
                 risk is not None
                 and risk.status is AcquisitionStatus.INGESTED
-                and risk.quality_status
-                in {QualityStatus.VALID, QualityStatus.DERIVED}
+                and risk.quality_status in {QualityStatus.VALID, QualityStatus.DERIVED}
             )
+            screen = (
+                self.risk_repository.visible_screen(
+                    member.ts_code,
+                    as_of=context.report_cutoff_at,
+                    known_at=context.known_at,
+                )
+                if usable_manifest
+                else None
+            )
+            reasons: list[str] = []
+            if screen is None or screen.quality_status not in {
+                QualityStatus.VALID,
+                QualityStatus.DERIVED,
+            }:
+                reasons.append("HF-RISK-SCREEN-MISSING")
+            else:
+                if screen.delisting_risk:
+                    reasons.append("HF-02")
+                if screen.st_status is not None:
+                    reasons.append("HF-03")
+                if screen.is_suspended:
+                    reasons.append("HF-04")
+                if not screen.audit_opinion_standard:
+                    reasons.append("HF-07")
+                if screen.major_investigation_open:
+                    reasons.append("HF-08")
+                if not screen.publication_order_known:
+                    reasons.append("HF-11")
             results[member.ts_code] = HardFilterResult(
-                passed=passed,
-                reasons=() if passed else ("HF-RISK-SCREEN-MISSING",),
+                passed=not reasons,
+                reasons=tuple(reasons),
                 filter_version="pilot-official-risk-screen-v1",
                 source_record_ids=(
-                    (*member.evidence_record_ids, risk.item_id)
-                    if risk is not None
+                    (
+                        *member.evidence_record_ids,
+                        risk.item_id,
+                        screen.record_id,
+                    )
+                    if risk is not None and screen is not None
                     else member.evidence_record_ids
                 ),
             )
@@ -694,8 +703,7 @@ class PilotProductionStages:
         results: Mapping[str, PilotMetricResult],
     ) -> int:
         return sum(
-            metric.value is not None
-            and metric.quality_status is QualityStatus.DERIVED
+            metric.value is not None and metric.quality_status is QualityStatus.DERIVED
             for result in results.values()
             for metric in result.metrics.values()
         )
@@ -725,13 +733,9 @@ class PilotProductionStages:
                 ).fetchall()
         except sqlite3.Error:
             return 0, 0
-        xbrl = (
-            (int(row[0]), int(row[1]))
-            if row is not None
-            else (0, 0)
-        )
+        xbrl = (int(row[0]), int(row[1])) if row is not None else (0, 0)
         pdf_fact_count = 0
-        for raw_payload, in pdf_rows:
+        for (raw_payload,) in pdf_rows:
             try:
                 payload = json.loads(str(raw_payload))
             except json.JSONDecodeError:
@@ -746,9 +750,7 @@ class PilotProductionStages:
             raise ValueError("PILOT_TABLE_NOT_ALLOWED")
         try:
             with sqlite3.connect(self.state.path) as connection:
-                row = connection.execute(
-                    f"SELECT COUNT(*) FROM {table}"
-                ).fetchone()
+                row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
         except sqlite3.Error:
             return 0
         return int(row[0]) if row is not None else 0
@@ -757,23 +759,247 @@ class PilotProductionStages:
     def _status_distribution(
         manifest: tuple[AcquisitionManifestItem, ...],
     ) -> dict[str, int]:
-        return dict(
-            sorted(
-                Counter(item.status.value for item in manifest).items()
-            )
-        )
+        return dict(sorted(Counter(item.status.value for item in manifest).items()))
 
     @staticmethod
     def _manual_todo_count(
         manifest: tuple[AcquisitionManifestItem, ...],
     ) -> int:
         return sum(
-            item.status not in {
+            item.status
+            not in {
                 AcquisitionStatus.INGESTED,
                 AcquisitionStatus.REJECTED,
             }
             for item in manifest
         )
+
+    def _report_source_records(
+        self,
+        context: PilotStageContext,
+        universe: PilotUniverseSnapshot,
+        manifest: tuple[AcquisitionManifestItem, ...],
+        *,
+        referenced_ids: frozenset[str] | None = None,
+    ) -> tuple[ReportSource, ...]:
+        source_names = {
+            "cninfo": "巨潮资讯",
+            "sse": "上海证券交易所",
+            "szse": "深圳证券交易所",
+        }
+        domains = {
+            DocumentKind.PERIODIC_REPORT: "financials",
+            DocumentKind.DIVIDEND_RECORD: "actions",
+            DocumentKind.CAPITAL_ACTION_TIMELINE: "actions",
+            DocumentKind.RISK_SCREEN: "risk",
+        }
+        records: dict[str, ReportSource] = {}
+
+        def add(source: ReportSource) -> None:
+            existing = records.get(source.record_id)
+            if existing is not None and existing != source:
+                raise ValueError("PILOT_REPORT_SOURCE_CONFLICT")
+            records[source.record_id] = source
+
+        def source_name(source_id: str) -> str:
+            return source_names.get(source_id, source_id)
+
+        def add_fact_source(
+            *,
+            record_id: str,
+            domain: str,
+            source_id: str,
+            source_url: object,
+            published_at: datetime | None,
+            effective_at: datetime | None,
+            collected_at: datetime,
+            valid_from: datetime,
+            version: str,
+            license_policy: str,
+            quality_status: QualityStatus,
+        ) -> None:
+            if referenced_ids is not None and record_id not in referenced_ids:
+                return
+            if quality_status not in {QualityStatus.VALID, QualityStatus.DERIVED}:
+                return
+            add(
+                ReportSource.model_validate(
+                    {
+                        "record_id": record_id,
+                        "domain": domain,
+                        "source_name": source_name(source_id),
+                        "source_url": source_url,
+                        "published_at": published_at,
+                        "effective_at": effective_at,
+                        "collected_at": collected_at,
+                        "valid_from": valid_from,
+                        "version": version,
+                        "license_policy": license_policy,
+                        "quality_status": quality_status,
+                    }
+                )
+            )
+
+        for item in manifest:
+            if (
+                item.status is not AcquisitionStatus.INGESTED
+                or item.source_url is None
+                or item.collected_at is None
+                or item.version is None
+                or item.quality_status
+                not in {QualityStatus.VALID, QualityStatus.DERIVED}
+            ):
+                continue
+            add(
+                ReportSource(
+                    record_id=item.item_id,
+                    domain=domains[item.document_kind],
+                    source_name=source_name(item.source_id),
+                    source_url=item.source_url,
+                    published_at=item.published_at,
+                    effective_at=item.effective_at,
+                    collected_at=item.collected_at,
+                    valid_from=item.collected_at,
+                    version=item.version,
+                    license_policy="personal-non-commercial-official-public-attachment",
+                    quality_status=item.quality_status,
+                )
+            )
+
+        bars = {
+            str(bar["ts_code"]): bar
+            for bar in self.market_warehouse.read_bars(context.market_date)
+        }
+        master = self.state.get_security_master_universe()
+        components = {
+            security.ts_code: component
+            for component in master.components
+            for security in component.securities
+        }
+        for member in universe.members:
+            bar = bars.get(member.ts_code)
+            if bar is not None:
+                for record_id in (
+                    str(bar["record_id"]),
+                    (
+                        f"closing-price:{context.market_date.isoformat()}:"
+                        f"{member.ts_code}"
+                    ),
+                ):
+                    add_fact_source(
+                        record_id=record_id,
+                        domain="market",
+                        source_id=str(bar["source_id"]),
+                        source_url=bar["source_url"],
+                        published_at=bar.get("published_at"),
+                        effective_at=bar.get("effective_at"),
+                        collected_at=bar["collected_at"],
+                        valid_from=bar["valid_from"],
+                        version=str(bar["version"]),
+                        license_policy=str(bar["license_policy"]),
+                        quality_status=QualityStatus(str(bar["quality_status"])),
+                    )
+            component = components.get(member.ts_code)
+            if component is not None:
+                add_fact_source(
+                    record_id=(
+                        f"security-master:{master.universe_hash}:{member.ts_code}"
+                    ),
+                    domain="security_master",
+                    source_id=component.source_id,
+                    source_url=component.source_url,
+                    published_at=None,
+                    effective_at=None,
+                    collected_at=component.collected_at,
+                    valid_from=component.collected_at,
+                    version=component.version,
+                    license_policy="official-public-structured-personal-research",
+                    quality_status=master.quality_status,
+                )
+
+            for period in PILOT_FINANCIAL_PERIODS:
+                xbrl = self.financial_query.query_financial_facts(
+                    ts_code=member.ts_code,
+                    report_period=period,
+                    canonical_fact_names=CANONICAL_PILOT_FACTS,
+                    as_of=context.report_cutoff_at,
+                    known_at=context.known_at,
+                )
+                for fact in xbrl.facts:
+                    add_fact_source(
+                        record_id=str(fact["fact_id"]),
+                        domain="financials",
+                        source_id=str(fact["source_id"]),
+                        source_url=fact["source_url"],
+                        published_at=fact["published_at"],
+                        effective_at=fact["effective_at"],
+                        collected_at=fact["collected_at"],
+                        valid_from=fact["valid_from"],
+                        version=str(fact["version"]),
+                        license_policy=str(fact["license_policy"]),
+                        quality_status=QualityStatus(str(fact["quality_status"])),
+                    )
+                for document in self.pdf_repository.visible_documents(
+                    member.ts_code,
+                    period,
+                    as_of=context.report_cutoff_at,
+                    known_at=context.known_at,
+                ):
+                    for fact_name in document.facts:
+                        add_fact_source(
+                            record_id=f"{document.filing_id}:{fact_name}",
+                            domain="financials",
+                            source_id=document.source_id,
+                            source_url=document.source_url,
+                            published_at=document.published_at,
+                            effective_at=None,
+                            collected_at=document.valid_from,
+                            valid_from=document.valid_from,
+                            version=document.version,
+                            license_policy=(
+                                "official-public-attachment-personal-research"
+                            ),
+                            quality_status=document.quality_status,
+                        )
+
+            for action in self.action_repository.visible_actions(
+                member.ts_code,
+                context.report_cutoff_at,
+                context.known_at,
+            ):
+                add_fact_source(
+                    record_id=action.record_id,
+                    domain="actions",
+                    source_id=action.source_id,
+                    source_url=action.source_url,
+                    published_at=action.published_at,
+                    effective_at=None,
+                    collected_at=action.collected_at,
+                    valid_from=action.valid_from,
+                    version=action.version,
+                    license_policy=action.license_policy,
+                    quality_status=action.quality_status,
+                )
+            screen = self.risk_repository.visible_screen(
+                member.ts_code,
+                as_of=context.report_cutoff_at,
+                known_at=context.known_at,
+            )
+            if screen is not None:
+                add_fact_source(
+                    record_id=screen.record_id,
+                    domain="risk",
+                    source_id=screen.source_id,
+                    source_url=screen.source_url,
+                    published_at=screen.published_at,
+                    effective_at=screen.effective_at,
+                    collected_at=screen.collected_at,
+                    valid_from=screen.valid_from,
+                    version=screen.version,
+                    license_policy=screen.license_policy,
+                    quality_status=screen.quality_status,
+                )
+        return tuple(records[key] for key in sorted(records))
 
 
 __all__ = ["PilotProductionStages"]

@@ -57,6 +57,11 @@ _ALIASES = {
     "负债合计": "total_liabilities",
     "流动负债合计": "current_liabilities",
     "有息负债": "interest_bearing_debt",
+    "短期借款": "short_term_borrowings",
+    "一年内到期的非流动负债": "current_portion_noncurrent_liabilities",
+    "长期借款": "long_term_borrowings",
+    "应付债券": "bonds_payable",
+    "租赁负债": "lease_liabilities",
     "所有者权益合计": "equity",
     "股东权益合计": "equity",
     "所有者权益（或股东权益）合计": "equity",
@@ -79,6 +84,18 @@ _ALIASES = {
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
 }
+_INTEREST_BEARING_DEBT_COMPONENTS = frozenset(
+    {
+        "short_term_borrowings",
+        "current_portion_noncurrent_liabilities",
+        "long_term_borrowings",
+        "bonds_payable",
+        "lease_liabilities",
+    }
+)
+_INTEREST_BEARING_DEBT_DERIVATION_VERSION = (
+    "interest-bearing-debt-components-v1"
+)
 _CASH_FLOW_RECONCILIATION = (
     "operating_cash_flow",
     "investing_cash_flow",
@@ -115,6 +132,7 @@ class PdfExtractionResult:
     issues: tuple[str, ...]
     parser_version: str
     pdf_content_hash: str
+    derivations: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 class CninfoPdfExtractor:
@@ -146,7 +164,7 @@ class CninfoPdfExtractor:
             reader = self.reader_factory(pdf_path)
             pages = [
                 (
-                    int(getattr(page, "page_number", index)),
+                    _physical_page_number(page, index),
                     page.extract_text(),
                 )
                 for index, page in enumerate(reader.pages, start=1)
@@ -225,6 +243,32 @@ class CninfoPdfExtractor:
                     pending_label = ""
                     continue
 
+                blank_debt_component = _blank_debt_component(line)
+                if (
+                    blank_debt_component is not None
+                    and statement_type is StatementType.BALANCE_SHEET
+                    and unit is not None
+                ):
+                    currency, multiplier = unit
+                    if currency != "CNY":
+                        recognized_fact_line_without_unit = True
+                        continue
+                    candidates.append(
+                        PdfFactCandidate(
+                            canonical_fact_name=blank_debt_component,
+                            value=Decimal(0),
+                            unit_multiplier=multiplier,
+                            currency=currency,
+                            page_number=page_number,
+                            statement_type=statement_type,
+                            source_text_hash=hashlib.sha256(
+                                raw_line.strip().encode("utf-8")
+                            ).hexdigest(),
+                        )
+                    )
+                    pending_label = ""
+                    continue
+
                 parsed_line = _parse_fact_line(line)
                 if parsed_line is None and pending_label:
                     parsed_line = _parse_fact_line(f"{pending_label} {line}")
@@ -285,11 +329,55 @@ class CninfoPdfExtractor:
                 continue
             facts[name] = name_candidates[0].value
 
+        derivations: tuple[tuple[str, tuple[str, ...]], ...] = ()
+        if (
+            "interest_bearing_debt" not in facts
+            and _INTEREST_BEARING_DEBT_COMPONENTS.issubset(facts)
+        ):
+            component_names = tuple(
+                sorted(_INTEREST_BEARING_DEBT_COMPONENTS)
+            )
+            component_candidates = [
+                grouped[name][0] for name in component_names
+            ]
+            combined_hash = hashlib.sha256(
+                "\n".join(
+                    f"{candidate.canonical_fact_name}:"
+                    f"{candidate.source_text_hash}"
+                    for candidate in component_candidates
+                ).encode("utf-8")
+            ).hexdigest()
+            debt_value = sum(
+                (facts[name] for name in component_names),
+                Decimal(0),
+            )
+            derived_candidate = PdfFactCandidate(
+                canonical_fact_name="interest_bearing_debt",
+                value=debt_value,
+                unit_multiplier=Decimal(1),
+                currency="CNY",
+                page_number=min(
+                    candidate.page_number
+                    for candidate in component_candidates
+                ),
+                statement_type=StatementType.BALANCE_SHEET,
+                source_text_hash=combined_hash,
+            )
+            candidates.append(derived_candidate)
+            facts["interest_bearing_debt"] = debt_value
+            derivations = (("interest_bearing_debt", component_names),)
+
         if not CANONICAL_PILOT_FACTS.issubset(facts):
             issues.add("PDF_REQUIRED_FACTS_MISSING")
         self._validate_balance(facts, issues)
         self._validate_cash_flow(facts, issues)
-        return self._result(tuple(candidates), issues, pdf_content_hash, facts)
+        return self._result(
+            tuple(candidates),
+            issues,
+            pdf_content_hash,
+            facts,
+            derivations,
+        )
 
     def build_document(
         self,
@@ -320,6 +408,20 @@ class CninfoPdfExtractor:
                 parser_version=extracted.parser_version,
                 pdf_content_hash=extracted.pdf_content_hash,
             )
+        normalization_metadata = {
+            "parser_version": extracted.parser_version,
+            "pdf_content_hash": extracted.pdf_content_hash,
+            "report_period": descriptor.report_period.isoformat(),
+            "report_type": descriptor.report_type.value,
+        }
+        derivations = dict(extracted.derivations)
+        if "interest_bearing_debt" in derivations:
+            normalization_metadata[
+                "interest_bearing_debt_derivation_version"
+            ] = _INTEREST_BEARING_DEBT_DERIVATION_VERSION
+            normalization_metadata["interest_bearing_debt_components"] = (
+                ",".join(derivations["interest_bearing_debt"])
+            )
         return FinancialDocument(
             filing_id=filing_id,
             ts_code=descriptor.ts_code,
@@ -334,12 +436,7 @@ class CninfoPdfExtractor:
             supersedes_id=supersedes_id,
             quality_status=extracted.quality_status,
             facts=extracted.facts,
-            normalization_metadata={
-                "parser_version": extracted.parser_version,
-                "pdf_content_hash": extracted.pdf_content_hash,
-                "report_period": descriptor.report_period.isoformat(),
-                "report_type": descriptor.report_type.value,
-            },
+            normalization_metadata=normalization_metadata,
             fact_lineage=lineage,
         )
 
@@ -386,6 +483,7 @@ class CninfoPdfExtractor:
         issues: set[str],
         pdf_content_hash: str,
         facts: dict[str, Decimal] | None = None,
+        derivations: tuple[tuple[str, tuple[str, ...]], ...] = (),
     ) -> PdfExtractionResult:
         ordered_issues = tuple(sorted(issues))
         return PdfExtractionResult(
@@ -408,6 +506,7 @@ class CninfoPdfExtractor:
             issues=ordered_issues,
             parser_version=self.parser_version,
             pdf_content_hash=pdf_content_hash,
+            derivations=derivations,
         )
 
 
@@ -467,6 +566,14 @@ def _could_be_alias_prefix(label: str) -> bool:
     )
 
 
+def _blank_debt_component(line: str) -> str | None:
+    normalized = _normalize_label(line)
+    canonical = _ALIASES.get(normalized)
+    if canonical in _INTEREST_BEARING_DEBT_COMPONENTS:
+        return canonical
+    return None
+
+
 def _period_matches(
     text: str,
     explicit_periods: set[str],
@@ -480,6 +587,18 @@ def _period_matches(
         rf"{period.year}\s*年\s*{period.month}\s*月\s*{period.day}\s*日"
     )
     return visible_date.search(text) is not None
+
+
+def _physical_page_number(page: object, enumeration_index: int) -> int:
+    declared = getattr(page, "page_number", None)
+    if declared is None:
+        return enumeration_index
+    page_number = int(declared)
+    return (
+        page_number + 1
+        if page_number == enumeration_index - 1
+        else page_number
+    )
 
 
 __all__ = [

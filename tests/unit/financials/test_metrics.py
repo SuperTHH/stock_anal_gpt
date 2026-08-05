@@ -338,6 +338,9 @@ def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:
     assert result.metrics["cash_debt_coverage"].value == Decimal("0.5")
     assert result.metrics["free_cash_flow"].value == Decimal("120")
     assert result.metrics["market_cap"].value == Decimal("2400")
+    assert "closing-price:2026-07-29:699999.SH" in result.metrics[
+        "market_cap"
+    ].input_fact_ids
     assert result.metrics["pe"].value == Decimal("20")
     assert result.metrics["pb"].value == Decimal("3")
     assert result.metrics["fcf_yield"].value == Decimal("0.05")
