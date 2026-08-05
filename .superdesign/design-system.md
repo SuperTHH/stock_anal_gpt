@@ -187,7 +187,10 @@ Never use “立即买入”, “稳赚”, “强烈推荐”, or certainty lan
 
 ## 12. Prototype sample-data policy
 
-The prototype may use realistic Chinese stock codes, metrics, and dates to demonstrate density, but must display “原型示例数据” near the top-level date/status and in any detailed drawer. It must not imply that the figures are current or actionable.
+This policy applies only to unlabeled exploratory prototype states. A dated official-data
+snapshot must not mix in realistic sample stocks or display the “原型示例数据” label.
+The dated data-refresh state below supersedes this prototype policy for the delivered
+2026-07-22 daily overview.
 
 ## 13. Pixel-review corrections (supersedes conflicting layout guidance)
 
@@ -199,4 +202,28 @@ These requirements are mandatory for the revised daily overview.
 4. Content-sized event region: the official-event panel and adjacent right-hand stack align to their own content start and must not stretch to equal heights. Avoid a large empty tail below the final event. Keep observation/checkpoint content below as an independent full-width region where needed.
 5. Chinese-only audit footer: replace `(Internal Rules Only)` with `仅内部规则校验`; no residual English appears in this footer phrase.
 
-Acceptance checks: no horizontal overflow at 1440, 1280, or 1100 px; all key action targets remain 32 px high; the three strategy pools stay equal-height and independent; the official fact/system inference distinction, traceability, risk scale, prototype-data label, flat square geometry, warm-paper palette, and market-color semantics remain unchanged.
+Acceptance checks: no horizontal overflow at 1440, 1280, or 1100 px; all key action targets remain 32 px high; the three strategy pools stay equal-height and independent; the official fact/system inference distinction, source traceability, blocked-risk state, flat square geometry, warm-paper palette, and market-color semantics remain unchanged.
+
+## 2026-07-22 data-refresh state
+
+- Header badge = 官方数据快照
+- Report state = 市场概况可用 · 策略候选榜未生成
+- Coverage = 交易所概况 2/2 · 策略池 0/3
+- Each strategy module = 本交易日候选榜未生成 + 查看缺失数据
+- Risk module = 风险评分未计算
+- Forbidden legacy copy = 2024-05-24, 原型示例数据, 99.4%, candidate names, 0-100 risk bars
+- Header provenance action = 来源溯源 → #market-sources
+- Market metric sources = 上交所市场概况, 深交所市场概况, 上证指数行情/趋势
+- SSE close provenance note = 上证指数收盘 3,867.03 由次日昨收推导
+
+## Research workflow four-page supplement
+
+- Base draft: 1721cd00-0df1-404d-a6d4-7b823086f1ff
+- Flow pages: 策略候选池, 个股研究, 官方事件流, 数据质量与来源
+- Demo-only pages: 策略候选池, 个股研究
+- Demo watermark: 功能演示数据 · 虚构标的 · 非实时
+- Real-only pages: 每日总览, 官方事件流, 数据质量与来源
+- Demo facts never change real coverage, event count, data readiness, or strategy-blocked status.
+- Candidate and stock pages are linked after Flow generation using the exact returned preview URLs.
+- Candidate state is restored through sessionStorage plus browser history where the generated preview environment permits it.
+- All pages use one 420–480 px provenance-drawer pattern.

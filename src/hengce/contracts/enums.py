@@ -1,0 +1,120 @@
+from enum import StrEnum
+
+
+class QualityStatus(StrEnum):
+    VALID = "VALID"
+    DERIVED = "DERIVED"
+    PARTIAL = "PARTIAL"
+    MISSING = "MISSING"
+    CONFLICT = "CONFLICT"
+    STALE = "STALE"
+    UNVERIFIED = "UNVERIFIED"
+    REJECTED = "REJECTED"
+
+
+class ReviewStatus(StrEnum):
+    APPROVED = "APPROVED"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    REJECTED = "REJECTED"
+
+
+class RunStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+
+
+class ReportType(StrEnum):
+    ANNUAL = "ANNUAL"
+    Q1 = "Q1"
+    HALF_YEAR = "HALF_YEAR"
+    Q3 = "Q3"
+
+
+class StatementType(StrEnum):
+    BALANCE_SHEET = "BALANCE_SHEET"
+    INCOME_STATEMENT = "INCOME_STATEMENT"
+    CASH_FLOW = "CASH_FLOW"
+    OTHER = "OTHER"
+
+
+class MappingStatus(StrEnum):
+    MAPPED = "MAPPED"
+    UNMAPPED = "UNMAPPED"
+
+
+class ConsolidationScope(StrEnum):
+    CONSOLIDATED = "CONSOLIDATED"
+    PARENT = "PARENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class DiscoveryMethod(StrEnum):
+    FIXTURE = "FIXTURE"
+    MANUAL_IMPORT = "MANUAL_IMPORT"
+    PUBLIC_PAGE = "PUBLIC_PAGE"
+
+
+class AcquisitionStatus(StrEnum):
+    PLANNED = "PLANNED"
+    DISCOVERED = "DISCOVERED"
+    DOWNLOADED = "DOWNLOADED"
+    VERIFIED = "VERIFIED"
+    INGESTED = "INGESTED"
+    AWAITING_MANUAL = "AWAITING_MANUAL"
+    REJECTED = "REJECTED"
+
+
+class DocumentKind(StrEnum):
+    PERIODIC_REPORT = "PERIODIC_REPORT"
+    DIVIDEND_RECORD = "DIVIDEND_RECORD"
+    CAPITAL_ACTION_TIMELINE = "CAPITAL_ACTION_TIMELINE"
+    RISK_SCREEN = "RISK_SCREEN"
+
+
+class PoolReadinessStatus(StrEnum):
+    READY = "READY"
+    BLOCKED = "BLOCKED"
+
+
+class ConflictResolutionStatus(StrEnum):
+    OPEN = "OPEN"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class ActionType(StrEnum):
+    CASH_DIVIDEND = "CASH_DIVIDEND"
+    STOCK_DIVIDEND = "STOCK_DIVIDEND"
+    SPLIT = "SPLIT"
+    RIGHTS_ISSUE = "RIGHTS_ISSUE"
+    BUYBACK_CANCELLATION = "BUYBACK_CANCELLATION"
+
+
+class ActionStatus(StrEnum):
+    ANNOUNCED = "ANNOUNCED"
+    IMPLEMENTED = "IMPLEMENTED"
+    CANCELLED = "CANCELLED"
+
+
+class StrategyType(StrEnum):
+    QUALITY_GROWTH = "QUALITY_GROWTH"
+    DEEP_VALUE = "DEEP_VALUE"
+    STABLE_DIVIDEND = "STABLE_DIVIDEND"
+
+
+class CandidateStatus(StrEnum):
+    CANDIDATE = "CANDIDATE"
+    WATCH = "WATCH"
+    NOT_QUALIFIED = "NOT_QUALIFIED"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+
+
+class ReportStatus(StrEnum):
+    PUBLISHED = "PUBLISHED"
+    PUBLISHED_PARTIAL = "PUBLISHED_PARTIAL"
+    BLOCKED_MISSING_DATA = "BLOCKED_MISSING_DATA"
+    BLOCKED_QUALITY_FAILURE = "BLOCKED_QUALITY_FAILURE"
+    NOT_A_TRADING_DAY = "NOT_A_TRADING_DAY"

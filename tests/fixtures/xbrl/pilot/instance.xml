@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- FIXTURE DATA - NOT A REAL ISSUER -->
+<xbrli:xbrl
+  xmlns:xbrli="http://www.xbrl.org/2003/instance"
+  xmlns:link="http://www.xbrl.org/2003/linkbase"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+  xmlns:p="urn:hengce:pilot-gaap">
+  <link:schemaRef xlink:type="simple" xlink:href="pilot-gaap.xsd"/>
+  <xbrli:context id="instant">
+    <xbrli:entity>
+      <xbrli:identifier scheme="urn:hengce:pilot-fixture">699998.SH</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="duration">
+    <xbrli:entity>
+      <xbrli:identifier scheme="urn:hengce:pilot-fixture">699998.SH</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:unit id="CNY"><xbrli:measure>iso4217:CNY</xbrli:measure></xbrli:unit>
+  <xbrli:unit id="shares"><xbrli:measure>xbrli:shares</xbrli:measure></xbrli:unit>
+  <p:Revenue contextRef="duration" unitRef="CNY" decimals="0">1000</p:Revenue>
+  <p:OperatingCost contextRef="duration" unitRef="CNY" decimals="0">600</p:OperatingCost>
+  <p:NetProfit contextRef="duration" unitRef="CNY" decimals="0">180</p:NetProfit>
+  <p:AdjustedNetProfit contextRef="duration" unitRef="CNY" decimals="0">170</p:AdjustedNetProfit>
+  <p:OperatingCashFlow contextRef="duration" unitRef="CNY" decimals="0">220</p:OperatingCashFlow>
+  <p:CapitalExpenditure contextRef="duration" unitRef="CNY" decimals="0">50</p:CapitalExpenditure>
+  <p:TotalAssets contextRef="instant" unitRef="CNY" decimals="0">2000</p:TotalAssets>
+  <p:CurrentAssets contextRef="instant" unitRef="CNY" decimals="0">1200</p:CurrentAssets>
+  <p:CashAndEquivalents contextRef="instant" unitRef="CNY" decimals="0">300</p:CashAndEquivalents>
+  <p:TotalLiabilities contextRef="instant" unitRef="CNY" decimals="0">800</p:TotalLiabilities>
+  <p:CurrentLiabilities contextRef="instant" unitRef="CNY" decimals="0">500</p:CurrentLiabilities>
+  <p:InterestBearingDebt contextRef="instant" unitRef="CNY" decimals="0">250</p:InterestBearingDebt>
+  <p:Equity contextRef="instant" unitRef="CNY" decimals="0">1200</p:Equity>
+  <p:InterestExpense contextRef="duration" unitRef="CNY" decimals="0">20</p:InterestExpense>
+  <p:TotalShares contextRef="instant" unitRef="shares" decimals="0">100</p:TotalShares>
+</xbrli:xbrl>

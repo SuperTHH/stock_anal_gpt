@@ -1,0 +1,291 @@
+# 真实数据最小闭环操作手册
+
+## 1. 范围与安全边界
+
+本手册只适用于个人、非商业的本地研究。固定市场日期为 `2026-07-22`，报告截止时间为
+`2026-07-22T21:30:00+08:00`，试点样本必须恰好为 30 只且板块配额为
+`8/8/7/7`。三个策略池独立验收；任何池覆盖率低于 80% 时，该池必须显示
+`BLOCKED` 且不得发布候选排名。
+
+禁止把以下内容提交到 Git：
+
+- `.env` 或任何 Token；
+- `data/manual_inbox/` 中的真实附件和侧车；
+- `data/state/` 中的 SQLite；
+- `data/raw/`、`data/warehouse/`、`data/normalized/` 中的 Raw 或 Parquet；
+- `data/reports/`、`data/backups/`、`data/run_summaries/` 中的报告、备份和运行摘要。
+
+所有命令都从仓库根目录运行。示例中的尖括号内容是占位符，不是可直接使用的真实值。
+
+## 2. 安全检查 `.env` 与 Tushare Token
+
+下面的检查只输出“是否存在”，不打印 Token 值：
+
+```powershell
+if (-not (Test-Path -LiteralPath '.env')) {
+  throw '缺少 .env；请先在本机创建，不要提交到 Git'
+}
+$tokenConfigured = [bool](
+  Get-Content -LiteralPath '.env' |
+    Where-Object { $_ -match '^HENGCE_TUSHARE_TOKEN=.+$' }
+)
+if (-not $tokenConfigured) {
+  throw 'HENGCE_TUSHARE_TOKEN 未配置'
+}
+'Tushare Token configuration present'
+```
+
+不要运行会回显 `.env` 全文、环境变量值或命令历史中 Token 的命令。
+
+## 3. 验证行情与双交易所主数据
+
+确认本地状态库已迁移：
+
+```powershell
+.venv\Scripts\hengce.exe init-state --data-dir data
+```
+
+主数据必须同时包含上交所和深交所快照：
+
+```powershell
+.venv\Scripts\hengce.exe check-security-universe --data-dir data
+```
+
+输出只应包含聚合数量、两份来源版本和 `universe_hash`。然后确认
+`2026-07-22` 行情分区存在；此命令只列文件元数据，不读取或打印行级行情：
+
+```powershell
+$marketPartition = Get-ChildItem -LiteralPath `
+  'data/normalized/market_bars/trade_date=2026-07-22' `
+  -Filter '*.parquet' -File -ErrorAction Stop
+if ($marketPartition.Count -eq 0) {
+  throw '缺少 2026-07-22 行情分区'
+}
+"2026-07-22 market partitions: $($marketPartition.Count)"
+```
+
+## 4. 首次运行：`manual-only`
+
+第一次必须使用 `manual-only`。该模式不调用公开文件网络采集阶段，只验证输入、冻结
+固定样本并生成 360 项不可变采集清单：
+
+```powershell
+.venv\Scripts\hengce.exe rebuild-pilot-report `
+  --market-date 2026-07-22 `
+  --report-cutoff-at '2026-07-22T21:30:00+08:00' `
+  --acquisition-mode manual-only `
+  --data-dir data
+```
+
+输出只有聚合 JSON：阶段状态、清单状态分布、XBRL/PDF 数量、策略池覆盖率、报告 ID、
+报告哈希和人工待办数量。不会输出 Token、附件内容、候选名称或候选代码。
+
+退出码含义：
+
+- `0`：闭环完成并发布报告；
+- `1`：某一阶段失败，查看聚合 `failed_stage` 与 `error_code`；
+- `2`：存在人工待办且尚未发布报告，这是首次 `manual-only` 的预期失败关闭状态。
+
+样本生成后再次运行相同命令必须复用同一 `universe_id`、清单 ID 和已成功检查点。
+
+## 5. 何时允许 `approved-public`
+
+只有用户针对本次运行明确允许访问白名单公开入口时，才能把参数改为
+`approved-public`：
+
+```powershell
+.venv\Scripts\hengce.exe rebuild-pilot-report `
+  --market-date 2026-07-22 `
+  --report-cutoff-at '2026-07-22T21:30:00+08:00' `
+  --acquisition-mode approved-public `
+  --data-dir data
+```
+
+该模式仍只能使用已批准来源和公开入口；不得调用隐藏接口、绕过验证码、扩大域名或自动
+切换到条款不明的数据源。没有明确许可时继续使用 `manual-only`。
+
+## 6. 查看人工待办与准备收件箱
+
+重新运行 `manual-only` 会复用检查点并输出最新的
+`manifest_status_distribution` 与 `manual_todo_count`。这就是允许对外展示的
+`AWAITING_MANUAL` 聚合清单；不要把股票代码、公告正文或本地路径复制到工单或 Git。
+
+收件箱使用已批准的单层目录。每个附件旁必须放置一个同名 `.json` 侧车；附件名在
+收件箱内必须唯一：
+
+```text
+data/manual_inbox/
+  <UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>
+  <UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>.json
+```
+
+侧车使用以下占位结构；非定期报告的 `report_type` 使用 `null`，无报告期的项目将
+`report_period` 设为 `null`：
+
+```json
+{
+  "item_id": "<MANIFEST_ITEM_ID>",
+  "source_url": "https://<APPROVED_OFFICIAL_DOMAIN>/<OFFICIAL_PATH>",
+  "ts_code": "<SIX_DIGITS.SH_OR_SZ>",
+  "document_kind": "<PERIODIC_REPORT_OR_OTHER_MANIFEST_KIND>",
+  "report_type": "ANNUAL",
+  "report_period": "2025-12-31",
+  "published_at": "<OFFSET_AWARE_ISO_TIME>",
+  "downloaded_at": "<OFFSET_AWARE_ISO_TIME>",
+  "attachment_name": "<UNIQUE_ATTACHMENT_NAME>.<APPROVED_EXTENSION>",
+  "content_type": "<APPROVED_MIME>"
+}
+```
+
+系统自行计算附件哈希和清单版本。侧车身份必须与清单项完全一致，时间必须含 UTC
+偏移，URL 必须通过 `SourcePolicy`。不要编辑数据库状态来跳过校验。
+
+`DIVIDEND_RECORD`、`CAPITAL_ACTION_TIMELINE` 和 `RISK_SCREEN` 还必须在同一个侧车中
+加入经过人工逐项复核的 `evidence`。证据中的 `attachment_sha256` 不是用来覆盖系统
+哈希，而是把复核结果绑定到原附件；两者不一致时附件会退回 `AWAITING_MANUAL`。可用
+以下命令计算占位值，输出哈希但不输出附件正文：
+
+```powershell
+(Get-FileHash -LiteralPath '<PRIVATE_ATTACHMENT_PATH>' -Algorithm SHA256).Hash.ToLowerInvariant()
+```
+
+分红和股本行动使用固定模式 `official-action-evidence-v1`。以下仅为字段结构示例：
+
+```json
+{
+  "evidence": {
+    "schema_version": "official-action-evidence-v1",
+    "attachment_sha256": "<64_LOWERCASE_HEX>",
+    "reviewed_at": "<OFFSET_AWARE_ISO_TIME_NOT_BEFORE_DOWNLOADED_AT>",
+    "extraction_method": "MANUAL_REVIEW",
+    "actions": [
+      {
+        "action_key": "<STABLE_LOCAL_KEY>",
+        "action_type": "CASH_DIVIDEND",
+        "record_date": "<YYYY-MM-DD>",
+        "ex_date": "<YYYY-MM-DD>",
+        "pay_date": "<YYYY-MM-DD_OR_NULL>",
+        "cash_dividend_per_share": "<DECIMAL_OR_NULL>",
+        "cash_dividend_total": "<DECIMAL_OR_NULL>",
+        "fiscal_year": 2025,
+        "stock_dividend_ratio": null,
+        "split_ratio": null,
+        "rights_ratio": null,
+        "rights_price": null,
+        "share_reduction": null,
+        "action_status": "IMPLEMENTED",
+        "supersedes_record_id": null
+      }
+    ]
+  }
+}
+```
+
+`action_type` 只允许 `CASH_DIVIDEND`、`STOCK_DIVIDEND`、`SPLIT`、`RIGHTS_ISSUE`
+和 `BUYBACK_CANCELLATION`；对应数值必须直接来自附件且为正数。更正使用上一版本实际
+生成的 `record_id` 作为 `supersedes_record_id`，不得覆盖旧记录。一个附件中的行动以
+单一事务写入，任一项无效则全部退回人工队列。
+
+风险筛查使用固定模式 `official-risk-screen-v1`：
+
+```json
+{
+  "evidence": {
+    "schema_version": "official-risk-screen-v1",
+    "attachment_sha256": "<64_LOWERCASE_HEX>",
+    "reviewed_at": "<OFFSET_AWARE_ISO_TIME_NOT_BEFORE_DOWNLOADED_AT>",
+    "extraction_method": "MANUAL_REVIEW",
+    "audit_opinion_standard": true,
+    "major_investigation_open": false,
+    "delisting_risk": false,
+    "st_status": null,
+    "is_suspended": false,
+    "publication_order_known": true,
+    "supersedes_record_id": null
+  }
+}
+```
+
+所有风险字段都必须由官方附件明确支持。缺字段、模式版本不符、未来复核时间或附件哈希
+不符均失败关闭；系统不会因为“附件存在”就默认通过硬过滤。
+
+准备完成后用完全相同的市场日期、截止时间和采集模式重新运行；系统复用不可变样本、
+清单和已经验证的 Raw 对象。
+
+## 7. 启动本地 API 与 UI
+
+API 只允许绑定回环地址。先在终端 A 启动只读 API：
+
+```powershell
+$env:HENGCE_DATA_DIR = (Resolve-Path -LiteralPath 'data').Path
+.venv\Scripts\python.exe -m uvicorn hengce.api.local:app `
+  --host 127.0.0.1 `
+  --port 8000
+```
+
+再在终端 B 启动前端：
+
+```powershell
+Set-Location apps/web
+npm.cmd run dev -- --host 127.0.0.1 --port 4173
+```
+
+打开 `http://127.0.0.1:4173/`。真实模式不得出现演示水印或虚构候选；无已发布报告时
+必须显示明确错误。演示能力只能通过 `http://127.0.0.1:4173/?demo=1` 单独访问。
+
+## 8. 聚合验收、备份恢复与故障续跑
+
+只读验收器：
+
+```powershell
+.venv\Scripts\hengce.exe validate-pilot-report `
+  --market-date 2026-07-22 `
+  --report-cutoff-at '2026-07-22T21:30:00+08:00' `
+  --data-dir data
+```
+
+通过时退出码为 `0`；任何配额、清单、哈希、latest 指针、API 报告 ID、候选谱系或
+忽略规则错误都会返回聚合错误码并以 `1` 退出。输出不含候选明细。
+
+每次重建会先把 SQLite 一致性备份写入 `data/backups/`。恢复前先停止 API 和重建任务，
+保留当前损坏库的副本，再把一个已验证备份复制到显式目标：
+
+```powershell
+Copy-Item -LiteralPath '<VERIFIED_BACKUP_SQLITE_PATH>' `
+  -Destination 'data/state/hengce.sqlite3.recovery' `
+  -ErrorAction Stop
+```
+
+先对 `.recovery` 执行 SQLite 完整性核验，经人工确认后再安排替换；不要直接覆盖当前库。
+普通中断无需恢复备份：使用完全相同的三个运行参数重试，系统会复用成功检查点和不可变
+工件。
+
+## 9. 提交前私有数据隔离检查
+
+```powershell
+git status --short
+git status --ignored --short -- data .env
+$sensitivePaths = @(
+  'data/manual_inbox',
+  'data/reports',
+  'data/backups',
+  'data/run_summaries',
+  'data/state/hengce.sqlite3',
+  'data/raw',
+  'data/warehouse',
+  'data/normalized',
+  '.env'
+)
+$notIgnored = @(
+  $sensitivePaths | Where-Object {
+    git check-ignore --quiet -- $_
+    $LASTEXITCODE -ne 0
+  }
+)
+if ($notIgnored.Count -ne 0) {
+  throw '至少一个敏感运行路径未被 Git 忽略'
+}
+```
+
+第一条命令不得出现真实附件、库、Parquet、Raw、报告或 `.env`。第二、三条命令用于证明
+这些路径确实被忽略；如果任何路径被跟踪或未忽略，停止提交并先修复隔离规则。

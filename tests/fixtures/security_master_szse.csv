@@ -1,0 +1,3 @@
+ts_code,symbol,name,exchange,board,currency,list_date,security_type
+000001.SZ,000001,示例深市主板,SZSE,MAIN_SZ,CNY,19910403,A_SHARE
+300001.SZ,300001,示例创业板,SZSE,CHINEXT,CNY,20091030,A_SHARE

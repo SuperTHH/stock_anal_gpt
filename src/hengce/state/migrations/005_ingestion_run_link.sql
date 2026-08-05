@@ -1,0 +1,2 @@
+-- The active_run_id column is added conditionally by StateRepository.migrate()
+-- because SQLite does not support ADD COLUMN IF NOT EXISTS on all supported builds.
