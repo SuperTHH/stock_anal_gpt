@@ -1118,9 +1118,9 @@ class PilotAcceptanceValidator:
 - [x] 对每个 Critical/Important 意见先复现或增加测试，再修复；重新运行全量验证。
 - [x] 使用 `superpowers:verification-before-completion` 检查最终测试输出、工作树和
       私有数据隔离证据。
-- [ ] 更新 PR 描述，列明真实数据仍在本机、哪些池 READY/BLOCKED、人工待办数量和
+- [x] 更新 PR 描述，列明真实数据仍在本机、哪些池 READY/BLOCKED、人工待办数量和
       后续全市场扩展不在本 PR 范围内。
-- [ ] 最终实现提交：`git commit -m "test: verify real-data minimal loop"`；若没有
+- [x] 最终实现提交：`git commit -m "test: verify real-data minimal loop"`；若没有
       代码或文档变化，不创建空提交。
 
 ---
