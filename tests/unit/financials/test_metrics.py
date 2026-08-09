@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from hengce.actions.share_capital import ShareCapitalResult
+from hengce.contracts.dividend import AnnualDividendRecord
 from hengce.contracts.enums import (
     ActionStatus,
     ActionType,
@@ -301,6 +302,60 @@ def dividend(
         fiscal_year=fiscal_year,
         action_status=status,
     )
+
+
+def annual_dividend(
+    fiscal_year: int,
+    dps: str | None,
+    total: str | None,
+    *,
+    has_cash_dividend: bool = True,
+) -> AnnualDividendRecord:
+    return AnnualDividendRecord(
+        record_id=f"annual-dividend-{fiscal_year}",
+        source_id="sse",
+        source_url="https://www.sse.com.cn/disclosure/fixture-annual-report.pdf",
+        published_at=AS_OF - timedelta(days=10),
+        effective_at=AS_OF - timedelta(days=10),
+        collected_at=AS_OF - timedelta(days=9),
+        version="fixture-v2",
+        content_hash="b" * 64,
+        license_policy="fixture-only",
+        quality_status=QualityStatus.VALID,
+        supersedes_id=None,
+        valid_from=AS_OF - timedelta(days=9),
+        ts_code="699999.SH",
+        fiscal_year=fiscal_year,
+        has_cash_dividend=has_cash_dividend,
+        cash_dividend_per_share=Decimal(dps) if dps is not None else None,
+        cash_dividend_total=Decimal(total) if total is not None else None,
+        implementation_status=ActionStatus.IMPLEMENTED,
+    )
+
+
+def test_annual_dividend_history_drives_strategy_metrics_without_action_dates() -> None:
+    result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
+        series=financial_series(),
+        closing_price=Decimal("24"),
+        share_capital=share_capital(),
+        dividends=[],
+        dividend_history=[
+            annual_dividend(2021, "0.5", "50"),
+            annual_dividend(2022, "0.6", "60"),
+            annual_dividend(2023, "0.8", "70"),
+            annual_dividend(2024, "1.0", "90"),
+            annual_dividend(2025, "0.8", "80"),
+        ],
+        report_cutoff_at=AS_OF,
+        known_at=AS_OF,
+    )
+
+    assert result.metrics["consecutive_dividend_years"].value == Decimal("5")
+    assert result.metrics["announced_dividend_yield"].value == Decimal("1") / Decimal("30")
+    assert result.metrics["payout_ratio"].value == Decimal("2") / Decimal("3")
+    assert result.metrics["fcf_coverage"].value == Decimal("1.5")
+    assert result.metrics["dividend_cut_flag"].value == Decimal("1")
+    assert "annual-dividend-2025" in result.metrics["announced_dividend_yield"].input_fact_ids
 
 
 def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:

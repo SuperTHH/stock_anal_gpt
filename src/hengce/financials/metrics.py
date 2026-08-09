@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from hengce.actions.share_capital import ShareCapitalResult
+from hengce.contracts.dividend import AnnualDividendRecord
 from hengce.contracts.enums import (
     ActionStatus,
     ActionType,
@@ -384,6 +385,7 @@ class PilotMetricCalculator:
         dividends: list[CorporateAction],
         report_cutoff_at: datetime,
         known_at: datetime,
+        dividend_history: list[AnnualDividendRecord] | None = None,
     ) -> PilotMetricResult:
         self._require_aware(report_cutoff_at)
         self._require_aware(known_at)
@@ -698,39 +700,66 @@ class PilotMetricCalculator:
             if action.fiscal_year is not None:
                 by_year.setdefault(action.fiscal_year, []).append(action)
 
+        visible_history = self._visible_dividend_history(
+            series.ts_code,
+            dividend_history or [],
+            report_cutoff_at,
+            known_at,
+        )
+        history_by_year: dict[int, list[AnnualDividendRecord]] = {}
+        for record in visible_history:
+            history_by_year.setdefault(record.fiscal_year, []).append(record)
+
         consecutive = 0
         continuity_ids: list[str] = []
         year = 2025
         while True:
-            implemented = [
+            annual_records = [
+                record
+                for record in history_by_year.get(year, ())
+                if record.has_cash_dividend
+                and record.implementation_status is not ActionStatus.CANCELLED
+            ]
+            implemented_actions = [
                 action
                 for action in by_year.get(year, ())
                 if action.action_status is ActionStatus.IMPLEMENTED
                 and action.cash_dividend_per_share is not None
                 and action.cash_dividend_per_share > 0
             ]
-            if not implemented:
+            evidence = annual_records or implemented_actions
+            if not evidence:
                 break
             consecutive += 1
-            continuity_ids.extend(action.record_id for action in implemented)
+            continuity_ids.extend(record.record_id for record in evidence)
             year -= 1
         metrics["consecutive_dividend_years"] = derived(
             Decimal(consecutive),
             tuple(sorted(continuity_ids)),
         )
 
-        current = [
+        current_history = [
+            record
+            for record in history_by_year.get(2025, ())
+            if record.implementation_status is not ActionStatus.CANCELLED
+        ]
+        prior_history = [
+            record
+            for record in history_by_year.get(2024, ())
+            if record.implementation_status is not ActionStatus.CANCELLED
+        ]
+        current = current_history or [
             action
             for action in by_year.get(2025, ())
             if action.action_status is not ActionStatus.CANCELLED
         ]
-        prior = [
+        prior = prior_history or [
             action
             for action in by_year.get(2024, ())
             if action.action_status is not ActionStatus.CANCELLED
         ]
-        current_ids = tuple(sorted(action.record_id for action in current))
-        prior_ids = tuple(sorted(action.record_id for action in prior))
+        current_ids = tuple(sorted(record.record_id for record in current))
+        prior_ids = tuple(sorted(record.record_id for record in prior))
         current_dps = (
             sum(
                 (
@@ -825,6 +854,36 @@ class PilotMetricCalculator:
             report_cutoff_at=report_cutoff_at,
             known_at=known_at,
             tax_rate_proxy=self.TAX_RATE_PROXY,
+        )
+
+    @staticmethod
+    def _visible_dividend_history(
+        ts_code: str,
+        records: list[AnnualDividendRecord],
+        report_cutoff_at: datetime,
+        known_at: datetime,
+    ) -> tuple[AnnualDividendRecord, ...]:
+        candidates = {
+            record.record_id: record
+            for record in records
+            if record.ts_code == ts_code
+            and record.published_at is not None
+            and record.published_at <= report_cutoff_at
+            and record.collected_at <= known_at
+            and record.valid_from <= known_at
+            and record.quality_status
+            in {QualityStatus.VALID, QualityStatus.DERIVED}
+        }
+        superseded_ids = {
+            record.supersedes_id
+            for record in candidates.values()
+            if record.supersedes_id in candidates
+        }
+        return tuple(
+            record
+            for record in candidates.values()
+            if record.record_id not in superseded_ids
+            and record.implementation_status is not ActionStatus.CANCELLED
         )
 
     @staticmethod

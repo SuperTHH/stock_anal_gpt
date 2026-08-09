@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from hengce.contracts.dividend import AnnualDividendRecord
 from hengce.contracts.enums import (
     AcquisitionStatus,
     ActionStatus,
@@ -31,6 +32,7 @@ from hengce.contracts.market import CorporateAction
 from hengce.contracts.risk import OfficialRiskScreen
 from hengce.raw_store.store import RawObjectStore
 from hengce.state.action_repository import CorporateActionRepository
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.risk_repository import OfficialRiskScreenRepository
 
@@ -89,6 +91,33 @@ class _ActionEvidence(BaseModel):
         return self
 
 
+class _DividendYearEvidenceRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fiscal_year: int = Field(ge=2000, le=2100)
+    has_cash_dividend: bool
+    cash_dividend_per_share: Decimal | None = None
+    cash_dividend_total: Decimal | None = None
+    implementation_status: ActionStatus
+
+
+class _DividendYearEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["official-dividend-year-evidence-v2"]
+    attachment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewed_at: datetime
+    extraction_method: Literal["MANUAL_REVIEW"]
+    annual_record: _DividendYearEvidenceRow
+
+    @field_validator("reviewed_at")
+    @classmethod
+    def reviewed_at_must_be_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("reviewed_at must include a timezone")
+        return value
+
+
 class _RiskEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +160,7 @@ class OfficialEvidenceIngestionService:
         raw_store: RawObjectStore,
         pilot_repository: PilotRepository,
         action_repository: CorporateActionRepository,
+        dividend_repository: AnnualDividendRepository | None = None,
         risk_repository: OfficialRiskScreenRepository | None = None,
         manual_inbox: Path,
         clock: Callable[[], datetime],
@@ -138,6 +168,9 @@ class OfficialEvidenceIngestionService:
         self.raw_store = raw_store
         self.pilot_repository = pilot_repository
         self.action_repository = action_repository
+        self.dividend_repository = dividend_repository or AnnualDividendRepository(
+            pilot_repository.path
+        )
         self.risk_repository = risk_repository or OfficialRiskScreenRepository(
             pilot_repository.path
         )
@@ -178,22 +211,48 @@ class OfficialEvidenceIngestionService:
             raw_evidence = self._sidecar_evidence(item.item_id)
             if item.document_kind is DocumentKind.RISK_SCREEN:
                 return self._ingest_risk(item, raw_evidence)
-            payload = _ActionEvidence.model_validate(raw_evidence)
-            if payload.attachment_sha256 != item.raw_object_hash:
-                raise ValueError("OFFICIAL_EVIDENCE_HASH_MISMATCH")
-            if not item.collected_at <= payload.reviewed_at <= self.clock():
-                raise ValueError("OFFICIAL_EVIDENCE_REVIEW_TIME_INVALID")
-            if item.document_kind is DocumentKind.DIVIDEND_RECORD and any(
-                row.action_type is not ActionType.CASH_DIVIDEND for row in payload.actions
-            ):
-                raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
-            if payload.no_dividend_fiscal_year is not None and (
-                item.document_kind is not DocumentKind.DIVIDEND_RECORD
-                or item.report_period is None
-                or payload.no_dividend_fiscal_year != item.report_period.year
-            ):
-                raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
-            actions = tuple(self._build_action(item, payload, row) for row in payload.actions)
+            schema_version = (
+                raw_evidence.get("schema_version")
+                if isinstance(raw_evidence, dict)
+                else None
+            )
+            if schema_version == "official-dividend-year-evidence-v2":
+                if item.document_kind is not DocumentKind.DIVIDEND_RECORD:
+                    raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+                dividend_payload = _DividendYearEvidence.model_validate(raw_evidence)
+                self._validate_common_evidence(item, dividend_payload)
+                if (
+                    item.report_period is None
+                    or dividend_payload.annual_record.fiscal_year
+                    != item.report_period.year
+                ):
+                    raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+                annual_records = (
+                    self._build_annual_record(
+                        item,
+                        dividend_payload,
+                        dividend_payload.annual_record,
+                    ),
+                )
+                actions: tuple[CorporateAction, ...] = ()
+                payload = None
+            else:
+                payload = _ActionEvidence.model_validate(raw_evidence)
+                self._validate_common_evidence(item, payload)
+                if item.document_kind is DocumentKind.DIVIDEND_RECORD and any(
+                    row.action_type is not ActionType.CASH_DIVIDEND for row in payload.actions
+                ):
+                    raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+                if payload.no_dividend_fiscal_year is not None and (
+                    item.document_kind is not DocumentKind.DIVIDEND_RECORD
+                    or item.report_period is None
+                    or payload.no_dividend_fiscal_year != item.report_period.year
+                ):
+                    raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+                actions = tuple(
+                    self._build_action(item, payload, row) for row in payload.actions
+                )
+                annual_records = self._annual_records_from_v1(item, payload, actions)
         except (ValidationError, ValueError) as error:
             return self._return_to_manual(item, error)
         if actions:
@@ -201,6 +260,11 @@ class OfficialEvidenceIngestionService:
                 self.action_repository.save_versions(actions)
             except ValueError as error:
                 return self._return_to_manual(item, error)
+        try:
+            for annual_record in annual_records:
+                self.dividend_repository.save_version(annual_record)
+        except ValueError as error:
+            return self._return_to_manual(item, error)
 
         verified = item.model_copy(
             update={
@@ -209,6 +273,8 @@ class OfficialEvidenceIngestionService:
                 "effective_at": (
                     min(action.effective_at for action in actions)
                     if actions
+                    else min(record.effective_at for record in annual_records)
+                    if annual_records
                     else item.published_at
                 ),
                 "error_code": None,
@@ -227,7 +293,10 @@ class OfficialEvidenceIngestionService:
             ingested,
             self.clock(),
         )
-        record_ids = tuple(action.record_id for action in actions)
+        record_ids = (
+            *(action.record_id for action in actions),
+            *(record.record_id for record in annual_records),
+        )
         return OfficialEvidenceIngestionResult(
             item_id=item.item_id,
             ingested=True,
@@ -235,6 +304,85 @@ class OfficialEvidenceIngestionService:
             risk_record_id=None,
             source_record_ids=record_ids,
             error_code=None,
+        )
+
+    def _validate_common_evidence(
+        self,
+        item: object,
+        payload: _ActionEvidence | _DividendYearEvidence,
+    ) -> None:
+        if payload.attachment_sha256 != item.raw_object_hash:
+            raise ValueError("OFFICIAL_EVIDENCE_HASH_MISMATCH")
+        if not item.collected_at <= payload.reviewed_at <= self.clock():
+            raise ValueError("OFFICIAL_EVIDENCE_REVIEW_TIME_INVALID")
+
+    def _annual_records_from_v1(
+        self,
+        item: object,
+        payload: _ActionEvidence,
+        actions: tuple[CorporateAction, ...],
+    ) -> tuple[AnnualDividendRecord, ...]:
+        if item.document_kind is not DocumentKind.DIVIDEND_RECORD:
+            return ()
+        if payload.no_dividend_fiscal_year is not None:
+            row = _DividendYearEvidenceRow(
+                fiscal_year=payload.no_dividend_fiscal_year,
+                has_cash_dividend=False,
+                implementation_status=ActionStatus.IMPLEMENTED,
+            )
+            return (self._build_annual_record(item, payload, row),)
+        return tuple(
+            self._build_annual_record(
+                item,
+                payload,
+                _DividendYearEvidenceRow(
+                    fiscal_year=action.fiscal_year,
+                    has_cash_dividend=True,
+                    cash_dividend_per_share=action.cash_dividend_per_share,
+                    cash_dividend_total=action.cash_dividend_total,
+                    implementation_status=action.action_status,
+                ),
+            )
+            for action in actions
+            if action.fiscal_year is not None
+        )
+
+    @staticmethod
+    def _build_annual_record(
+        item: object,
+        payload: _ActionEvidence | _DividendYearEvidence,
+        row: _DividendYearEvidenceRow,
+    ) -> AnnualDividendRecord:
+        identity = json.dumps(
+            {
+                "item_id": item.item_id,
+                "schema_version": payload.schema_version,
+                "fiscal_year": row.fiscal_year,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        record_id = f"annual-dividend-{hashlib.sha256(identity).hexdigest()}"
+        return AnnualDividendRecord(
+            record_id=record_id,
+            source_id=item.source_id,
+            source_url=item.source_url,
+            published_at=item.published_at,
+            effective_at=item.published_at,
+            collected_at=item.collected_at,
+            version=f"{item.version}:{payload.schema_version}",
+            content_hash=item.raw_object_hash,
+            license_policy="official-public-attachment-personal-research",
+            quality_status=QualityStatus.VALID,
+            supersedes_id=None,
+            valid_from=payload.reviewed_at,
+            ts_code=item.ts_code,
+            fiscal_year=row.fiscal_year,
+            has_cash_dividend=row.has_cash_dividend,
+            cash_dividend_per_share=row.cash_dividend_per_share,
+            cash_dividend_total=row.cash_dividend_total,
+            implementation_status=row.implementation_status,
         )
 
     def _return_to_manual(

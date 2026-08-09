@@ -1,4 +1,5 @@
 from .derived import DerivedFinancialMetric
+from .dividend import AnnualDividendRecord
 from .financial import (
     FactConflict,
     FilingDescriptor,
@@ -15,6 +16,7 @@ from .strategy import FactorDetail, ReportSnapshot, StrategyCandidate, StrategyR
 __all__ = [
     "MarketBar",
     "CorporateAction",
+    "AnnualDividendRecord",
     "OfficialEvent",
     "ReportSource",
     "DerivedFinancialMetric",

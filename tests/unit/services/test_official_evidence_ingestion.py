@@ -22,6 +22,7 @@ from hengce.services.official_evidence_ingestion import (
     OfficialEvidenceIngestionService,
 )
 from hengce.state.action_repository import CorporateActionRepository
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
 
@@ -262,12 +263,76 @@ def test_ingests_reviewed_explicit_no_dividend_without_fabricating_action(
     assert stored_item.status is AcquisitionStatus.INGESTED
     assert result.ingested is True
     assert result.action_count == 0
-    assert result.source_record_ids == ()
+    assert len(result.source_record_ids) == 1
     assert action_repository.visible_actions(
         item.ts_code,
         as_of=CUTOFF,
         known_at=KNOWN_AT,
     ) == ()
+    annual_records = AnnualDividendRepository(action_repository.path).visible_records(
+        item.ts_code,
+        as_of=CUTOFF,
+        known_at=KNOWN_AT,
+    )
+    assert len(annual_records) == 1
+    assert annual_records[0].fiscal_year == 2025
+    assert annual_records[0].has_cash_dividend is False
+
+
+def test_ingests_annual_report_dividend_evidence_without_fabricating_action_dates(
+    tmp_path: Path,
+) -> None:
+    """Annual reports can prove a dividend year without pretending to be action notices."""
+    raw_store = RawObjectStore(tmp_path / "raw")
+    reference = raw_store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/disclosure/annual-report.pdf",
+        collected_at=KNOWN_AT,
+        content_type="application/pdf",
+        payload=b"private-official-annual-dividend-fixture",
+    )
+    item = _downloaded_item(
+        item_id="dividend-history-2024",
+        document_kind=DocumentKind.DIVIDEND_RECORD,
+        raw_hash=reference.content_hash,
+        report_period=date(2024, 12, 31),
+    )
+    service, pilot_repository, action_repository = _service(tmp_path, item)
+    _write_evidence(
+        tmp_path / "manual_inbox",
+        item_id=item.item_id,
+        payload={
+            "schema_version": "official-dividend-year-evidence-v2",
+            "attachment_sha256": reference.content_hash,
+            "reviewed_at": KNOWN_AT.isoformat(),
+            "extraction_method": "MANUAL_REVIEW",
+            "annual_record": {
+                "fiscal_year": 2024,
+                "has_cash_dividend": True,
+                "cash_dividend_per_share": "0.34",
+                "cash_dividend_total": "225575097.80",
+                "implementation_status": "IMPLEMENTED",
+            },
+        },
+    )
+
+    result = service.run(item.item_id)
+
+    assert result.ingested is True
+    assert result.action_count == 0
+    assert action_repository.visible_actions(item.ts_code, CUTOFF, KNOWN_AT) == ()
+    stored = AnnualDividendRepository(action_repository.path).visible_records(
+        item.ts_code,
+        as_of=CUTOFF,
+        known_at=KNOWN_AT,
+    )
+    assert len(stored) == 1
+    assert stored[0].cash_dividend_per_share == Decimal("0.34")
+    assert stored[0].cash_dividend_total == Decimal("225575097.80")
+    assert stored[0].record_id in result.source_record_ids
+    manifest_item = pilot_repository.get_manifest_item(item.item_id)
+    assert manifest_item is not None
+    assert manifest_item.status is AcquisitionStatus.INGESTED
 
 
 def test_ingests_reviewed_risk_screen_with_explicit_filter_facts(

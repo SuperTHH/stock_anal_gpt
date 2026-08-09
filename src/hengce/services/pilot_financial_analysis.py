@@ -12,6 +12,7 @@ from hengce.contracts.pilot import PilotUniverseSnapshot
 from hengce.financials.assembler import PointInTimeFinancialAssembler
 from hengce.financials.metrics import PilotMetricCalculator, PilotMetricResult
 from hengce.state.action_repository import CorporateActionRepository
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.warehouse.market import MarketWarehouse
 
 PILOT_FINANCIAL_PERIODS = (
@@ -31,12 +32,19 @@ class PilotFinancialAnalyzer:
         *,
         assembler: PointInTimeFinancialAssembler,
         action_repository: CorporateActionRepository,
+        dividend_repository: AnnualDividendRepository | None = None,
         metric_calculator: PilotMetricCalculator,
         market_warehouse: MarketWarehouse,
         share_capital_resolver: ShareCapitalResolver | None = None,
     ) -> None:
         self.assembler = assembler
         self.action_repository = action_repository
+        repository_path = getattr(action_repository, "path", None)
+        self.dividend_repository = dividend_repository or (
+            AnnualDividendRepository(repository_path)
+            if repository_path is not None
+            else None
+        )
         self.metric_calculator = metric_calculator
         self.market_warehouse = market_warehouse
         self.share_capital_resolver = (
@@ -71,6 +79,17 @@ class PilotFinancialAnalyzer:
                     known_at,
                 )
             )
+            dividend_history = (
+                list(
+                    self.dividend_repository.visible_records(
+                        member.ts_code,
+                        report_cutoff_at,
+                        known_at,
+                    )
+                )
+                if self.dividend_repository is not None
+                else []
+            )
             share_capital = self._share_capital(
                 series,
                 member.ts_code,
@@ -95,6 +114,7 @@ class PilotFinancialAnalyzer:
                 closing_price=closing_price,
                 share_capital=share_capital,
                 dividends=actions,
+                dividend_history=dividend_history,
                 report_cutoff_at=report_cutoff_at,
                 known_at=known_at,
             )
