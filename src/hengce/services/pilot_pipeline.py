@@ -46,6 +46,7 @@ from hengce.services.pilot_reconstruction import (
 )
 from hengce.services.pilot_universe import PilotUniverseSelector
 from hengce.state.action_repository import CorporateActionRepository
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pdf_financial_repository import (
     PdfFinancialDocumentRepository,
@@ -95,6 +96,7 @@ class PilotProductionStages:
         self.pilot_repository = PilotRepository(state.path)
         self.risk_repository = OfficialRiskScreenRepository(state.path)
         self.action_repository = CorporateActionRepository(state.path)
+        self.dividend_repository = AnnualDividendRepository(state.path)
         self.market_warehouse = MarketWarehouse(data_dir / "normalized")
         self.report_repository = ReportRepository(state.path)
         self.pdf_repository = PdfFinancialDocumentRepository(state.path)
@@ -121,6 +123,7 @@ class PilotProductionStages:
                 raw_store=RawObjectStore(data_dir / "raw"),
                 pilot_repository=self.pilot_repository,
                 action_repository=self.action_repository,
+                dividend_repository=self.dividend_repository,
                 risk_repository=self.risk_repository,
                 manual_inbox=data_dir / "manual_inbox",
                 clock=clock,
@@ -138,6 +141,7 @@ class PilotProductionStages:
             else PilotFinancialAnalyzer(
                 assembler=self.financial_assembler,
                 action_repository=self.action_repository,
+                dividend_repository=self.dividend_repository,
                 metric_calculator=PilotMetricCalculator("pilot-financial-metrics-v1"),
                 market_warehouse=self.market_warehouse,
             )
@@ -380,6 +384,9 @@ class PilotProductionStages:
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
             "corporate_action_count": self._table_count("corporate_action_versions"),
+            "annual_dividend_record_count": self._table_count(
+                "annual_dividend_record_versions"
+            ),
             "share_capital_count": 0,
             "fallback_reason_counts": {},
         }
@@ -444,6 +451,9 @@ class PilotProductionStages:
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
             "corporate_action_count": self._table_count("corporate_action_versions"),
+            "annual_dividend_record_count": self._table_count(
+                "annual_dividend_record_versions"
+            ),
             "share_capital_count": self._share_capital_count(metrics),
             "derived_metric_count": self._derived_metric_count(metrics),
             "narrative_template_versions": dict(_NARRATIVE_TEMPLATE_VERSIONS),
@@ -481,7 +491,10 @@ class PilotProductionStages:
                 "financials": (QualityStatus.VALID if fact_count > 0 else QualityStatus.MISSING),
                 "actions": (
                     QualityStatus.VALID
-                    if quality_summary["corporate_action_count"]
+                    if (
+                        quality_summary["corporate_action_count"]
+                        or quality_summary["annual_dividend_record_count"]
+                    )
                     else QualityStatus.MISSING
                 ),
                 "metrics": (
@@ -751,7 +764,10 @@ class PilotProductionStages:
         return xbrl[0] + len(pdf_rows), xbrl[1] + pdf_fact_count
 
     def _table_count(self, table: str) -> int:
-        if table not in {"corporate_action_versions"}:
+        if table not in {
+            "annual_dividend_record_versions",
+            "corporate_action_versions",
+        }:
             raise ValueError("PILOT_TABLE_NOT_ALLOWED")
         try:
             with sqlite3.connect(self.state.path) as connection:
@@ -984,6 +1000,24 @@ class PilotProductionStages:
                     version=action.version,
                     license_policy=action.license_policy,
                     quality_status=action.quality_status,
+                )
+            for record in self.dividend_repository.visible_records(
+                member.ts_code,
+                context.report_cutoff_at,
+                context.known_at,
+            ):
+                add_fact_source(
+                    record_id=record.record_id,
+                    domain="actions",
+                    source_id=record.source_id,
+                    source_url=record.source_url,
+                    published_at=record.published_at,
+                    effective_at=record.effective_at,
+                    collected_at=record.collected_at,
+                    valid_from=record.valid_from,
+                    version=record.version,
+                    license_policy=record.license_policy,
+                    quality_status=record.quality_status,
                 )
             screen = self.risk_repository.visible_screen(
                 member.ts_code,

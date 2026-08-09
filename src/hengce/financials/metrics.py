@@ -477,9 +477,12 @@ class PilotMetricCalculator:
             input_ids = ids(current, prior)
             if current is None or prior is None:
                 return missing(input_ids, "INPUT_MISSING")
-            if prior.value <= 0:
+            if prior.value == 0:
                 return missing(input_ids, "DENOMINATOR_MISSING_OR_ZERO")
-            return derived(current.value / prior.value - Decimal(1), input_ids)
+            return derived(
+                (current.value - prior.value) / abs(prior.value),
+                input_ids,
+            )
 
         net_profit_2025 = fact(annual_2025, "net_profit")
         equity_2024 = fact(annual_2024, "equity")
@@ -554,9 +557,19 @@ class PilotMetricCalculator:
                 fact(q1_2026, "adjusted_net_profit"),
                 fact(q1_2025, "adjusted_net_profit"),
             ),
-            "cash_flow_quality": ratio(
-                fact(annual_2025, "operating_cash_flow"),
-                net_profit_2025,
+            "cash_flow_quality": (
+                derived(
+                    Decimal(0),
+                    ids(
+                        fact(annual_2025, "operating_cash_flow"),
+                        net_profit_2025,
+                    ),
+                )
+                if net_profit_2025 is not None and net_profit_2025.value <= 0
+                else ratio(
+                    fact(annual_2025, "operating_cash_flow"),
+                    net_profit_2025,
+                )
             ),
             "debt_ratio": ratio(
                 fact(annual_2025, "total_liabilities"),
@@ -714,9 +727,10 @@ class PilotMetricCalculator:
         continuity_ids: list[str] = []
         year = 2025
         while True:
+            annual_year_evidence = list(history_by_year.get(year, ()))
             annual_records = [
                 record
-                for record in history_by_year.get(year, ())
+                for record in annual_year_evidence
                 if record.has_cash_dividend
                 and record.implementation_status is not ActionStatus.CANCELLED
             ]
@@ -729,6 +743,9 @@ class PilotMetricCalculator:
             ]
             evidence = annual_records or implemented_actions
             if not evidence:
+                continuity_ids.extend(
+                    record.record_id for record in annual_year_evidence
+                )
                 break
             consecutive += 1
             continuity_ids.extend(record.record_id for record in evidence)
@@ -793,13 +810,21 @@ class PilotMetricCalculator:
                 current_ids,
             )
 
+        def annual_cash_total(action: object) -> Decimal | None:
+            if (
+                isinstance(action, AnnualDividendRecord)
+                and not action.has_cash_dividend
+            ):
+                return Decimal(0)
+            return action.cash_dividend_total
+
         totals_available = bool(current) and all(
-            action.cash_dividend_total is not None for action in current
+            annual_cash_total(action) is not None for action in current
         )
         total_dividend = (
             sum(
                 (
-                    action.cash_dividend_total or Decimal(0)
+                    annual_cash_total(action) or Decimal(0)
                     for action in current
                 ),
                 Decimal(0),
@@ -810,6 +835,11 @@ class PilotMetricCalculator:
         payout_ids = (*current_ids, *ids(net_profit_2025))
         if total_dividend is None or net_profit_2025 is None:
             metrics["payout_ratio"] = missing(payout_ids, "INPUT_MISSING")
+        elif total_dividend == 0:
+            metrics["payout_ratio"] = derived(
+                Decimal(0),
+                payout_ids,
+            )
         elif net_profit_2025.value <= 0:
             metrics["payout_ratio"] = missing(
                 payout_ids,
@@ -821,9 +851,14 @@ class PilotMetricCalculator:
                 payout_ids,
             )
         coverage_ids = (*current_ids, *free_cash_flow.input_fact_ids)
-        if (
+        if total_dividend == 0 and free_cash_flow.value is not None:
+            metrics["fcf_coverage"] = derived(
+                Decimal(0),
+                coverage_ids,
+            )
+        elif (
             total_dividend is None
-            or total_dividend <= 0
+            or total_dividend < 0
             or free_cash_flow.value is None
         ):
             metrics["fcf_coverage"] = missing(

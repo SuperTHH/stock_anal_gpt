@@ -57,6 +57,7 @@ class SecurityStrategyInput:
     invalidate_conditions: tuple[str, ...]
     cycle_position_available: bool
     announced_dividend_only: bool
+    security_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,7 @@ class StrategyEngine:
                     strategy_type=self.definition.strategy_type,
                     strategy_version=self.definition.version,
                     ts_code=item.ts_code,
+                    security_name=item.security_name,
                     rank_in_strategy=rank,
                     strategy_score=score.quantize(Decimal("0.01")),
                     factor_details=details,

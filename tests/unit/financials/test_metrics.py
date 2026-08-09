@@ -454,6 +454,44 @@ def test_pilot_metrics_return_missing_for_invalid_denominators_and_inputs() -> N
     assert result.metrics["fcf_yield"].value is None
 
 
+def test_observed_adverse_values_are_scored_instead_of_treated_as_missing() -> None:
+    """Losses, turnarounds, and explicit no-dividend records remain rankable facts."""
+    result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
+        series=financial_series(
+            updates={
+                date(2024, 12, 31): {"adjusted_net_profit": "-100"},
+                date(2025, 3, 31): {"adjusted_net_profit": "-20"},
+                date(2025, 12, 31): {"net_profit": "-10"},
+            }
+        ),
+        closing_price=Decimal("24"),
+        share_capital=share_capital(),
+        dividends=[],
+        dividend_history=[
+            annual_dividend(2024, "0.5", "50"),
+            annual_dividend(
+                2025,
+                None,
+                None,
+                has_cash_dividend=False,
+            ),
+        ],
+        report_cutoff_at=AS_OF,
+        known_at=AS_OF,
+    )
+
+    assert result.metrics["annual_adjusted_profit_growth"].value == Decimal("2.3")
+    assert result.metrics["q1_adjusted_profit_growth"].value == Decimal("2.5")
+    assert result.metrics["cash_flow_quality"].value == Decimal("0")
+    assert result.metrics["consecutive_dividend_years"].value == Decimal("0")
+    assert result.metrics["consecutive_dividend_years"].input_fact_ids == (
+        "annual-dividend-2025",
+    )
+    assert result.metrics["payout_ratio"].value == Decimal("0")
+    assert result.metrics["fcf_coverage"].value == Decimal("0")
+    assert result.metrics["dividend_cut_flag"].value == Decimal("1")
+
+
 def test_blocked_share_capital_and_future_or_cancelled_dividends_do_not_leak() -> None:
     future = dividend(
         2025,

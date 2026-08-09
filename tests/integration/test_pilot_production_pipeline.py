@@ -7,8 +7,10 @@ from zoneinfo import ZoneInfo
 from hengce.bootstrap import bootstrap_state
 from hengce.cli import build_pilot_runner
 from hengce.config import Settings
+from hengce.contracts.dividend import AnnualDividendRecord
 from hengce.contracts.enums import (
     AcquisitionStatus,
+    ActionStatus,
     DiscoveryMethod,
     DocumentKind,
     PoolReadinessStatus,
@@ -23,6 +25,7 @@ from hengce.services.financial_resolution import FinancialDocument
 from hengce.services.pilot_acceptance import PilotAcceptanceValidator
 from hengce.services.pilot_pipeline import PilotProductionStages
 from hengce.services.pilot_reconstruction import PilotStageContext
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.state.pdf_financial_repository import PdfFinancialDocumentRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.report_repository import ReportRepository
@@ -611,12 +614,33 @@ def test_report_source_lineage_resolves_market_master_and_pdf_fact_ids(
             normalization_metadata={"report_period": report_period.isoformat()},
         ),
     )
+    AnnualDividendRepository(state.path).save_version(
+        AnnualDividendRecord(
+            record_id="annual-dividend-lineage-fixture",
+            source_id="cninfo",
+            source_url="https://static.cninfo.com.cn/finalpage/dividend-lineage.pdf",
+            published_at=datetime(2026, 3, 30, tzinfo=SHANGHAI),
+            effective_at=datetime(2026, 3, 30, tzinfo=SHANGHAI),
+            collected_at=KNOWN_AT,
+            version="annual-dividend-v2",
+            content_hash="d" * 64,
+            license_policy="official-public-attachment-personal-research",
+            quality_status=QualityStatus.VALID,
+            supersedes_id=None,
+            valid_from=KNOWN_AT,
+            ts_code=member.ts_code,
+            fiscal_year=2025,
+            has_cash_dividend=False,
+            implementation_status=ActionStatus.ANNOUNCED,
+        )
+    )
     manifest = PilotRepository(state.path).list_manifest(universe.universe_id)
 
     sources = stages._report_source_records(context, universe, manifest)
     source_ids = {source.record_id for source in sources}
 
     assert "pdf-lineage-fixture:total_shares" in source_ids
+    assert "annual-dividend-lineage-fixture" in source_ids
     assert (
         f"closing-price:{MARKET_DATE.isoformat()}:{member.ts_code}"
         in source_ids
@@ -667,6 +691,27 @@ def test_ready_pool_report_publishes_when_factor_source_ids_resolve(
     )
     stages.freeze_universe(context)
     stages.plan_acquisition(context)
+    member = stages._universe(context).members[0]
+    AnnualDividendRepository(state.path).save_version(
+        AnnualDividendRecord(
+            record_id="annual-dividend-domain-fixture",
+            source_id="cninfo",
+            source_url="https://static.cninfo.com.cn/finalpage/dividend-domain.pdf",
+            published_at=datetime(2026, 3, 30, tzinfo=SHANGHAI),
+            effective_at=datetime(2026, 3, 30, tzinfo=SHANGHAI),
+            collected_at=KNOWN_AT,
+            version="annual-dividend-v2",
+            content_hash="e" * 64,
+            license_policy="official-public-attachment-personal-research",
+            quality_status=QualityStatus.VALID,
+            supersedes_id=None,
+            valid_from=KNOWN_AT,
+            ts_code=member.ts_code,
+            fiscal_year=2025,
+            has_cash_dividend=False,
+            implementation_status=ActionStatus.ANNOUNCED,
+        )
+    )
 
     output = stages.publish_report(context)
 
@@ -675,6 +720,11 @@ def test_ready_pool_report_publishes_when_factor_source_ids_resolve(
         for strategy in StrategyType
     }
     assert all(count > 0 for count in output["pool_candidate_counts"].values())
+    stored = ReportRepository(state.path).latest_report()
+    assert stored is not None
+    artifact = json.loads(stored.artifact_path.read_text(encoding="utf-8"))
+    assert artifact["data_domain_statuses"]["actions"] == QualityStatus.VALID.value
+    assert artifact["quality_summary"]["annual_dividend_record_count"] == 1
 
 
 def test_production_metric_stage_feeds_real_results_to_pool_builder(

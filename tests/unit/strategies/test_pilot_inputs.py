@@ -129,6 +129,9 @@ def test_builds_three_strategy_local_factor_sets_with_frozen_composition() -> No
 
     assert set(built) == set(StrategyType)
     assert all(len(items) == 4 for items in built.values())
+    assert built[StrategyType.QUALITY_GROWTH][0].security_name == (
+        snapshot.members[0].security_name
+    )
     quality = built[StrategyType.QUALITY_GROWTH]
     value = built[StrategyType.DEEP_VALUE]
     dividend = built[StrategyType.STABLE_DIVIDEND]
@@ -211,3 +214,40 @@ def test_negative_pe_and_missing_announced_dividend_are_not_rewarded() -> None:
     assert value.factors["absolute_valuation"].value is None
     assert value.factors["relative_valuation"].value is None
     assert dividend.announced_dividend_only is False
+
+
+def test_non_positive_earnings_receives_a_lineaged_valuation_penalty() -> None:
+    """An observed loss is adverse evidence, not an unknown valuation input."""
+    snapshot = universe()
+    results = {
+        member.ts_code: pilot_metrics(member.ts_code, index)
+        for index, member in enumerate(snapshot.members, start=1)
+    }
+    target = snapshot.members[0].ts_code
+    results[target].metrics["pe"] = MetricValue(
+        value=None,
+        quality_status=QualityStatus.MISSING,
+        input_fact_ids=(f"{target}:market-cap", f"{target}:net-profit"),
+        algorithm_version="pilot-financial-metrics-v1",
+        reason="NON_POSITIVE_EARNINGS",
+    )
+
+    built = PilotStrategyInputBuilder().build(
+        snapshot,
+        results,
+        filters(snapshot),
+        CUTOFF,
+        CUTOFF,
+    )
+
+    quality = built[StrategyType.QUALITY_GROWTH][0]
+    value = built[StrategyType.DEEP_VALUE][0]
+    assert quality.factors["valuation_attractiveness"].value is not None
+    assert value.factors["absolute_valuation"].value is not None
+    assert value.factors["relative_valuation"].value is not None
+    assert quality.factors["valuation_attractiveness"].value < built[
+        StrategyType.QUALITY_GROWTH
+    ][1].factors["valuation_attractiveness"].value
+    assert f"{target}:net-profit" in quality.factors[
+        "valuation_attractiveness"
+    ].source_record_ids

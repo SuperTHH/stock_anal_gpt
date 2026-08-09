@@ -53,6 +53,7 @@ class StrategyCandidate(BaseModel):
     strategy_type: StrategyType
     strategy_version: str
     ts_code: str
+    security_name: str | None = None
     rank_in_strategy: int = Field(gt=0)
     strategy_score: Decimal = Field(ge=0, le=100, decimal_places=2)
     factor_details: tuple[FactorDetail, ...]

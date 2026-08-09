@@ -115,7 +115,7 @@ class PilotStrategyInputBuilder:
                     "gross_margin_stability",
                 ),
                 "balance_sheet_quality": common_balance,
-                "valuation_attractiveness": self._percentile_average(
+                "valuation_attractiveness": self._valuation_percentile_average(
                     code,
                     metric_map,
                     percentiles,
@@ -123,7 +123,7 @@ class PilotStrategyInputBuilder:
                 ),
             }
             value_factors = {
-                "absolute_valuation": self._percentile_average(
+                "absolute_valuation": self._valuation_percentile_average(
                     code,
                     metric_map,
                     percentiles,
@@ -133,7 +133,7 @@ class PilotStrategyInputBuilder:
                         ("fcf_yield", True),
                     ),
                 ),
-                "relative_valuation": self._percentile_average(
+                "relative_valuation": self._valuation_percentile_average(
                     code,
                     metric_map,
                     percentiles,
@@ -187,6 +187,7 @@ class PilotStrategyInputBuilder:
             result[StrategyType.QUALITY_GROWTH].append(
                 self._security_input(
                     code,
+                    member.security_name,
                     quality_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -199,6 +200,7 @@ class PilotStrategyInputBuilder:
             result[StrategyType.DEEP_VALUE].append(
                 self._security_input(
                     code,
+                    member.security_name,
                     value_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -214,6 +216,7 @@ class PilotStrategyInputBuilder:
             result[StrategyType.STABLE_DIVIDEND].append(
                 self._security_input(
                     code,
+                    member.security_name,
                     dividend_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -230,6 +233,7 @@ class PilotStrategyInputBuilder:
     @staticmethod
     def _security_input(
         code: str,
+        security_name: str,
         factors: dict[str, FactorInput],
         hard_filter: HardFilterResult,
         report_cutoff_at: datetime,
@@ -256,6 +260,7 @@ class PilotStrategyInputBuilder:
         }
         return SecurityStrategyInput(
             ts_code=code,
+            security_name=security_name,
             industry_l1=None,
             factors=timed_factors,
             hard_filter_passed=hard_filter.passed,
@@ -279,6 +284,43 @@ class PilotStrategyInputBuilder:
         source_ids: list[str] = []
         for name, higher_is_better in components:
             metric = metric_map.get(name)
+            percentile = percentiles[name].get(code)
+            if not self._usable(metric) or percentile is None:
+                return self._missing(metric_map, tuple(name for name, _ in components))
+            values.append(
+                percentile
+                if higher_is_better
+                else Decimal(100) - percentile
+            )
+            assert metric is not None
+            source_ids.extend(metric.input_fact_ids)
+        return self._factor(
+            sum(values, Decimal(0)) / Decimal(len(values)),
+            tuple(sorted(set(source_ids))),
+        )
+
+    def _valuation_percentile_average(
+        self,
+        code: str,
+        metric_map: Mapping[str, MetricValue],
+        percentiles: Mapping[str, Mapping[str, Decimal]],
+        components: tuple[tuple[str, bool], ...],
+    ) -> FactorInput:
+        """Score an observed loss as adverse while preserving unknowns as missing."""
+        values: list[Decimal] = []
+        source_ids: list[str] = []
+        for name, higher_is_better in components:
+            metric = metric_map.get(name)
+            if (
+                name == "pe"
+                and metric is not None
+                and metric.value is None
+                and metric.reason == "NON_POSITIVE_EARNINGS"
+                and metric.input_fact_ids
+            ):
+                values.append(Decimal(0))
+                source_ids.extend(metric.input_fact_ids)
+                continue
             percentile = percentiles[name].get(code)
             if not self._usable(metric) or percentile is None:
                 return self._missing(metric_map, tuple(name for name, _ in components))
