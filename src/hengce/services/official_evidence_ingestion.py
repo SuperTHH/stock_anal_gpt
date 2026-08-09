@@ -17,6 +17,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from hengce.contracts.enums import (
@@ -63,7 +64,8 @@ class _ActionEvidence(BaseModel):
     attachment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     reviewed_at: datetime
     extraction_method: Literal["MANUAL_REVIEW"]
-    actions: tuple[_ActionEvidenceRow, ...] = Field(min_length=1)
+    actions: tuple[_ActionEvidenceRow, ...] = ()
+    no_dividend_fiscal_year: int | None = None
 
     @field_validator("reviewed_at")
     @classmethod
@@ -75,6 +77,16 @@ class _ActionEvidence(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"{info.field_name} must include a timezone")
         return value
+
+    @model_validator(mode="after")
+    def action_or_explicit_no_dividend(self) -> _ActionEvidence:
+        if bool(self.actions) == (self.no_dividend_fiscal_year is not None):
+            raise ValueError("exactly one of actions or no_dividend_fiscal_year is required")
+        if self.no_dividend_fiscal_year is not None and not (
+            2000 <= self.no_dividend_fiscal_year <= 2100
+        ):
+            raise ValueError("no_dividend_fiscal_year is out of range")
+        return self
 
 
 class _RiskEvidence(BaseModel):
@@ -175,19 +187,30 @@ class OfficialEvidenceIngestionService:
                 row.action_type is not ActionType.CASH_DIVIDEND for row in payload.actions
             ):
                 raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+            if payload.no_dividend_fiscal_year is not None and (
+                item.document_kind is not DocumentKind.DIVIDEND_RECORD
+                or item.report_period is None
+                or payload.no_dividend_fiscal_year != item.report_period.year
+            ):
+                raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
             actions = tuple(self._build_action(item, payload, row) for row in payload.actions)
         except (ValidationError, ValueError) as error:
             return self._return_to_manual(item, error)
-        try:
-            self.action_repository.save_versions(actions)
-        except ValueError as error:
-            return self._return_to_manual(item, error)
+        if actions:
+            try:
+                self.action_repository.save_versions(actions)
+            except ValueError as error:
+                return self._return_to_manual(item, error)
 
         verified = item.model_copy(
             update={
                 "status": AcquisitionStatus.VERIFIED,
                 "quality_status": QualityStatus.VALID,
-                "effective_at": min(action.effective_at for action in actions),
+                "effective_at": (
+                    min(action.effective_at for action in actions)
+                    if actions
+                    else item.published_at
+                ),
                 "error_code": None,
             }
         )

@@ -89,6 +89,29 @@ def test_cash_dividend_keeps_total_return_continuous_without_mutating_raw_close(
     assert bars[1].close == Decimal("9.50")
 
 
+def test_announced_dividend_is_not_applied_before_implementation() -> None:
+    bars = [
+        bar(date(2026, 7, 17), "10.00", "9.90"),
+        bar(date(2026, 7, 20), "9.50", "10.00"),
+    ]
+
+    result = TotalReturnCalculator("total-return-v1").calculate(
+        bars=bars,
+        actions=[
+            action(
+                ActionType.CASH_DIVIDEND,
+                action_status=ActionStatus.ANNOUNCED,
+            )
+        ],
+        as_of=NOW,
+        known_at=NOW,
+    )
+
+    assert result.blocked_reasons == ()
+    assert result.points[-1].total_return_index == Decimal("0.95")
+    assert result.points[-1].action_record_ids == ()
+
+
 def test_stock_dividend_and_rights_issue_use_per_old_share_economics() -> None:
     """Catches ignoring new shares or treating paid rights shares as free distributions."""
     bars = [

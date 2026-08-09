@@ -78,11 +78,10 @@ class ManualInbox:
         if not root.is_dir():
             return InboxResult(accepted=(), rejected=())
         manifest_by_id = {item.item_id: item for item in manifest}
-        seen_hashes = {
-            item.content_hash: self._identity(item)
-            for item in manifest
-            if item.content_hash is not None
-        }
+        seen_hashes: dict[str, list[AcquisitionManifestItem]] = {}
+        for item in manifest:
+            if item.content_hash is not None:
+                seen_hashes.setdefault(item.content_hash, []).append(item)
         accepted: list[AcquisitionManifestItem] = []
         rejected: list[InboxRejection] = []
 
@@ -166,8 +165,16 @@ class ManualInbox:
                 )
                 continue
             content_hash = hashlib.sha256(payload).hexdigest()
-            identity = self._identity(item)
-            if content_hash in seen_hashes and seen_hashes[content_hash] != identity:
+            prior_items = seen_hashes.get(content_hash, [])
+            if prior_items and not any(
+                self._same_official_attachment(
+                    existing,
+                    item,
+                    sidecar,
+                    authorized_source=source,
+                )
+                for existing in prior_items
+            ):
                 rejected.append(
                     InboxRejection(
                         attachment_name=attachment_path.name,
@@ -175,7 +182,7 @@ class ManualInbox:
                     )
                 )
                 continue
-            seen_hashes[content_hash] = identity
+            seen_hashes.setdefault(content_hash, []).append(item)
             reference = self.raw_store.put(
                 source_id=source,
                 source_url=str(sidecar.source_url),
@@ -277,6 +284,21 @@ class ManualInbox:
             item.document_kind,
             item.report_type,
             item.report_period,
+        )
+
+    @staticmethod
+    def _same_official_attachment(
+        existing: AcquisitionManifestItem,
+        current: AcquisitionManifestItem,
+        sidecar: _ManualSidecar,
+        *,
+        authorized_source: str,
+    ) -> bool:
+        return bool(
+            existing.ts_code == current.ts_code
+            and existing.source_id == authorized_source
+            and existing.source_url is not None
+            and str(existing.source_url) == str(sidecar.source_url)
         )
 
 

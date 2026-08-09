@@ -102,6 +102,8 @@ _ALIASES = {
     "所有者权益合计": "equity",
     "股东权益合计": "equity",
     "所有者权益（或股东权益）合计": "equity",
+    "\u6240\u6709\u8005\u6743\u76ca\uff08\u6216\u80a1\u4e1c\u6743\u76ca": "equity",
+    "\u6240\u6709\u8005\u6743\u76ca\uff08\u6216\u80a1\u4e1c\u6743": "equity",
     "营业收入": "revenue",
     "营业成本": "operating_cost",
     "净利润": "net_profit",
@@ -284,7 +286,7 @@ class CninfoPdfExtractor:
             issues.add("PDF_LAYOUT_UNSUPPORTED")
 
         candidates: list[PdfFactCandidate] = []
-        recognized_fact_line_without_unit = False
+        fact_names_without_supported_unit: set[str] = set()
         statement_type: StatementType | None = None
         statement_title: str | None = None
         pending_statement: tuple[str, StatementType] | None = None
@@ -292,6 +294,7 @@ class CninfoPdfExtractor:
         pending_statement_unit: tuple[str, Decimal] | None = None
         unit: tuple[str, Decimal] | None = None
         pending_label = ""
+        annual_summary_spillover = False
         for page_number, text in pages:
             if not text:
                 continue
@@ -307,6 +310,7 @@ class CninfoPdfExtractor:
                     pending_statement_unit = None
                     unit = None
                     pending_label = ""
+                    annual_summary_spillover = False
                     continue
                 title = next(
                     (
@@ -321,6 +325,7 @@ class CninfoPdfExtractor:
                     statement_type = None
                     unit = None
                     pending_label = ""
+                    annual_summary_spillover = False
                     if title[0] in _CONSOLIDATED_STATEMENT_TITLES:
                         pending_statement = title
                         pending_statement_lines = 4
@@ -331,6 +336,21 @@ class CninfoPdfExtractor:
                         pending_statement = None
                         pending_statement_lines = 0
                         pending_statement_unit = None
+                    continue
+                if (
+                    page_number <= 20
+                    and _annual_summary_header_matches(
+                        line,
+                        descriptor=descriptor,
+                    )
+                ):
+                    statement_title = (
+                        "\u4e3b\u8981\u4f1a\u8ba1\u6570\u636e"
+                        "\u548c\u8d22\u52a1\u6307\u6807"
+                    )
+                    statement_type = StatementType.INCOME_STATEMENT
+                    pending_label = ""
+                    annual_summary_spillover = True
                     continue
                 if pending_statement is not None:
                     if _statement_period_heading_matches(
@@ -399,7 +419,9 @@ class CninfoPdfExtractor:
                 ):
                     currency, multiplier = unit
                     if currency != "CNY":
-                        recognized_fact_line_without_unit = True
+                        fact_names_without_supported_unit.add(
+                            blank_debt_component
+                        )
                         continue
                     candidates.append(
                         PdfFactCandidate(
@@ -425,7 +447,9 @@ class CninfoPdfExtractor:
                 ):
                     currency, multiplier = unit
                     if currency != "CNY":
-                        recognized_fact_line_without_unit = True
+                        fact_names_without_supported_unit.add(
+                            blank_cash_flow_component
+                        )
                         continue
                     candidates.append(
                         PdfFactCandidate(
@@ -505,14 +529,14 @@ class CninfoPdfExtractor:
                             inline_unit_match.group(1)
                         ]
                     else:
-                        recognized_fact_line_without_unit = True
+                        fact_names_without_supported_unit.add(canonical_name)
                         continue
                 else:
                     currency, multiplier = unit
                 if canonical_name == "total_shares":
                     currency, multiplier = "SHARES", Decimal(1)
                 elif currency != "CNY":
-                    recognized_fact_line_without_unit = True
+                    fact_names_without_supported_unit.add(canonical_name)
                     continue
                 candidates.append(
                     PdfFactCandidate(
@@ -527,9 +551,12 @@ class CninfoPdfExtractor:
                         ).hexdigest(),
                     )
                 )
-        if recognized_fact_line_without_unit:
-            issues.add("PDF_LAYOUT_UNSUPPORTED")
-
+                if annual_summary_spillover and canonical_name == "adjusted_net_profit":
+                    statement_title = None
+                    statement_type = None
+                    unit = None
+                    pending_label = ""
+                    annual_summary_spillover = False
         facts: dict[str, Decimal] = {}
         grouped: dict[str, list[PdfFactCandidate]] = {}
         for candidate in candidates:
@@ -579,6 +606,8 @@ class CninfoPdfExtractor:
             facts["interest_bearing_debt"] = debt_value
             derivations = (("interest_bearing_debt", component_names),)
 
+        if fact_names_without_supported_unit - facts.keys():
+            issues.add("PDF_LAYOUT_UNSUPPORTED")
         if not CANONICAL_PILOT_FACTS.issubset(facts):
             issues.add("PDF_REQUIRED_FACTS_MISSING")
         self._validate_balance(facts, issues)
@@ -873,6 +902,23 @@ def _statement_table_header_matches(
     return False
 
 
+def _annual_summary_header_matches(
+    line: str,
+    *,
+    descriptor: FilingDescriptor,
+) -> bool:
+    if descriptor.report_type is not ReportType.ANNUAL:
+        return False
+    normalized = re.sub(r"\s+", "", line.strip())
+    year = descriptor.report_period.year
+    return (
+        f"{year}\u5e74" in normalized
+        and f"{year - 1}\u5e74" in normalized
+        and f"{year - 2}\u5e74" in normalized
+        and "\u672c\u5e74\u6bd4\u4e0a\u5e74" in normalized
+    )
+
+
 def _canonical_name(label: str) -> str | None:
     direct = _ALIASES.get(label)
     if direct is not None:
@@ -898,8 +944,31 @@ def _could_be_alias_prefix(label: str) -> bool:
 
 
 def _blank_debt_component(line: str) -> str | None:
-    normalized = _normalize_label(line)
+    normalized = re.sub(
+        r"[-\u2014]+$",
+        "",
+        _normalize_label(line),
+    )
     canonical = _ALIASES.get(normalized)
+    if canonical is None:
+        current_dash_with_prior = re.fullmatch(
+            r"(?P<label>.+?)[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d"
+            r"\u4e03\u516b\u4e5d\u5341]+\u3001\d+"
+            r"(?:(?:\uff08\d+\uff09)|(?:\(\d+\)))?"
+            r"[-\u2014]+[-+]?\(?[\d,]+(?:\.\d+)?\)?",
+            normalized,
+        )
+        if current_dash_with_prior is not None:
+            canonical = _ALIASES.get(current_dash_with_prior.group("label"))
+    if canonical is None:
+        note_only = re.fullmatch(
+            r"(?P<label>.+?)[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d"
+            r"\u4e03\u516b\u4e5d\u5341]+\u3001\d+"
+            r"(?:(?:\uff08\d+\uff09)|(?:\(\d+\)))?",
+            normalized,
+        )
+        if note_only is not None:
+            canonical = _ALIASES.get(note_only.group("label"))
     if canonical in _INTEREST_BEARING_DEBT_COMPONENTS:
         return canonical
     return None
@@ -940,6 +1009,24 @@ def _a_share_labeled_codes(text: str, default_suffix: str) -> set[str]:
         if explicit_suffix and explicit_suffix not in {"SH", "SZ"}:
             continue
         codes.add(f"{symbol}.{explicit_suffix or default_suffix}")
+    exchange_name = {
+        "SH": "\u4e0a\u6d77\u8bc1\u5238\u4ea4\u6613\u6240",
+        "SZ": "\u6df1\u5733\u8bc1\u5238\u4ea4\u6613\u6240",
+    }.get(default_suffix)
+    if exchange_name is not None:
+        for line in text.splitlines():
+            normalized_line = re.sub(r"\s+", " ", line.strip())
+            if (
+                exchange_name in normalized_line
+                and re.search(r"(?:^|\s)A\s*\u80a1(?:\s|$)", normalized_line)
+                is not None
+            ):
+                codes.update(
+                    f"{symbol}.{default_suffix}"
+                    for symbol in re.findall(
+                        r"(?<!\d)\d{6}(?!\d)", normalized_line
+                    )
+                )
     return codes
 
 

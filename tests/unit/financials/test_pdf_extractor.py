@@ -103,6 +103,33 @@ def test_labeled_six_digit_a_share_code_matches_descriptor_suffix(
     assert result.quality_status is QualityStatus.VALID
 
 
+def test_front_matter_a_share_listing_row_establishes_identity(
+    tmp_path: Path,
+) -> None:
+    """SSE annual reports may put the code only in a listing-information row."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "699998.SH",
+        "",
+    )
+    page_payload[1]["text"] = (
+        "\u80a1\u7968\u79cd\u7c7b \u80a1\u7968\u4e0a\u5e02\u4ea4\u6613\u6240 "
+        "\u80a1\u7968\u7b80\u79f0 \u80a1\u7968\u4ee3\u7801\n"
+        "A\u80a1 \u4e0a\u6d77\u8bc1\u5238\u4ea4\u6613\u6240 \u793a\u4f8b "
+        "699998 \u65e0\n"
+        f"{page_payload[1]['text']}"
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.issues == ()
+
+
 def test_extracts_visible_cninfo_whitespace_tables_across_pages(
     tmp_path: Path,
 ) -> None:
@@ -843,6 +870,41 @@ def test_quarterly_breakdown_does_not_conflict_with_annual_main_data(
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
 
 
+def test_annual_summary_table_can_follow_an_out_of_order_quarterly_heading(
+    tmp_path: Path,
+) -> None:
+    """A PDF reading-order quirk must not hide the annual adjusted profit."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += (
+        "\n\u516d\u3001\u5206\u5b63\u5ea6\u4e3b\u8981\u8d22\u52a1\u6307\u6807\n"
+        "\u5355\u4f4d\uff1a\u5143\n"
+        "2025\u5e74 2024\u5e74 \u672c\u5e74\u6bd4\u4e0a\u5e74\u589e\u51cf 2023\u5e74\n"
+        "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\n"
+        "\u7684\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\n"
+        "\u7684\u51c0\u5229\u6da6\uff08\u5143\uff09\n"
+        "1,700,000 1,600,000 6.25% 1,500,000\n"
+        "\u7b2c\u4e00\u5b63\u5ea6 \u7b2c\u4e8c\u5b63\u5ea6 "
+        "\u7b2c\u4e09\u5b63\u5ea6 \u7b2c\u56db\u5b63\u5ea6\n"
+        "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\u7684\u6263\u9664"
+        "\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u7684\u51c0\u5229\u6da6 "
+        "200,000 300,000 400,000 800,000\n"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u540e\u7684\u51c0\u5229\u6da6 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.issues == ()
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
 def test_plain_share_capital_label_is_total_shares_inside_balance_sheet(
     tmp_path: Path,
 ) -> None:
@@ -862,6 +924,29 @@ def test_plain_share_capital_label_is_total_shares_inside_balance_sheet(
     assert result.quality_status is QualityStatus.VALID
     assert result.issues == ()
     assert result.facts["total_shares"] == Decimal("100000000")
+
+
+def test_split_equity_row_with_value_before_continuation_is_supported(
+    tmp_path: Path,
+) -> None:
+    """A page break may place the equity row continuation after its values."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "\u6240\u6709\u8005\u6743\u76ca\u5408\u8ba1 | 1,200",
+        "\u6240\u6709\u8005\u6743\u76ca\uff08\u6216\u80a1\u4e1c\u6743 1,200 1,100",
+    )
+    page_payload[2]["text"] = (
+        "\u76ca\uff09\u5408\u8ba1\n" + page_payload[2]["text"]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.facts["equity"] == Decimal("12000000")
 
 
 def test_derives_interest_bearing_debt_only_from_complete_visible_components(
@@ -896,10 +981,10 @@ def test_derives_interest_bearing_debt_only_from_complete_visible_components(
                 "货币资金 300\n"
                 "流动资产合计 1,200\n"
                 "资产总计 2,000\n"
-                "短期借款 100\n"
+                "短期借款 七、32 - 100\n"
                 "一年内到期的非流动负债 50\n"
                 "长期借款\n"
-                "应付债券\n"
+                "\u5e94\u4ed8\u503a\u5238 \u4e03\u300146 - -\n"
                 "租赁负债 25\n"
                 "流动负债合计 500\n"
                 "负债合计 800\n"
@@ -945,7 +1030,7 @@ def test_derives_interest_bearing_debt_only_from_complete_visible_components(
     )
 
     assert result.quality_status is QualityStatus.VALID
-    assert result.facts["interest_bearing_debt"] == Decimal("175")
+    assert result.facts["interest_bearing_debt"] == Decimal("75")
     assert document.normalization_metadata[
         "interest_bearing_debt_derivation_version"
     ] == "interest-bearing-debt-components-v1"
@@ -981,6 +1066,30 @@ def test_incomplete_debt_components_never_create_an_estimated_total(
     assert result.quality_status is QualityStatus.UNVERIFIED
     assert "PDF_REQUIRED_FACTS_MISSING" in result.issues
     assert "interest_bearing_debt" not in result.facts
+
+
+def test_duplicate_fact_without_unit_does_not_reject_complete_statement(
+    tmp_path: Path,
+) -> None:
+    """A unit-less contents excerpt is harmless when the audited table is complete."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    duplicate_income_page = dict(page_payload[2])
+    duplicate_income_page["page_number"] = 99
+    page_payload.append(duplicate_income_page)
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert "PDF_LAYOUT_UNSUPPORTED" not in result.issues
+    assert result.facts["revenue"] == Decimal("10000000")
 
 
 @pytest.mark.parametrize(

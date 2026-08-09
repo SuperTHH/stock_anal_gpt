@@ -111,8 +111,13 @@ class ShareCapitalResolver:
                 "SHARE_CAPITAL_ACTION_QUALITY_BLOCKED",
             )
 
+        implemented = tuple(
+            action
+            for action in resolved
+            if action.action_status is ActionStatus.IMPLEMENTED
+        )
         effect_keys: set[tuple[ActionType, datetime]] = set()
-        for action in resolved:
+        for action in implemented:
             if action.effective_at is None:
                 return self._blocked(
                     baseline_fact_id,
@@ -127,7 +132,7 @@ class ShareCapitalResolver:
             effect_keys.add(key)
 
         ordered = sorted(
-            resolved,
+            implemented,
             key=lambda action: (
                 action.effective_at,
                 _ACTION_ORDER[action.action_type],
@@ -138,8 +143,6 @@ class ShareCapitalResolver:
         applied_ids: list[str] = []
         for action in ordered:
             applied_ids.append(action.record_id)
-            if action.action_status is ActionStatus.CANCELLED:
-                continue
             if action.action_type is ActionType.STOCK_DIVIDEND:
                 total_shares *= Decimal(1) + (
                     action.stock_dividend_ratio or Decimal(0)

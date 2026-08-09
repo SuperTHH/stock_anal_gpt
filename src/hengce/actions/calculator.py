@@ -87,7 +87,7 @@ class TotalReturnCalculator:
 
         by_ex_date: dict[date, list[CorporateAction]] = {}
         for action in resolved_actions:
-            if action.action_status is not ActionStatus.CANCELLED:
+            if action.action_status is ActionStatus.IMPLEMENTED:
                 by_ex_date.setdefault(action.ex_date, []).append(action)
 
         index = Decimal(1)

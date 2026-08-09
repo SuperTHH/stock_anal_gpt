@@ -223,6 +223,53 @@ def test_ingests_reviewed_dividend_as_versioned_corporate_action(
     assert action.record_id in result.source_record_ids
 
 
+def test_ingests_reviewed_explicit_no_dividend_without_fabricating_action(
+    tmp_path: Path,
+) -> None:
+    """An official no-distribution decision completes evidence without a fake dividend."""
+    raw_store = RawObjectStore(tmp_path / "raw")
+    reference = raw_store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/disclosure/official-evidence.pdf",
+        collected_at=KNOWN_AT,
+        content_type="application/pdf",
+        payload=b"private-official-no-dividend-fixture",
+    )
+    item = _downloaded_item(
+        item_id="dividend-2025-none",
+        document_kind=DocumentKind.DIVIDEND_RECORD,
+        raw_hash=reference.content_hash,
+        report_period=date(2025, 12, 31),
+    )
+    service, pilot_repository, action_repository = _service(tmp_path, item)
+    _write_evidence(
+        tmp_path / "manual_inbox",
+        item_id=item.item_id,
+        payload={
+            "schema_version": "official-action-evidence-v1",
+            "attachment_sha256": reference.content_hash,
+            "reviewed_at": KNOWN_AT.isoformat(),
+            "extraction_method": "MANUAL_REVIEW",
+            "actions": [],
+            "no_dividend_fiscal_year": 2025,
+        },
+    )
+
+    result = service.run(item.item_id)
+
+    stored_item = pilot_repository.get_manifest_item(item.item_id)
+    assert stored_item is not None
+    assert stored_item.status is AcquisitionStatus.INGESTED
+    assert result.ingested is True
+    assert result.action_count == 0
+    assert result.source_record_ids == ()
+    assert action_repository.visible_actions(
+        item.ts_code,
+        as_of=CUTOFF,
+        known_at=KNOWN_AT,
+    ) == ()
+
+
 def test_ingests_reviewed_risk_screen_with_explicit_filter_facts(
     tmp_path: Path,
 ) -> None:

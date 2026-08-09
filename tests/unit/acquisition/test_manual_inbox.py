@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from io import BytesIO
@@ -328,6 +329,44 @@ def test_policy_denial_and_cross_identity_duplicate_are_rejected(
         "MANUAL_CONTENT_IDENTITY_CONFLICT",
         "MANUAL_SOURCE_POLICY_DENIED",
     }
+
+
+def test_same_official_attachment_can_support_two_kinds_for_same_issuer(
+    tmp_path: Path,
+) -> None:
+    """One official annual report may evidence both financials and a dividend year."""
+    root = tmp_path / "inbox"
+    payload = fictional_pdf()
+    content_hash = hashlib.sha256(payload).hexdigest()
+    source_url = "https://static.sse.com.cn/disclosure/annual-report.pdf"
+    existing = manifest_item().model_copy(
+        update={
+            "status": AcquisitionStatus.INGESTED,
+            "source_url": source_url,
+            "content_hash": content_hash,
+            "raw_object_hash": content_hash,
+            "quality_status": QualityStatus.VALID,
+        }
+    )
+    dividend = manifest_item(item_id="dividend-2025").model_copy(
+        update={
+            "document_kind": DocumentKind.DIVIDEND_RECORD,
+            "report_type": None,
+        }
+    )
+    write_pair(
+        root,
+        attachment_name="annual-as-dividend.pdf",
+        payload=payload,
+        item=dividend,
+        source_url=source_url,
+        content_type="application/pdf",
+    )
+
+    result = inbox(tmp_path).scan(root, [existing, dividend])
+
+    assert result.rejected == ()
+    assert [item.item_id for item in result.accepted] == ["dividend-2025"]
 
 
 def test_future_download_timestamp_is_rejected(tmp_path: Path) -> None:
