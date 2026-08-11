@@ -23,12 +23,14 @@ class PilotStageContext:
     acquisition_mode: AcquisitionMode
     input_hash: str
     data_dir: Path
+    event_cutoff_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PilotRunSummary:
     market_date: date
     report_cutoff_at: datetime
+    event_cutoff_at: datetime
     known_at: datetime
     acquisition_mode: AcquisitionMode
     stage_statuses: dict[str, str]
@@ -80,18 +82,22 @@ class HistoricalPilotRunner:
         *,
         market_date: date,
         report_cutoff_at: datetime,
+        event_cutoff_at: datetime | None = None,
         known_at: datetime,
         acquisition_mode: AcquisitionMode,
     ) -> PilotRunSummary:
+        effective_event_cutoff = event_cutoff_at or report_cutoff_at
         self._validate_inputs(
             market_date,
             report_cutoff_at,
+            effective_event_cutoff,
             known_at,
             acquisition_mode,
         )
         root_payload = {
             "market_date": market_date.isoformat(),
             "report_cutoff_at": report_cutoff_at.isoformat(),
+            "event_cutoff_at": effective_event_cutoff.isoformat(),
             "known_at": known_at.isoformat(),
             "acquisition_mode": acquisition_mode,
         }
@@ -144,6 +150,7 @@ class HistoricalPilotRunner:
                         stage_name=stage,
                         market_date=market_date,
                         report_cutoff_at=report_cutoff_at,
+                        event_cutoff_at=effective_event_cutoff,
                         known_at=known_at,
                         acquisition_mode=acquisition_mode,
                         input_hash=stage_input_hash,
@@ -164,6 +171,7 @@ class HistoricalPilotRunner:
                 return PilotRunSummary(
                     market_date=market_date,
                     report_cutoff_at=report_cutoff_at,
+                    event_cutoff_at=effective_event_cutoff,
                     known_at=known_at,
                     acquisition_mode=acquisition_mode,
                     stage_statuses=statuses,
@@ -203,6 +211,7 @@ class HistoricalPilotRunner:
         return PilotRunSummary(
             market_date=market_date,
             report_cutoff_at=report_cutoff_at,
+            event_cutoff_at=effective_event_cutoff,
             known_at=known_at,
             acquisition_mode=acquisition_mode,
             stage_statuses=statuses,
@@ -312,14 +321,17 @@ class HistoricalPilotRunner:
         self,
         market_date: date,
         report_cutoff_at: datetime,
+        event_cutoff_at: datetime,
         known_at: datetime,
         acquisition_mode: str,
     ) -> None:
-        for value in (report_cutoff_at, known_at):
+        for value in (report_cutoff_at, event_cutoff_at, known_at):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError("PILOT_RUN_CUTOFF_INVALID")
         if report_cutoff_at.date() != market_date:
             raise ValueError("PILOT_RUN_MARKET_DATE_MISMATCH")
+        if event_cutoff_at.date() != market_date or event_cutoff_at > known_at:
+            raise ValueError("PILOT_RUN_EVENT_CUTOFF_INVALID")
         now = self.clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("PILOT_RUN_CLOCK_INVALID")

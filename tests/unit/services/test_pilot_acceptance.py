@@ -238,6 +238,17 @@ def _validator(*, ignored: bool = True) -> PilotAcceptanceValidator:
     return PilotAcceptanceValidator(ignore_checker=lambda _path: ignored)
 
 
+def test_source_visibility_allows_contract_optional_publication_times() -> None:
+    source = {
+        "published_at": None,
+        "effective_at": None,
+        "collected_at": NOW.isoformat(),
+        "valid_from": NOW.isoformat(),
+    }
+
+    assert PilotAcceptanceValidator._source_visible(source, CUTOFF, NOW)
+
+
 def _mutate_artifact(
     repository: ReportRepository,
     mutate: object,

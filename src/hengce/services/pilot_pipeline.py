@@ -47,6 +47,7 @@ from hengce.services.pilot_reconstruction import (
 from hengce.services.pilot_universe import PilotUniverseSelector
 from hengce.state.action_repository import CorporateActionRepository
 from hengce.state.dividend_repository import AnnualDividendRepository
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pdf_financial_repository import (
     PdfFinancialDocumentRepository,
@@ -97,6 +98,7 @@ class PilotProductionStages:
         self.risk_repository = OfficialRiskScreenRepository(state.path)
         self.action_repository = CorporateActionRepository(state.path)
         self.dividend_repository = AnnualDividendRepository(state.path)
+        self.event_repository = OfficialEventRepository(state.path)
         self.market_warehouse = MarketWarehouse(data_dir / "normalized")
         self.report_repository = ReportRepository(state.path)
         self.pdf_repository = PdfFinancialDocumentRepository(state.path)
@@ -443,11 +445,22 @@ class PilotProductionStages:
             and is_official_pdf_location(item.source_id, item.source_url)
             for item in manifest
         )
+        event_cutoff_at = context.event_cutoff_at or context.report_cutoff_at
+        official_events = self.event_repository.visible_events(
+            as_of=event_cutoff_at,
+            known_at=context.known_at,
+        )
+        manual_todo_count = self._manual_todo_count(manifest)
+        fallback_reasons = (
+            {"XBRL_UNAVAILABLE_OR_NOT_INGESTED": pdf_count}
+            if pdf_count > 0 and xbrl_count == 0
+            else {}
+        )
         quality_summary: dict[str, object] = {
             "manifest_status_distribution": statuses,
             "xbrl_used_count": xbrl_count,
             "pdf_used_count": pdf_count,
-            "fallback_reason_counts": {},
+            "fallback_reason_counts": fallback_reasons,
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
             "corporate_action_count": self._table_count("corporate_action_versions"),
@@ -456,11 +469,16 @@ class PilotProductionStages:
             ),
             "share_capital_count": self._share_capital_count(metrics),
             "derived_metric_count": self._derived_metric_count(metrics),
+            "official_risk_screen_count": self._table_count(
+                "official_risk_screen_versions"
+            ),
+            "official_event_count": len(official_events),
             "narrative_template_versions": dict(_NARRATIVE_TEMPLATE_VERSIONS),
         }
         identity = {
             "market_date": context.market_date.isoformat(),
             "known_at": context.known_at.isoformat(),
+            "event_cutoff_at": event_cutoff_at.isoformat(),
             "universe_id": universe.universe_id,
         }
         digest = hashlib.sha256(
@@ -478,7 +496,7 @@ class PilotProductionStages:
             report_id=report_id,
             report_date=context.market_date,
             market_cutoff_at=context.report_cutoff_at,
-            event_cutoff_at=context.report_cutoff_at,
+            event_cutoff_at=event_cutoff_at,
             generated_at=context.known_at,
             candidate_pools={
                 strategy: list(result.candidates) for strategy, result in results.items()
@@ -487,14 +505,30 @@ class PilotProductionStages:
                 "market": QualityStatus.VALID,
                 "security_master": QualityStatus.VALID,
                 "pilot_universe": QualityStatus.VALID,
-                "manifest": QualityStatus.VALID,
+                "manifest": (
+                    QualityStatus.PARTIAL
+                    if manual_todo_count
+                    else QualityStatus.VALID
+                ),
                 "financials": (QualityStatus.VALID if fact_count > 0 else QualityStatus.MISSING),
-                "actions": (
+                "corporate_actions": (
                     QualityStatus.VALID
-                    if (
-                        quality_summary["corporate_action_count"]
-                        or quality_summary["annual_dividend_record_count"]
-                    )
+                    if quality_summary["corporate_action_count"]
+                    else QualityStatus.MISSING
+                ),
+                "dividends": (
+                    QualityStatus.VALID
+                    if quality_summary["annual_dividend_record_count"]
+                    else QualityStatus.MISSING
+                ),
+                "risk": (
+                    QualityStatus.VALID
+                    if quality_summary["official_risk_screen_count"]
+                    else QualityStatus.MISSING
+                ),
+                "events": (
+                    QualityStatus.VALID
+                    if official_events
                     else QualityStatus.MISSING
                 ),
                 "metrics": (
@@ -511,6 +545,7 @@ class PilotProductionStages:
             strategy_versions={
                 strategy: definition.version for strategy, definition in _DEFINITIONS.items()
             },
+            official_events=official_events,
             source_records=self._report_source_records(
                 context,
                 universe,
@@ -528,7 +563,7 @@ class PilotProductionStages:
             report_cutoff_at=context.report_cutoff_at,
             known_at=context.known_at,
             generation_started_at=context.known_at,
-            manual_todo_count=self._manual_todo_count(manifest),
+            manual_todo_count=manual_todo_count,
             quality_summary=quality_summary,
         )
         if not publication.published or publication.snapshot is None:
@@ -540,15 +575,19 @@ class PilotProductionStages:
         return {
             "report_id": publication.snapshot.report_id,
             "report_hash": publication.snapshot.manifest_hash,
-            "manual_todo_count": self._manual_todo_count(manifest),
+            "manual_todo_count": manual_todo_count,
             "manifest_status_distribution": statuses,
             "xbrl_used_count": xbrl_count,
             "pdf_used_count": pdf_count,
-            "fallback_reason_counts": {},
+            "fallback_reason_counts": fallback_reasons,
             "financial_fact_count": fact_count,
             "corporate_action_count": quality_summary["corporate_action_count"],
             "share_capital_count": quality_summary["share_capital_count"],
             "derived_metric_count": quality_summary["derived_metric_count"],
+            "official_risk_screen_count": quality_summary[
+                "official_risk_screen_count"
+            ],
+            "official_event_count": len(official_events),
             "pool_coverage": {
                 strategy.value: str(result.readiness.coverage_ratio)
                 for strategy, result in results.items()
@@ -767,6 +806,7 @@ class PilotProductionStages:
         if table not in {
             "annual_dividend_record_versions",
             "corporate_action_versions",
+            "official_risk_screen_versions",
         }:
             raise ValueError("PILOT_TABLE_NOT_ALLOWED")
         try:
@@ -810,8 +850,8 @@ class PilotProductionStages:
         }
         domains = {
             DocumentKind.PERIODIC_REPORT: "financials",
-            DocumentKind.DIVIDEND_RECORD: "actions",
-            DocumentKind.CAPITAL_ACTION_TIMELINE: "actions",
+            DocumentKind.DIVIDEND_RECORD: "dividends",
+            DocumentKind.CAPITAL_ACTION_TIMELINE: "corporate_actions",
             DocumentKind.RISK_SCREEN: "risk",
         }
         records: dict[str, ReportSource] = {}
@@ -823,7 +863,15 @@ class PilotProductionStages:
             records[source.record_id] = source
 
         def source_name(source_id: str) -> str:
-            return source_names.get(source_id, source_id)
+            localized = {
+                "cninfo": "巨潮资讯",
+                "sse": "上海证券交易所",
+                "szse": "深圳证券交易所",
+                "csrc": "中国证监会",
+                "stats": "国家统计局",
+                "tushare": "Tushare 日线接口",
+            }
+            return localized.get(source_id, source_names.get(source_id, source_id))
 
         def add_fact_source(
             *,
@@ -990,7 +1038,7 @@ class PilotProductionStages:
             ):
                 add_fact_source(
                     record_id=action.record_id,
-                    domain="actions",
+                    domain="corporate_actions",
                     source_id=action.source_id,
                     source_url=action.source_url,
                     published_at=action.published_at,
@@ -1008,7 +1056,7 @@ class PilotProductionStages:
             ):
                 add_fact_source(
                     record_id=record.record_id,
-                    domain="actions",
+                    domain="dividends",
                     source_id=record.source_id,
                     source_url=record.source_url,
                     published_at=record.published_at,
@@ -1038,6 +1086,26 @@ class PilotProductionStages:
                     license_policy=screen.license_policy,
                     quality_status=screen.quality_status,
                 )
+        event_cutoff_at = context.event_cutoff_at or context.report_cutoff_at
+        for event in self.event_repository.visible_events(
+            as_of=event_cutoff_at,
+            known_at=context.known_at,
+        ):
+            add(
+                ReportSource(
+                    record_id=event.record_id,
+                    domain="events",
+                    source_name=source_name(event.source_id),
+                    source_url=event.source_url,
+                    published_at=event.published_at,
+                    effective_at=event.effective_at,
+                    collected_at=event.collected_at,
+                    valid_from=event.valid_from,
+                    version=event.version,
+                    license_policy=event.license_policy,
+                    quality_status=event.quality_status,
+                )
+            )
         return tuple(records[key] for key in sorted(records))
 
 

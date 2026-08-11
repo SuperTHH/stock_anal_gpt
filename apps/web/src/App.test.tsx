@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
 import App from "./App";
+import type { Candidate, FactorDetail, ReportPayload, StrategyType } from "./types";
 
 const report = {
   snapshot: {
@@ -97,6 +98,96 @@ const report = {
     xbrl_used_count: 140,
     pdf_used_count: 10,
   },
+};
+
+const researchFactors: Record<StrategyType, FactorDetail> = {
+  QUALITY_GROWTH: {
+    factor_name: "capital_return",
+    raw_value: "89.13043478260869565217391305",
+    normalized_score: "91.30434782608695652173913043",
+    weight: "0.20",
+    weighted_score: "18.26086956521739130434782609",
+    quality_status: "DERIVED",
+    source_record_ids: ["financial-fact-a", "financial-fact-b"],
+    normalization_scope: "pilot_universe",
+    used_market_fallback: false,
+  },
+  DEEP_VALUE: {
+    factor_name: "absolute_valuation",
+    raw_value: "97.03557312252964426877470357",
+    normalized_score: "100",
+    weight: "0.25",
+    weighted_score: "25",
+    quality_status: "DERIVED",
+    source_record_ids: ["financial-fact-a", "financial-fact-b"],
+    normalization_scope: "pilot_universe",
+    used_market_fallback: false,
+  },
+  STABLE_DIVIDEND: {
+    factor_name: "dividend_yield",
+    raw_value: "0.01868855101273303605007252995",
+    normalized_score: "100",
+    weight: "0.25",
+    weighted_score: "25",
+    quality_status: "DERIVED",
+    source_record_ids: ["financial-fact-a", "financial-fact-b"],
+    normalization_scope: "pilot_universe",
+    used_market_fallback: false,
+  },
+};
+
+function researchCandidates(strategy: StrategyType): Candidate[] {
+  return Array.from({ length: 24 }, (_, index) => ({
+    ts_code: `${String(600000 + index).padStart(6, "0")}.SH`,
+    security_name: `测试公司${index + 1}`,
+    rank_in_strategy: index + 1,
+    strategy_score: String(88 - index / 2),
+    candidate_status: index < 4 ? "CANDIDATE" : "WATCH",
+    selection_reasons: ["测试规则满足"],
+    risk_flags: [],
+    catalysts: ["测试催化剂"],
+    observe_conditions: ["测试观察条件"],
+    invalidate_conditions: ["测试失效条件"],
+    data_completeness: "1",
+    factor_details: [researchFactors[strategy]],
+  }));
+}
+
+const researchReport: ReportPayload = {
+  ...(report as unknown as ReportPayload),
+  candidate_pools: {
+    QUALITY_GROWTH: researchCandidates("QUALITY_GROWTH"),
+    DEEP_VALUE: researchCandidates("DEEP_VALUE"),
+    STABLE_DIVIDEND: researchCandidates("STABLE_DIVIDEND"),
+  },
+  source_records: [
+    {
+      record_id: "financial-fact-a",
+      domain: "财务事实",
+      source_name: "巨潮资讯",
+      source_url: "https://static.cninfo.com.cn/example.pdf",
+      published_at: "2026-04-30T18:00:00+08:00",
+      effective_at: "2025-12-31T23:59:59+08:00",
+      collected_at: "2026-07-22T21:31:00+08:00",
+      valid_from: "2026-07-22T21:31:00+08:00",
+      version: "fact-a",
+      license_policy: "个人非商业研究",
+      quality_status: "DERIVED",
+    },
+    {
+      record_id: "financial-fact-b",
+      domain: "财务事实",
+      source_name: "巨潮资讯",
+      source_url: "https://static.cninfo.com.cn/example.pdf",
+      published_at: "2026-04-30T18:00:00+08:00",
+      effective_at: "2025-12-31T23:59:59+08:00",
+      collected_at: "2026-07-22T21:31:00+08:00",
+      valid_from: "2026-07-22T21:31:00+08:00",
+      version: "fact-b",
+      license_policy: "个人非商业研究",
+      quality_status: "DERIVED",
+    },
+  ],
 };
 
 afterEach(() => {
@@ -208,6 +299,161 @@ test("five navigation destinations render from the loaded report without another
     expect(screen.getByRole("heading", { name: destination })).toBeInTheDocument();
   }
   expect(fetchSpy).toHaveBeenCalledTimes(1);
+});
+
+test("individual research offers all 24 unique securities and changes the active company", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(researchReport), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "个股研究" }));
+  const securitySelect = screen.getByRole("combobox", { name: "股票选择（24只）" });
+  expect(screen.getAllByRole("option")).toHaveLength(24);
+  expect(screen.getByRole("heading", { name: "测试公司1" })).toBeInTheDocument();
+
+  await user.selectOptions(securitySelect, "600023.SH");
+  expect(screen.getByRole("heading", { name: "测试公司24" })).toBeInTheDocument();
+  expect(screen.getByText("600023.SH")).toBeInTheDocument();
+});
+
+test("individual research switches among three strategy-specific factor sets", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(researchReport), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "个股研究" }));
+  expect(screen.getByRole("tab", { name: "质量成长合理估值" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByText("资本回报")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("tab", { name: "低估值价值" }));
+  expect(screen.getByText("绝对估值")).toBeInTheDocument();
+  expect(screen.queryByText("资本回报")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("tab", { name: "稳定高股息" }));
+  expect(screen.getByText("股息率")).toBeInTheDocument();
+  expect(screen.getByText("策略内排名 1 / 24")).toBeInTheDocument();
+  expect(screen.getByText("策略得分 88.00")).toBeInTheDocument();
+});
+
+test("factor details use Chinese labels, readable precision, complete scoring fields, and deduplicated sources", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(researchReport), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "个股研究" }));
+  await user.click(screen.getByRole("tab", { name: "稳定高股息" }));
+
+  expect(screen.getByText("因子值 1.87%")).toBeInTheDocument();
+  expect(screen.getByText("标准化得分 100.00")).toBeInTheDocument();
+  expect(screen.getByText("权重 25.00%")).toBeInTheDocument();
+  expect(screen.getByText("加权贡献 25.00")).toBeInTheDocument();
+  expect(screen.getByText("数据质量 DERIVED")).toBeInTheDocument();
+  expect(screen.getByText("标准化范围 30只试点样本")).toBeInTheDocument();
+  expect(screen.getByText("市场数据回退 否")).toBeInTheDocument();
+  expect(screen.getAllByRole("link", { name: "巨潮资讯（2条记录）" })).toHaveLength(1);
+});
+
+test("strategy usability is separate from incomplete data domains", async () => {
+  const payload = {
+    ...report,
+    data_domain_statuses: {
+      market: "VALID",
+      financials: "VALID",
+      events: "MISSING",
+      corporate_actions: "MISSING",
+    },
+    strategy_research_status: "READY",
+    data_completeness_status: "PARTIAL",
+    pool_readiness: Object.fromEntries(
+      Object.entries(report.pool_readiness).map(([strategy, readiness]) => [
+        strategy,
+        { ...readiness, status: "READY", blocking_codes: [] },
+      ]),
+    ),
+  };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  render(<App />);
+
+  expect(await screen.findByText("策略研究可用")).toBeInTheDocument();
+  expect(screen.getByText("部分数据域待完善")).toBeInTheDocument();
+  expect(screen.queryByText("报告数据完整，可用于研究")).not.toBeInTheDocument();
+});
+
+test("quality sources are grouped by document with Chinese filters and pagination", async () => {
+  const sourceRecords = Array.from({ length: 30 }, (_, index) => ({
+    record_id: `fact-${index}`,
+    domain: index < 26 ? "financials" : "events",
+    source_name: index < 26 ? "巨潮资讯" : "中国证监会",
+    source_url: `https://example.com/document-${Math.floor(index / 2)}.pdf`,
+    published_at: "2026-04-30T18:00:00+08:00",
+    effective_at: null,
+    collected_at: "2026-07-22T21:31:00+08:00",
+    valid_from: "2026-07-22T21:31:00+08:00",
+    version: `fact-v${index}`,
+    license_policy: "个人非商业研究",
+    quality_status: "VALID",
+  }));
+  const payload = {
+    ...report,
+    source_records: sourceRecords,
+    data_domain_statuses: {
+      market: "VALID",
+      financials: "VALID",
+      corporate_actions: "MISSING",
+      dividends: "VALID",
+      risk: "VALID",
+      events: "VALID",
+    },
+    quality_summary: {
+      ...report.quality_summary,
+      corporate_action_count: 0,
+      annual_dividend_record_count: 120,
+      official_risk_screen_count: 24,
+      official_event_count: 3,
+      fallback_reason_counts: { XBRL_UNAVAILABLE_OR_NOT_INGESTED: 130 },
+    },
+  };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "数据质量与来源" }));
+
+  expect(screen.getAllByText("财务事实").length).toBeGreaterThan(0);
+  expect(screen.getByText("公司行动")).toBeInTheDocument();
+  expect(screen.getByText("缺失")).toBeInTheDocument();
+  expect(screen.getByText("30 条事实记录 · 15 个来源文档/批次")).toBeInTheDocument();
+  expect(screen.getAllByRole("link", { name: "打开来源" })).toHaveLength(12);
+  expect(screen.getByText("第 1 / 2 页")).toBeInTheDocument();
+  expect(screen.getByText(/XBRL.*未获取或未入库.*PDF/)).toBeInTheDocument();
+
+  await user.type(screen.getByRole("searchbox", { name: "搜索来源" }), "document-14");
+  expect(screen.getAllByRole("link", { name: "打开来源" })).toHaveLength(1);
+  expect(screen.getByText("2 条事实")).toBeInTheDocument();
 });
 
 test("demo mode is explicit, watermarked, and does not call the production report API", async () => {

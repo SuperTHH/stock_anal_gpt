@@ -49,7 +49,10 @@ export interface OfficialEvent {
   event_type?: string;
   title: string;
   factual_summary: string;
+  system_assessment?: string;
+  affected_scope?: string;
   affected_ts_codes?: string[];
+  related_strategies?: StrategyType[];
   impact_horizon?: string;
   confidence?: string;
   source_url?: string;
@@ -75,6 +78,7 @@ export interface ReportPayload {
     report_id: string;
     report_date: string;
     market_cutoff_at: string;
+    event_cutoff_at?: string;
     report_status: string;
     data_domain_statuses: Record<string, string>;
     is_historical_reconstruction?: boolean;
@@ -92,6 +96,7 @@ export interface ReportPayload {
   pool_readiness?: Partial<Record<StrategyType, PoolReadiness>>;
   universe_id?: string | null;
   report_cutoff_at?: string | null;
+  event_cutoff_at?: string | null;
   known_at?: string | null;
   generation_started_at?: string | null;
   manual_todo_count?: number;
@@ -99,7 +104,16 @@ export interface ReportPayload {
     manifest_status_distribution?: Record<string, number>;
     xbrl_used_count?: number;
     pdf_used_count?: number;
+    fallback_reason_counts?: Record<string, number>;
+    corporate_action_count?: number;
+    annual_dividend_record_count?: number;
+    official_risk_screen_count?: number;
+    official_event_count?: number;
+    financial_fact_count?: number;
+    derived_metric_count?: number;
     [key: string]: unknown;
   };
+  strategy_research_status?: "READY" | "BLOCKED";
+  data_completeness_status?: "COMPLETE" | "PARTIAL";
   display_status?: string;
 }

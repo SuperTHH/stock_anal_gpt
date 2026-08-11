@@ -4,7 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from .base import FactBase
-from .enums import QualityStatus
+from .enums import QualityStatus, StrategyType
 
 
 class OfficialEvent(FactBase):
@@ -12,7 +12,10 @@ class OfficialEvent(FactBase):
     event_type: str
     title: str
     factual_summary: str
+    system_assessment: str = ""
+    affected_scope: str = "A_SHARE_MARKET"
     affected_ts_codes: tuple[str, ...]
+    related_strategies: tuple[StrategyType, ...] = ()
     impact_horizon: str
     confidence: Decimal = Field(ge=0, le=1)
 

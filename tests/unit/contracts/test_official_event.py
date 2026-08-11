@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from hengce.contracts.enums import QualityStatus
+from hengce.contracts.enums import QualityStatus, StrategyType
 from hengce.contracts.official_event import OfficialEvent, ReportSource
 
 NOW = datetime(2026, 7, 22, 13, 31, tzinfo=UTC)
@@ -30,10 +30,16 @@ def test_official_event_preserves_traceability_and_impact_fields() -> None:
         affected_ts_codes=("688901.SH",),
         impact_horizon="MEDIUM_TERM",
         confidence=Decimal("0.90"),
+        system_assessment="对长期基本面影响有限，主要影响短期交易安排。",
+        affected_scope="ETF_OPTIONS_MARKET",
+        related_strategies=(StrategyType.QUALITY_GROWTH,),
     )
 
     assert event.affected_ts_codes == ("688901.SH",)
     assert event.confidence == Decimal("0.90")
+    assert event.system_assessment.startswith("对长期基本面")
+    assert event.affected_scope == "ETF_OPTIONS_MARKET"
+    assert event.related_strategies == (StrategyType.QUALITY_GROWTH,)
 
 
 def test_report_source_requires_collection_time_and_license_policy() -> None:

@@ -62,7 +62,6 @@ class ReportPublisher:
             "market",
             "security_master",
             "pilot_universe",
-            "manifest",
         }
         blocked = tuple(
             f"REPORT_DOMAIN_NOT_READY:{name}"
@@ -174,11 +173,14 @@ class ReportPublisher:
                 ("REPORT_SOURCE_LINEAGE_MISSING",),
             )
         for source in source_records:
+            source_cutoff_at = (
+                event_cutoff_at if source.domain == "events" else market_cutoff_at
+            )
             if (
-                (source.published_at is not None and source.published_at > market_cutoff_at)
+                (source.published_at is not None and source.published_at > source_cutoff_at)
                 or (
                     source.effective_at is not None
-                    and source.effective_at > market_cutoff_at
+                    and source.effective_at > source_cutoff_at
                 )
                 or source.collected_at > generated_at
                 or source.valid_from > generated_at
@@ -285,6 +287,19 @@ class ReportPublisher:
             if pool_readiness is not None
             else len(StrategyType)
         )
+        strategy_research_status = (
+            "READY" if ready_pool_count == len(StrategyType) else "BLOCKED"
+        )
+        data_completeness_status = (
+            "COMPLETE"
+            if all(
+                status in {QualityStatus.VALID, QualityStatus.DERIVED}
+                for status in data_domain_statuses.values()
+            )
+            else "PARTIAL"
+        )
+        manifest_payload["strategy_research_status"] = strategy_research_status
+        manifest_payload["data_completeness_status"] = data_completeness_status
         existing = self.repository.get_report(report_id)
         snapshot = ReportSnapshot(
             report_id=report_id,
@@ -295,7 +310,10 @@ class ReportPublisher:
             published_at=generated_at,
             report_status=(
                 ReportStatus.PUBLISHED
-                if ready_pool_count == len(StrategyType)
+                if (
+                    strategy_research_status == "READY"
+                    and data_completeness_status == "COMPLETE"
+                )
                 else ReportStatus.PUBLISHED_PARTIAL
             ),
             previous_report_id=(

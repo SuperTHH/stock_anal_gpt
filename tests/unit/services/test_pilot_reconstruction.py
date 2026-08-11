@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from hengce.services.pilot_reconstruction import (
@@ -131,6 +131,39 @@ def test_manual_only_never_invokes_public_acquisition_handler(
     assert summary.stage_statuses["05_acquire_public_documents"] == (
         "SKIPPED_MANUAL_ONLY"
     )
+
+
+def test_independent_event_cutoff_reaches_every_stage_and_invalidates_checkpoints(
+    tmp_path: Path,
+) -> None:
+    runner, calls, _network = built_runner(tmp_path)
+    observed: list[datetime | None] = []
+    original_handlers = runner.stage_handlers.copy()
+
+    def capture(context: PilotStageContext) -> dict[str, object]:
+        observed.append(context.event_cutoff_at)
+        return dict(original_handlers[context.stage_name](context))
+
+    runner.stage_handlers = {stage: capture for stage in original_handlers}
+    event_cutoff = CUTOFF + timedelta(hours=2)
+    first = runner.run(
+        market_date=MARKET_DATE,
+        report_cutoff_at=CUTOFF,
+        event_cutoff_at=event_cutoff,
+        known_at=NOW,
+        acquisition_mode="manual-only",
+    )
+    second = runner.run(
+        market_date=MARKET_DATE,
+        report_cutoff_at=CUTOFF,
+        event_cutoff_at=CUTOFF,
+        known_at=NOW,
+        acquisition_mode="manual-only",
+    )
+
+    assert first.event_cutoff_at == event_cutoff
+    assert observed[0] == event_cutoff
+    assert second.stage_statuses["02_validate_inputs"] == "SUCCEEDED"
 
 
 def test_new_manual_inbox_content_invalidates_scan_and_downstream_checkpoints(

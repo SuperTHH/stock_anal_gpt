@@ -18,6 +18,7 @@ from hengce.contracts.enums import (
     StrategyType,
 )
 from hengce.contracts.market import MarketBar, SecurityMaster
+from hengce.contracts.official_event import OfficialEvent
 from hengce.contracts.pilot import AcquisitionManifestItem
 from hengce.contracts.risk import OfficialRiskScreen
 from hengce.financials.metrics import MetricValue, PilotMetricResult
@@ -26,6 +27,7 @@ from hengce.services.pilot_acceptance import PilotAcceptanceValidator
 from hengce.services.pilot_pipeline import PilotProductionStages
 from hengce.services.pilot_reconstruction import PilotStageContext
 from hengce.state.dividend_repository import AnnualDividendRepository
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.pdf_financial_repository import PdfFinancialDocumentRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.report_repository import ReportRepository
@@ -634,6 +636,46 @@ def test_report_source_lineage_resolves_market_master_and_pdf_fact_ids(
             implementation_status=ActionStatus.ANNOUNCED,
         )
     )
+    OfficialEventRepository(state.path).save_version(
+        OfficialEvent(
+            record_id="official-event-fixture",
+            source_id="csrc",
+            source_url="https://www.csrc.gov.cn/csrc/c100028/c7646684/content.shtml",
+            published_at=datetime(2026, 7, 22, 22, 0, tzinfo=SHANGHAI),
+            effective_at=datetime(2026, 7, 22, 22, 0, tzinfo=SHANGHAI),
+            collected_at=KNOWN_AT,
+            version="2026-07-22",
+            content_hash="f" * 64,
+            license_policy="official-facts-summary-link-personal-research",
+            quality_status=QualityStatus.VALID,
+            valid_from=KNOWN_AT,
+            institution="中国证监会",
+            event_type="REGULATORY_POLICY",
+            title="资本市场政策座谈会",
+            factual_summary="监管部门公布市场制度建设安排。",
+            system_assessment="中期政策信号，不构成自动买入结论。",
+            affected_scope="A_SHARE_MARKET",
+            affected_ts_codes=(),
+            related_strategies=tuple(StrategyType),
+            impact_horizon="6_TO_12_MONTHS",
+            confidence=Decimal("0.85"),
+        )
+    )
+    context = PilotStageContext(
+        **{
+            field: getattr(context, field)
+            for field in (
+                "stage_name",
+                "market_date",
+                "report_cutoff_at",
+                "known_at",
+                "acquisition_mode",
+                "input_hash",
+                "data_dir",
+            )
+        },
+        event_cutoff_at=datetime(2026, 7, 22, 23, 59, tzinfo=SHANGHAI),
+    )
     manifest = PilotRepository(state.path).list_manifest(universe.universe_id)
 
     sources = stages._report_source_records(context, universe, manifest)
@@ -713,6 +755,42 @@ def test_ready_pool_report_publishes_when_factor_source_ids_resolve(
         )
     )
 
+    OfficialEventRepository(state.path).save_version(
+        OfficialEvent(
+            record_id="official-event-domain-fixture",
+            source_id="csrc",
+            source_url="https://www.csrc.gov.cn/csrc/c100028/c7646684/content.shtml",
+            published_at=datetime(2026, 7, 22, 22, 0, tzinfo=SHANGHAI),
+            effective_at=datetime(2026, 7, 22, 22, 0, tzinfo=SHANGHAI),
+            collected_at=KNOWN_AT,
+            version="2026-07-22",
+            content_hash="f" * 64,
+            license_policy="official-facts-summary-link-personal-research",
+            quality_status=QualityStatus.VALID,
+            valid_from=KNOWN_AT,
+            institution="中国证监会",
+            event_type="REGULATORY_POLICY",
+            title="资本市场政策座谈会",
+            factual_summary="监管部门公布市场制度建设安排。",
+            system_assessment="中期政策信号，不构成自动买入结论。",
+            affected_scope="A_SHARE_MARKET",
+            affected_ts_codes=(),
+            related_strategies=tuple(StrategyType),
+            impact_horizon="6_TO_12_MONTHS",
+            confidence=Decimal("0.85"),
+        )
+    )
+    context = context.__class__(
+        stage_name=context.stage_name,
+        market_date=context.market_date,
+        report_cutoff_at=context.report_cutoff_at,
+        known_at=context.known_at,
+        acquisition_mode=context.acquisition_mode,
+        input_hash=context.input_hash,
+        data_dir=context.data_dir,
+        event_cutoff_at=datetime(2026, 7, 22, 23, 59, tzinfo=SHANGHAI),
+    )
+
     output = stages.publish_report(context)
 
     assert output["pool_statuses"] == {
@@ -723,7 +801,12 @@ def test_ready_pool_report_publishes_when_factor_source_ids_resolve(
     stored = ReportRepository(state.path).latest_report()
     assert stored is not None
     artifact = json.loads(stored.artifact_path.read_text(encoding="utf-8"))
-    assert artifact["data_domain_statuses"]["actions"] == QualityStatus.VALID.value
+    assert artifact["data_domain_statuses"]["corporate_actions"] == QualityStatus.MISSING.value
+    assert artifact["data_domain_statuses"]["dividends"] == QualityStatus.VALID.value
+    assert artifact["data_domain_statuses"]["events"] == QualityStatus.VALID.value
+    assert artifact["event_cutoff_at"] == "2026-07-22T23:59:00+08:00"
+    assert artifact["official_events"][0]["record_id"] == "official-event-domain-fixture"
+    assert any(source["domain"] == "events" for source in artifact["source_records"])
     assert artifact["quality_summary"]["annual_dividend_record_count"] == 1
 
 

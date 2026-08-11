@@ -21,6 +21,7 @@ from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
+from hengce.contracts.official_event import OfficialEvent
 from hengce.financials.mapping import (
     FinancialFactNormalizer,
 )
@@ -43,6 +44,7 @@ from hengce.services.pilot_reconstruction import (
     HistoricalPilotRunner,
     PilotRunSummary,
 )
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
@@ -50,6 +52,14 @@ from hengce.warehouse.financial import FinancialFactWarehouse
 from hengce.warehouse.market import MarketWarehouse
 
 app = typer.Typer(no_args_is_help=True)
+
+_EVENT_PURPOSES = {
+    "sse": "official_event",
+    "szse": "official_event",
+    "cninfo": "official_event",
+    "csrc": "regulatory_event",
+    "stats": "macro_event",
+}
 
 
 @app.callback()
@@ -533,6 +543,7 @@ def check_security_universe(
 def rebuild_pilot_report(
     market_date: Annotated[str, typer.Option()],
     report_cutoff_at: Annotated[str, typer.Option()],
+    event_cutoff_at: Annotated[str | None, typer.Option()] = None,
     acquisition_mode: Annotated[str, typer.Option()] = "manual-only",
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
 ) -> None:
@@ -541,6 +552,11 @@ def rebuild_pilot_report(
     parsed_cutoff = parse_offset_datetime(
         report_cutoff_at,
         "report-cutoff-at",
+    )
+    parsed_event_cutoff = (
+        parse_offset_datetime(event_cutoff_at, "event-cutoff-at")
+        if event_cutoff_at is not None
+        else parsed_cutoff
     )
     if acquisition_mode not in {"manual-only", "approved-public"}:
         raise typer.BadParameter(
@@ -555,6 +571,7 @@ def rebuild_pilot_report(
     summary = build_pilot_runner(settings).run(
         market_date=parsed_market_date,
         report_cutoff_at=parsed_cutoff,
+        event_cutoff_at=parsed_event_cutoff,
         known_at=known_at,
         acquisition_mode=acquisition_mode,
     )
@@ -564,6 +581,51 @@ def rebuild_pilot_report(
         raise typer.Exit(code=1)
     if int(output["manual_todo_count"]) > 0 and output["report_id"] is None:
         raise typer.Exit(code=2)
+
+
+@app.command("import-official-events")
+def import_official_events(
+    input_file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Import reviewed official-event JSON without performing network access."""
+    try:
+        payload = json.loads(input_file.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("OFFICIAL_EVENTS_INVALID")
+        events = tuple(OfficialEvent.model_validate(item) for item in payload)
+    except (OSError, json.JSONDecodeError) as error:
+        raise typer.BadParameter("official event input must be a JSON array") from error
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings, policy_file)
+    guard = PolicyGuard(state)
+    repository = OfficialEventRepository(state.path)
+    for event in events:
+        purpose = _EVENT_PURPOSES.get(event.source_id)
+        if purpose is None:
+            raise typer.BadParameter(f"unsupported official event source: {event.source_id}")
+        guard.validate(
+            event.source_id,
+            str(event.source_url),
+            purpose,
+            "official_event_import",
+        )
+        repository.save_version(event)
+    typer.echo(
+        json.dumps(
+            {
+                "imported_count": len(events),
+                "record_ids": [item.record_id for item in events],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("validate-pilot-report")

@@ -44,6 +44,7 @@ from hengce.financials.xbrl import (
 from hengce.services.financial_ingestion import FinancialIngestionResult
 from hengce.services.initializer import InitializationResult
 from hengce.services.market_ingestion import MarketIngestionResult
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
@@ -1686,6 +1687,9 @@ def test_rebuild_pilot_report_emits_only_aggregate_json(
     class FakeRunner:
         def run(self, **kwargs: object) -> cli.PilotRunSummary:
             assert kwargs["acquisition_mode"] == "manual-only"
+            assert kwargs["event_cutoff_at"] == datetime(
+                2026, 7, 22, 13, 30, tzinfo=UTC
+            )
             return cli.PilotRunSummary(
                 market_date=date(2026, 7, 22),
                 report_cutoff_at=datetime(
@@ -1694,6 +1698,14 @@ def test_rebuild_pilot_report_emits_only_aggregate_json(
                     22,
                     13,
                     30,
+                    tzinfo=UTC,
+                ),
+                event_cutoff_at=datetime(
+                    2026,
+                    7,
+                    22,
+                    15,
+                    59,
                     tzinfo=UTC,
                 ),
                 known_at=datetime(2026, 7, 30, tzinfo=UTC),
@@ -1781,6 +1793,62 @@ def test_rebuild_pilot_report_rejects_invalid_cutoff_and_mode(
 
     assert naive.exit_code == 2
     assert bad_mode.exit_code == 2
+
+
+def test_import_official_events_persists_policy_checked_records(tmp_path: Path) -> None:
+    input_file = tmp_path / "events.json"
+    timestamp = "2026-07-22T15:00:00+08:00"
+    input_file.write_text(
+        json.dumps(
+            [
+                {
+                    "record_id": "event-csrc-policy-20260721",
+                    "source_id": "csrc",
+                    "source_url": "https://www.csrc.gov.cn/csrc/c100028/c7646684/content.shtml",
+                    "published_at": "2026-07-21T18:00:00+08:00",
+                    "effective_at": "2026-07-21T18:00:00+08:00",
+                    "collected_at": timestamp,
+                    "version": "2026-07-21",
+                    "content_hash": "a" * 64,
+                    "license_policy": "official-facts-summary-link-personal-research",
+                    "quality_status": "VALID",
+                    "valid_from": timestamp,
+                    "institution": "中国证监会",
+                    "event_type": "REGULATORY_POLICY",
+                    "title": "证监会召开座谈会",
+                    "factual_summary": "会议研究资本市场制度建设。",
+                    "system_assessment": "中期政策方向，不构成个股买入结论。",
+                    "affected_scope": "A_SHARE_MARKET",
+                    "affected_ts_codes": [],
+                    "related_strategies": ["QUALITY_GROWTH", "DEEP_VALUE"],
+                    "impact_horizon": "6_TO_12_MONTHS",
+                    "confidence": "0.85",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "import-official-events",
+            "--input-file",
+            str(input_file),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["imported_count"] == 1
+    state = StateRepository(tmp_path / "data" / "state" / "hengce.sqlite3")
+    events = OfficialEventRepository(state.path).visible_events(
+        as_of=datetime(2026, 7, 22, 23, 59, tzinfo=UTC),
+        known_at=datetime(2026, 7, 22, 23, 59, tzinfo=UTC),
+    )
+    assert [event.record_id for event in events] == ["event-csrc-policy-20260721"]
 
 
 def test_validate_pilot_report_emits_aggregate_json_and_passes_arguments(

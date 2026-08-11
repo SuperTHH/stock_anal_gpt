@@ -628,9 +628,17 @@ class PilotAcceptanceValidator:
         cutoff: datetime,
         known_at: datetime,
     ) -> bool:
+        published_at = source.get("published_at")
+        effective_at = source.get("effective_at")
         return (
-            cls._aware_at_or_before(source.get("published_at"), cutoff)
-            and cls._aware_at_or_before(source.get("effective_at"), cutoff)
+            (
+                published_at is None
+                or cls._aware_at_or_before(published_at, cutoff)
+            )
+            and (
+                effective_at is None
+                or cls._aware_at_or_before(effective_at, cutoff)
+            )
             and cls._aware_at_or_before(source.get("collected_at"), known_at)
             and cls._aware_at_or_before(source.get("valid_from"), known_at)
         )

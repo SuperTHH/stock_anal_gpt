@@ -1,0 +1,93 @@
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from hengce.contracts.enums import QualityStatus, StrategyType
+from hengce.contracts.official_event import OfficialEvent
+from hengce.state.event_repository import OfficialEventRepository
+from hengce.state.repository import StateRepository
+
+NOW = datetime(2026, 7, 22, 15, 59, tzinfo=UTC)
+
+
+def _event(
+    record_id: str,
+    *,
+    published_at: datetime,
+    valid_from: datetime,
+    supersedes_id: str | None = None,
+    title: str = "官方事件",
+) -> OfficialEvent:
+    return OfficialEvent(
+        record_id=record_id,
+        source_id="csrc",
+        source_url="https://www.csrc.gov.cn/csrc/c100028/content.shtml",
+        published_at=published_at,
+        effective_at=published_at,
+        collected_at=valid_from,
+        version=f"version-{record_id}",
+        content_hash="a" * 64,
+        license_policy="official-public-personal-research",
+        quality_status=QualityStatus.VALID,
+        supersedes_id=supersedes_id,
+        valid_from=valid_from,
+        institution="中国证监会",
+        event_type="REGULATORY_POLICY",
+        title=title,
+        factual_summary="监管部门召开座谈会并公布政策安排。",
+        system_assessment="属于中期制度建设信号，不构成个股买入结论。",
+        affected_scope="A_SHARE_MARKET",
+        affected_ts_codes=(),
+        related_strategies=tuple(StrategyType),
+        impact_horizon="6_TO_12_MONTHS",
+        confidence=Decimal("0.85"),
+    )
+
+
+def _repository(tmp_path: Path) -> OfficialEventRepository:
+    path = tmp_path / "state.sqlite3"
+    StateRepository(path).migrate()
+    return OfficialEventRepository(path)
+
+
+def test_event_visibility_respects_event_cutoff_and_known_at(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    event = _event(
+        "event-policy",
+        published_at=NOW - timedelta(days=1),
+        valid_from=NOW,
+    )
+    repository.save_version(event)
+
+    assert repository.visible_events(
+        as_of=event.published_at - timedelta(seconds=1), known_at=NOW
+    ) == ()
+    assert repository.visible_events(
+        as_of=NOW, known_at=event.valid_from - timedelta(seconds=1)
+    ) == ()
+    assert repository.visible_events(as_of=NOW, known_at=NOW) == (event,)
+
+
+def test_event_correction_is_append_only_and_idempotent(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    original = _event(
+        "event-original",
+        published_at=NOW - timedelta(days=3),
+        valid_from=NOW - timedelta(days=2),
+    )
+    correction = _event(
+        "event-correction",
+        published_at=NOW - timedelta(days=1),
+        valid_from=NOW,
+        supersedes_id=original.record_id,
+        title="官方事件（更正）",
+    )
+    assert repository.save_version(original) == original
+    assert repository.save_version(original) == original
+    repository.save_version(correction)
+
+    assert repository.visible_events(as_of=NOW, known_at=NOW) == (correction,)
+    with pytest.raises(ValueError, match="^OFFICIAL_EVENT_VERSION_CONFLICT$"):
+        repository.save_version(original.model_copy(update={"title": "冲突内容"}))

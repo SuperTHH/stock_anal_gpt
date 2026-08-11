@@ -101,6 +101,7 @@ h3 { font-size: 14px; line-height: 20px; }
   background: #efefeb; cursor: pointer; white-space: nowrap;
 }
 .tabs button.active { background: #1a3c2b; color: #fff; }
+.tabs button:disabled { color: #8c918c; cursor: not-allowed; }
 .tabs button span { margin-left: 8px; }
 .tabs .tab-status { padding: 2px 5px; border: 1px solid currentColor; font-size: 9px; }
 .tabs .tab-status.blocked { color: #a34420; }
@@ -121,16 +122,46 @@ td.numeric, th.numeric { text-align: right; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #efefeb; }
 
-.research-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; }
+.security-picker { display: grid; min-width: 280px; gap: 5px; color: #6f746f; font-size: 11px; }
+.security-picker select {
+  min-height: 38px; padding: 7px 34px 7px 10px; border: 1px solid #9fa39e;
+  background: #fff; color: #1e2220; font: 13px/20px "Microsoft YaHei", sans-serif;
+}
+.research-tabs { margin-top: 0; }
+.research-tabs button { flex: 1; }
+.strategy-membership { font-size: 10px; opacity: .8; }
+.research-summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 22px;
+  padding: 11px 14px; border: 1px solid #9fb4a7; border-top: 0; background: #dce8e1;
+}
+.research-summary strong { margin-right: auto; }
+.research-summary span { font: 12px/18px Consolas, "JetBrains Mono", monospace; }
+.research-grid {
+  display: grid; grid-template-columns: minmax(300px, .85fr) minmax(500px, 1.5fr); gap: 16px;
+}
+.security-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.security-heading h2 { margin-bottom: 2px; }
+.candidate-badge {
+  padding: 3px 8px; border: 1px solid #2f6c4d; background: #e2eee7;
+  color: #1a5136; font-size: 11px; font-weight: 700;
+}
 .evidence-list { margin: 0; }
 .evidence-list div { display: grid; grid-template-columns: 120px 1fr; gap: 16px; padding: 10px 0; border-top: 1px solid #c8cbc5; }
 .evidence-list dt { color: #6f746f; }
 .evidence-list dd { margin: 0; }
-.factor-row, .quality-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid #c8cbc5; }
-.factor-row > div:first-child { display: grid; gap: 2px; }
-.factor-row small { color: #6f746f; }
-.factor-row a { color: #1a3c2b; font-size: 11px; }
-.factor-score { display: grid; justify-items: end; align-content: start; }
+.factor-section-heading { align-items: center; margin-bottom: 0; }
+.factor-section-heading > span { color: #6f746f; }
+.factor-row { padding: 13px 0; border-top: 1px solid #c8cbc5; }
+.factor-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.factor-code { color: #6f746f; font-size: 10px; }
+.factor-metrics {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px;
+  margin-top: 9px; color: #464b47; font: 11px/17px Consolas, "JetBrains Mono", monospace;
+}
+.factor-sources { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 12px; margin-top: 9px; }
+.factor-sources > span { color: #6f746f; font-size: 10px; }
+.factor-sources a { color: #1a3c2b; font-size: 11px; }
+.quality-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid #c8cbc5; }
 .quality-pools { display: grid; gap: 7px; }
 .quality-pools > div {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -141,6 +172,10 @@ tbody tr:hover { background: #efefeb; }
 .event-row:last-child { border-bottom: 1px solid #c8cbc5; }
 .event-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 12px 0; color: #6f746f; font-size: 11px; }
 .event-row a, .source-card a { color: #1a3c2b; }
+.event-narrative { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+.event-narrative > div { border-top: 1px solid #c8cbc5; padding-top: 10px; }
+.event-narrative p { margin-bottom: 0; line-height: 1.65; }
+.event-strategies { color: #5e645f; }
 .source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .source-card { padding: 14px; border: 1px solid #c8cbc5; }
 .source-card-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
@@ -149,6 +184,40 @@ tbody tr:hover { background: #efefeb; }
 .source-card dl div { display: grid; grid-template-columns: 76px 1fr; gap: 12px; padding: 6px 0; border-top: 1px solid #c8cbc5; }
 .source-card dt { color: #6f746f; }
 .source-card dd { margin: 0; overflow-wrap: anywhere; }
+.domain-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+.domain-evidence-grid span, .quality-callout {
+  border: 1px solid #c8cbc5;
+  background: #f4f4ef;
+  padding: 10px 12px;
+}
+.quality-callout { margin: 12px 0 0; line-height: 1.6; }
+.source-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, .35fr) minmax(260px, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.source-toolbar label { display: grid; gap: 6px; color: #5e645f; }
+.source-toolbar select, .source-toolbar input {
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid #9ca29c;
+  background: #fff;
+  color: #1c231f;
+}
+.source-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+}
+.source-pagination button:disabled { opacity: .45; cursor: not-allowed; }
 .empty-panel { margin-top: 24px; padding: 24px; border: 1px solid #c8cbc5; background: #fff; }
 .error-state { border-color: #c58a22; background: #f4e9d2; }
 footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #c8cbc5; color: #6f746f; font-size: 11px; }
@@ -168,6 +237,9 @@ footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #c8cbc5; col
   .kpi-row > div { border-bottom: 1px solid #c8cbc5; }
   .research-grid { grid-template-columns: 1fr; }
   .source-grid { grid-template-columns: 1fr; }
+  .event-narrative { grid-template-columns: 1fr; }
+  .domain-evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source-toolbar { grid-template-columns: 1fr; }
   .status-strip { align-items: flex-start; flex-direction: column; gap: 4px; }
   .pilot-banner { align-items: flex-start; flex-direction: column; gap: 8px; }
   .pilot-times { justify-content: flex-start; }
