@@ -246,7 +246,7 @@ class FinancialMetricCalculator:
             free_cash_flow = missing("operating_cash_flow", "capital_expenditure")
         else:
             free_cash_flow = derived(
-                operating_cash_flow - capital_expenditure,
+                operating_cash_flow - abs(capital_expenditure),
                 "operating_cash_flow",
                 "capital_expenditure",
             )
@@ -617,14 +617,9 @@ class PilotMetricCalculator:
         fcf_ids = ids(operating_cash_flow, capital_expenditure)
         if operating_cash_flow is None or capital_expenditure is None:
             free_cash_flow = missing(fcf_ids, "INPUT_MISSING")
-        elif capital_expenditure.value < 0:
-            free_cash_flow = missing(
-                fcf_ids,
-                "CAPITAL_EXPENDITURE_SIGN_INVALID",
-            )
         else:
             free_cash_flow = derived(
-                operating_cash_flow.value - capital_expenditure.value,
+                operating_cash_flow.value - abs(capital_expenditure.value),
                 fcf_ids,
             )
         metrics["free_cash_flow"] = free_cash_flow

@@ -232,6 +232,8 @@ test("historical pilot report shows its fixed boundary, cutoff, generation time,
   expect(screen.getByText("BLOCKED")).toBeInTheDocument();
   expect(screen.getByText("28 / 30")).toBeInTheDocument();
   expect(screen.getByText("93.33%")).toBeInTheDocument();
+  expect(screen.getByText("已评分策略席位")).toBeInTheDocument();
+  expect(screen.getByText(/已评分标的 · 候选 1 ·\s*观察 0/)).toBeInTheDocument();
 });
 
 test("blocked strategy explains missing securities, factors, and machine-readable codes", async () => {
@@ -427,10 +429,12 @@ test("quality sources are grouped by document with Chinese filters and paginatio
     quality_summary: {
       ...report.quality_summary,
       corporate_action_count: 0,
+      corporate_action_screen_count: 0,
+      corporate_action_screen_target_count: 30,
       annual_dividend_record_count: 120,
       official_risk_screen_count: 24,
       official_event_count: 3,
-      fallback_reason_counts: { XBRL_UNAVAILABLE_OR_NOT_INGESTED: 130 },
+      fallback_reason_counts: { XBRL_NOT_INGESTED_PDF_FALLBACK: 130 },
     },
   };
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -446,10 +450,14 @@ test("quality sources are grouped by document with Chinese filters and paginatio
   expect(screen.getAllByText("财务事实").length).toBeGreaterThan(0);
   expect(screen.getByText("公司行动")).toBeInTheDocument();
   expect(screen.getByText("缺失")).toBeInTheDocument();
+  expect(screen.getByText(/公司行动已核查 0\/30 · 事件 0 条/)).toBeInTheDocument();
   expect(screen.getByText("30 条事实记录 · 15 个来源文档/批次")).toBeInTheDocument();
   expect(screen.getAllByRole("link", { name: "打开来源" })).toHaveLength(12);
   expect(screen.getByText("第 1 / 2 页")).toBeInTheDocument();
-  expect(screen.getByText(/XBRL.*未获取或未入库.*PDF/)).toBeInTheDocument();
+  const fallbackCallout = document.querySelector(".quality-callout");
+  expect(fallbackCallout).not.toBeNull();
+  expect(fallbackCallout).toHaveTextContent("尚未进入 XBRL 解析链路");
+  expect(fallbackCallout).toHaveTextContent("官方 PDF 回退");
 
   await user.type(screen.getByRole("searchbox", { name: "搜索来源" }), "document-14");
   expect(screen.getAllByRole("link", { name: "打开来源" })).toHaveLength(1);

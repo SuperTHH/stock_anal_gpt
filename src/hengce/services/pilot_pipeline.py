@@ -77,6 +77,14 @@ _NARRATIVE_TEMPLATE_VERSIONS = {
 }
 
 
+def _coverage_quality_status(*, covered: int, target: int) -> QualityStatus:
+    if target <= 0 or covered <= 0:
+        return QualityStatus.MISSING
+    if covered >= target:
+        return QualityStatus.VALID
+    return QualityStatus.PARTIAL
+
+
 class PilotProductionStages:
     """Production stage handlers for the private, fail-closed pilot loop."""
 
@@ -114,7 +122,7 @@ class PilotProductionStages:
                 raw_store=RawObjectStore(data_dir / "raw"),
                 repository=self.pdf_repository,
                 pilot_repository=self.pilot_repository,
-                extractor=CninfoPdfExtractor(parser_version="cninfo-pdf-pilot-v3"),
+                extractor=CninfoPdfExtractor(parser_version="cninfo-pdf-pilot-v5"),
                 clock=clock,
             )
         )
@@ -380,12 +388,16 @@ class PilotProductionStages:
         self,
         context: PilotStageContext,
     ) -> Mapping[str, object]:
-        del context
+        universe = self._universe(context)
+        manifest = self.pilot_repository.list_manifest(universe.universe_id)
         filing_count, fact_count = self._published_filing_counts()
+        action_screen_count = self._corporate_action_screen_count(manifest)
         return {
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
             "corporate_action_count": self._table_count("corporate_action_versions"),
+            "corporate_action_screen_count": action_screen_count,
+            "corporate_action_screen_target_count": len(universe.members),
             "annual_dividend_record_count": self._table_count(
                 "annual_dividend_record_versions"
             ),
@@ -451,8 +463,9 @@ class PilotProductionStages:
             known_at=context.known_at,
         )
         manual_todo_count = self._manual_todo_count(manifest)
+        action_screen_count = self._corporate_action_screen_count(manifest)
         fallback_reasons = (
-            {"XBRL_UNAVAILABLE_OR_NOT_INGESTED": pdf_count}
+            {"XBRL_NOT_INGESTED_PDF_FALLBACK": pdf_count}
             if pdf_count > 0 and xbrl_count == 0
             else {}
         )
@@ -464,6 +477,8 @@ class PilotProductionStages:
             "published_filing_count": filing_count,
             "financial_fact_count": fact_count,
             "corporate_action_count": self._table_count("corporate_action_versions"),
+            "corporate_action_screen_count": action_screen_count,
+            "corporate_action_screen_target_count": len(universe.members),
             "annual_dividend_record_count": self._table_count(
                 "annual_dividend_record_versions"
             ),
@@ -512,9 +527,10 @@ class PilotProductionStages:
                 ),
                 "financials": (QualityStatus.VALID if fact_count > 0 else QualityStatus.MISSING),
                 "corporate_actions": (
-                    QualityStatus.VALID
-                    if quality_summary["corporate_action_count"]
-                    else QualityStatus.MISSING
+                    _coverage_quality_status(
+                        covered=action_screen_count,
+                        target=len(universe.members),
+                    )
                 ),
                 "dividends": (
                     QualityStatus.VALID
@@ -582,6 +598,8 @@ class PilotProductionStages:
             "fallback_reason_counts": fallback_reasons,
             "financial_fact_count": fact_count,
             "corporate_action_count": quality_summary["corporate_action_count"],
+            "corporate_action_screen_count": action_screen_count,
+            "corporate_action_screen_target_count": len(universe.members),
             "share_capital_count": quality_summary["share_capital_count"],
             "derived_metric_count": quality_summary["derived_metric_count"],
             "official_risk_screen_count": quality_summary[
@@ -832,6 +850,17 @@ class PilotProductionStages:
                 AcquisitionStatus.INGESTED,
                 AcquisitionStatus.REJECTED,
             }
+            for item in manifest
+        )
+
+    @staticmethod
+    def _corporate_action_screen_count(
+        manifest: tuple[AcquisitionManifestItem, ...],
+    ) -> int:
+        return sum(
+            item.document_kind is DocumentKind.CAPITAL_ACTION_TIMELINE
+            and item.status is AcquisitionStatus.INGESTED
+            and item.quality_status in {QualityStatus.VALID, QualityStatus.DERIVED}
             for item in manifest
         )
 
@@ -1109,4 +1138,4 @@ class PilotProductionStages:
         return tuple(records[key] for key in sorted(records))
 
 
-__all__ = ["PilotProductionStages"]
+__all__ = ["PilotProductionStages", "_coverage_quality_status"]

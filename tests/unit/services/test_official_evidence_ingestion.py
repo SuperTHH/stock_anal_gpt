@@ -279,6 +279,51 @@ def test_ingests_reviewed_explicit_no_dividend_without_fabricating_action(
     assert annual_records[0].has_cash_dividend is False
 
 
+def test_ingests_reviewed_no_material_action_screen_without_fabricating_event(
+    tmp_path: Path,
+) -> None:
+    """A completed official review is coverage even when it finds zero events."""
+    raw_store = RawObjectStore(tmp_path / "raw")
+    reference = raw_store.put(
+        source_id="sse",
+        source_url="https://www.sse.com.cn/disclosure/official-evidence.pdf",
+        collected_at=KNOWN_AT,
+        content_type="application/pdf",
+        payload=b"private-official-no-material-action-fixture",
+    )
+    item = _downloaded_item(
+        item_id="capital-actions-none",
+        document_kind=DocumentKind.CAPITAL_ACTION_TIMELINE,
+        raw_hash=reference.content_hash,
+    )
+    service, pilot_repository, action_repository = _service(tmp_path, item)
+    _write_evidence(
+        tmp_path / "manual_inbox",
+        item_id=item.item_id,
+        payload={
+            "schema_version": "official-action-evidence-v1",
+            "attachment_sha256": reference.content_hash,
+            "reviewed_at": KNOWN_AT.isoformat(),
+            "extraction_method": "MANUAL_REVIEW",
+            "actions": [],
+            "no_material_actions": True,
+        },
+    )
+
+    result = service.run(item.item_id)
+
+    stored_item = pilot_repository.get_manifest_item(item.item_id)
+    assert stored_item is not None
+    assert stored_item.status is AcquisitionStatus.INGESTED
+    assert result.ingested is True
+    assert result.action_count == 0
+    assert action_repository.visible_actions(
+        item.ts_code,
+        as_of=CUTOFF,
+        known_at=KNOWN_AT,
+    ) == ()
+
+
 def test_ingests_annual_report_dividend_evidence_without_fabricating_action_dates(
     tmp_path: Path,
 ) -> None:

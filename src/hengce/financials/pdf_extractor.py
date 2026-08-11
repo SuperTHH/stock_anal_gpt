@@ -14,7 +14,13 @@ from hengce.contracts.enums import QualityStatus, ReportType, StatementType
 from hengce.contracts.financial import FilingDescriptor
 from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
 
-_NUMBER = re.compile(r"^[-+]?\(?[\d,]+(?:\.\d+)?\)?$")
+_ACCOUNTING_NUMBER = r"(?:[-+]?[\d,]+(?:\.\d+)?|\(\s*[\d,]+(?:\.\d+)?\s*\))"
+_NUMBER = re.compile(rf"^{_ACCOUNTING_NUMBER}$")
+_CHINESE_NUMERAL = r"[一二三四五六七八九十]+"
+_NOTE_REFERENCE = (
+    rf"(?:{_CHINESE_NUMERAL}、\d+(?:[（(]\d+[）)])?[A-Za-z]?|"
+    rf"{_CHINESE_NUMERAL}(?:[（(]\d+[）)])+[A-Za-z]?)"
+)
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
 _LABELED_CODE = re.compile(
     r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*([0-9]{6})"
@@ -26,19 +32,19 @@ _LABELED_CODE_DETAIL = re.compile(
 _REPORT_PERIOD = re.compile(r"报告期\s*[：:]\s*(\d{4}-\d{2}-\d{2})")
 _WHITESPACE_FACT = re.compile(
     r"^(?P<label>.+?)\s+"
-    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
+    rf"(?P<value>{_ACCOUNTING_NUMBER})"
     r"(?:\s+.*)?$"
 )
 _NOTE_COLUMN_FACT = re.compile(
     r"^(?P<label>.+?)\s+"
-    r"[一二三四五六七八九十]+、\d+(?:[（(]\d+[）)])?[A-Za-z]?\s+"
-    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)"
+    rf"{_NOTE_REFERENCE}\s+"
+    rf"(?P<value>{_ACCOUNTING_NUMBER})"
     r"(?:\s+.*)?$"
 )
 _NUMERIC_NOTE_COLUMN_FACT = re.compile(
     r"^(?P<label>.+?)\s+\d{1,3}\s+"
-    r"(?P<value>[-+]?\(?[\d,]+(?:\.\d+)?\)?)\s+"
-    r"[-+]?\(?[\d,]+(?:\.\d+)?\)?(?:\s+.*)?$"
+    rf"(?P<value>{_ACCOUNTING_NUMBER})\s+"
+    rf"{_ACCOUNTING_NUMBER}(?:\s+.*)?$"
 )
 _UNIT = re.compile(
     r"单位\s*[：:]\s*(人民币元|人民币万元|人民币亿元|元|千元|万元|亿元|股)"
@@ -142,6 +148,9 @@ _INTEREST_BEARING_DEBT_COMPONENTS = frozenset(
 )
 _INTEREST_BEARING_DEBT_DERIVATION_VERSION = (
     "interest-bearing-debt-components-v1"
+)
+_OMITTED_BONDS_PAYABLE_DERIVATION_VERSION = (
+    "omitted-zero-in-complete-reconciled-balance-sheet-v1"
 )
 _CASH_FLOW_RECONCILIATION = (
     "operating_cash_flow",
@@ -295,6 +304,7 @@ class CninfoPdfExtractor:
         unit: tuple[str, Decimal] | None = None
         pending_label = ""
         annual_summary_spillover = False
+        noncurrent_liability_section_markers: list[tuple[int, str]] = []
         for page_number, text in pages:
             if not text:
                 continue
@@ -302,6 +312,16 @@ class CninfoPdfExtractor:
             for raw_line in raw_lines:
                 line = raw_line.strip()
                 normalized_heading = _normalized_heading(line)
+                if (
+                    statement_type is StatementType.BALANCE_SHEET
+                    and normalized_heading.rstrip("：:") == "非流动负债"
+                ):
+                    noncurrent_liability_section_markers.append(
+                        (
+                            page_number,
+                            hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                        )
+                    )
                 if normalized_heading in _EXTRACTION_BOUNDARIES:
                     statement_title = None
                     statement_type = None
@@ -321,6 +341,12 @@ class CninfoPdfExtractor:
                     None,
                 )
                 if title is not None:
+                    if (
+                        statement_title == title[0]
+                        and statement_type is title[1]
+                    ):
+                        pending_label = ""
+                        continue
                     statement_title = None
                     statement_type = None
                     unit = None
@@ -498,6 +524,8 @@ class CninfoPdfExtractor:
                     continue
                 pending_label = ""
                 canonical_name, number = parsed_line
+                if canonical_name == "capital_expenditure":
+                    number = abs(number)
                 if (
                     statement_title
                     in {
@@ -568,7 +596,32 @@ class CninfoPdfExtractor:
                 continue
             facts[name] = name_candidates[0].value
 
-        derivations: tuple[tuple[str, tuple[str, ...]], ...] = ()
+        derivations: list[tuple[str, tuple[str, ...]]] = []
+        missing_debt_components = _INTEREST_BEARING_DEBT_COMPONENTS - facts.keys()
+        if (
+            missing_debt_components == {"bonds_payable"}
+            and noncurrent_liability_section_markers
+            and _balance_reconciles(facts)
+        ):
+            page_number, section_hash = noncurrent_liability_section_markers[0]
+            bonds_candidate = PdfFactCandidate(
+                canonical_fact_name="bonds_payable",
+                value=Decimal(0),
+                unit_multiplier=Decimal(1),
+                currency="CNY",
+                page_number=page_number,
+                statement_type=StatementType.BALANCE_SHEET,
+                source_text_hash=section_hash,
+            )
+            candidates.append(bonds_candidate)
+            grouped["bonds_payable"] = [bonds_candidate]
+            facts["bonds_payable"] = Decimal(0)
+            derivations.append(
+                (
+                    "bonds_payable",
+                    ("noncurrent_liabilities_section", "balance_equation"),
+                )
+            )
         if (
             "interest_bearing_debt" not in facts
             and _INTEREST_BEARING_DEBT_COMPONENTS.issubset(facts)
@@ -604,7 +657,7 @@ class CninfoPdfExtractor:
             )
             candidates.append(derived_candidate)
             facts["interest_bearing_debt"] = debt_value
-            derivations = (("interest_bearing_debt", component_names),)
+            derivations.append(("interest_bearing_debt", component_names))
 
         if fact_names_without_supported_unit - facts.keys():
             issues.add("PDF_LAYOUT_UNSUPPORTED")
@@ -617,7 +670,7 @@ class CninfoPdfExtractor:
             issues,
             pdf_content_hash,
             facts,
-            derivations,
+            tuple(derivations),
         )
 
     def build_document(
@@ -656,6 +709,10 @@ class CninfoPdfExtractor:
             "report_type": descriptor.report_type.value,
         }
         derivations = dict(extracted.derivations)
+        if "bonds_payable" in derivations:
+            normalization_metadata[
+                "bonds_payable_derivation_version"
+            ] = _OMITTED_BONDS_PAYABLE_DERIVATION_VERSION
         if "interest_bearing_debt" in derivations:
             normalization_metadata[
                 "interest_bearing_debt_derivation_version"
@@ -770,13 +827,24 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     canonical_name = _canonical_name(label)
     if canonical_name is None or not _NUMBER.fullmatch(raw_value):
         return None
-    normalized = raw_value.replace(",", "")
+    normalized = re.sub(r"\s+", "", raw_value).replace(",", "")
     if normalized.startswith("(") and normalized.endswith(")"):
         normalized = f"-{normalized[1:-1]}"
     try:
         return canonical_name, Decimal(normalized)
     except InvalidOperation:
         return None
+
+
+def _balance_reconciles(facts: dict[str, Decimal]) -> bool:
+    try:
+        assets = facts["total_assets"]
+        difference = abs(
+            assets - facts["total_liabilities"] - facts["equity"]
+        )
+    except KeyError:
+        return False
+    return difference <= max(Decimal(1), abs(assets) * Decimal("0.000001"))
 
 
 def _parse_truncated_cash_exchange(line: str) -> tuple[str, Decimal] | None:
@@ -952,9 +1020,7 @@ def _blank_debt_component(line: str) -> str | None:
     canonical = _ALIASES.get(normalized)
     if canonical is None:
         current_dash_with_prior = re.fullmatch(
-            r"(?P<label>.+?)[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d"
-            r"\u4e03\u516b\u4e5d\u5341]+\u3001\d+"
-            r"(?:(?:\uff08\d+\uff09)|(?:\(\d+\)))?"
+            rf"(?P<label>.+?){_NOTE_REFERENCE}"
             r"[-\u2014]+[-+]?\(?[\d,]+(?:\.\d+)?\)?",
             normalized,
         )
@@ -962,9 +1028,7 @@ def _blank_debt_component(line: str) -> str | None:
             canonical = _ALIASES.get(current_dash_with_prior.group("label"))
     if canonical is None:
         note_only = re.fullmatch(
-            r"(?P<label>.+?)[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d"
-            r"\u4e03\u516b\u4e5d\u5341]+\u3001\d+"
-            r"(?:(?:\uff08\d+\uff09)|(?:\(\d+\)))?",
+            rf"(?P<label>.+?){_NOTE_REFERENCE}",
             normalized,
         )
         if note_only is not None:
@@ -977,6 +1041,17 @@ def _blank_debt_component(line: str) -> str | None:
 def _blank_cash_flow_component(line: str) -> str | None:
     normalized = _normalize_label(line)
     canonical = _ALIASES.get(normalized)
+    if canonical is None:
+        current_dash_with_prior = re.fullmatch(
+            rf"(?P<label>.+?)\s+[-\u2014]\s+{_ACCOUNTING_NUMBER}(?:\s+.*)?",
+            line.strip(),
+        )
+        if current_dash_with_prior is not None:
+            label = _normalize_label(current_dash_with_prior.group("label"))
+            if label == "汇率变动对现金及现金等价物的":
+                canonical = "cash_exchange_effect"
+            else:
+                canonical = _ALIASES.get(label)
     if canonical in _CASH_FLOW_RECONCILIATION:
         return canonical
     return None

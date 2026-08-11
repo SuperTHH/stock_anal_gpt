@@ -564,14 +564,16 @@ def test_published_report_includes_ingested_official_source_lineage(
 
     stored = ReportRepository(state.path).latest_report()
     assert stored is not None
-    sources = json.loads(stored.artifact_path.read_text(encoding="utf-8"))[
-        "source_records"
-    ]
+    artifact = json.loads(stored.artifact_path.read_text(encoding="utf-8"))
+    sources = artifact["source_records"]
     assert len(sources) == 1
     assert sources[0]["record_id"] == selected.item_id
     assert sources[0]["source_url"] == source_url
     assert sources[0]["source_name"] == "上海证券交易所"
     assert sources[0]["quality_status"] == QualityStatus.VALID.value
+    assert artifact["quality_summary"]["fallback_reason_counts"] == {
+        "XBRL_NOT_INGESTED_PDF_FALLBACK": 1
+    }
 
 
 def test_report_source_lineage_resolves_market_master_and_pdf_fact_ids(
@@ -808,6 +810,8 @@ def test_ready_pool_report_publishes_when_factor_source_ids_resolve(
     assert artifact["official_events"][0]["record_id"] == "official-event-domain-fixture"
     assert any(source["domain"] == "events" for source in artifact["source_records"])
     assert artifact["quality_summary"]["annual_dividend_record_count"] == 1
+    assert artifact["quality_summary"]["corporate_action_screen_count"] == 0
+    assert artifact["quality_summary"]["corporate_action_screen_target_count"] == 30
 
 
 def test_production_metric_stage_feeds_real_results_to_pool_builder(

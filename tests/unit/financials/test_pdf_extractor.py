@@ -100,7 +100,7 @@ def test_labeled_six_digit_a_share_code_matches_descriptor_suffix(
         descriptor=descriptor(content_hash),
     )
 
-    assert result.quality_status is QualityStatus.VALID
+    assert result.quality_status is QualityStatus.VALID, result.issues
 
 
 def test_front_matter_a_share_listing_row_establishes_identity(
@@ -304,6 +304,26 @@ def test_blank_financing_cash_flow_row_is_explicit_zero(
     assert result.quality_status is QualityStatus.VALID
     assert result.issues == ()
     assert result.facts["financing_cash_flow"] == Decimal(0)
+
+
+def test_blank_truncated_cash_exchange_with_prior_value_is_zero(
+    tmp_path: Path,
+) -> None:
+    """A dash before the comparative value is an explicit current-period zero."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "汇率变动对现金及现金等价物的影响 | 0",
+        "四、汇率变动对现金及现金等价物的 - 10",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_exchange_effect"] == Decimal(0)
 
 
 def test_cny_thousand_unit_scales_statement_facts(
@@ -1029,7 +1049,7 @@ def test_derives_interest_bearing_debt_only_from_complete_visible_components(
         supersedes_id=None,
     )
 
-    assert result.quality_status is QualityStatus.VALID
+    assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["interest_bearing_debt"] == Decimal("75")
     assert document.normalization_metadata[
         "interest_bearing_debt_derivation_version"
@@ -1068,6 +1088,34 @@ def test_incomplete_debt_components_never_create_an_estimated_total(
     assert "interest_bearing_debt" not in result.facts
 
 
+def test_omitted_bonds_row_is_zero_only_in_complete_reconciled_liability_section(
+    tmp_path: Path,
+) -> None:
+    """Audited statements commonly suppress a zero-valued bonds-payable row."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "有息负债 | 250",
+        (
+            "短期借款 | 100\n"
+            "一年内到期的非流动负债 | 50\n"
+            "非流动负债：\n"
+            "长期借款 | 75\n"
+            "租赁负债 | 25\n"
+            "非流动负债合计 | 300"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["bonds_payable"] == Decimal(0)
+    assert result.facts["interest_bearing_debt"] == Decimal("2500000")
+
+
 def test_duplicate_fact_without_unit_does_not_reject_complete_statement(
     tmp_path: Path,
 ) -> None:
@@ -1088,6 +1136,102 @@ def test_duplicate_fact_without_unit_does_not_reject_complete_statement(
     )
 
     assert result.quality_status is QualityStatus.VALID
+
+
+def test_repeated_statement_title_preserves_active_table_context(
+    tmp_path: Path,
+) -> None:
+    """Audited reports may repeat a page title before the actual table header."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "合并资产负债表\n2025 年 12 月 31 日\n单位：人民币万元\n",
+        (
+            "合并资产负债表\n"
+            "2025 年 12 月 31 日 人民币万元\n"
+            "示例股份有限公司 2025 年年度报告\n"
+            "合并资产负债表\n"
+            "资产 附注 2025 年 12 月 31 日 2024 年 12 月 31 日\n"
+        ),
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_parenthesized_negative_allows_inner_pdf_spacing(
+    tmp_path: Path,
+) -> None:
+    """Word-authored PDFs often extract a gap immediately before `)`."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "投资活动产生的现金流量净额 | (50)",
+        "投资活动产生的现金流量净额 | (50 )",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["investing_cash_flow"] == Decimal("-500000")
+
+
+def test_parenthesized_capital_expenditure_is_normalized_as_cash_paid_magnitude(
+    tmp_path: Path,
+) -> None:
+    """Some audited cash-flow layouts parenthesize every cash-outflow row."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "购建固定资产、无形资产和其他长期资产支付的现金 | 50",
+        "购建固定资产、无形资产和其他长期资产支付的现金 | (50)",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
+def test_chinese_parenthesized_note_references_and_wrapped_labels(
+    tmp_path: Path,
+) -> None:
+    """SSE annual statements use note references such as `七(79)(1)`."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "货币资金 | 300",
+        "货币资金 七(1) 300 200",
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "营业成本 | 600",
+        "营业成本 七(61) 600 500",
+    )
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "经营活动产生的现金流量净额 | 220",
+        "经营活动产生的现金流\n量净额 七(79)(1) 220 200",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+    assert result.facts["operating_cost"] == Decimal("6000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
     assert "PDF_LAYOUT_UNSUPPORTED" not in result.issues
     assert result.facts["revenue"] == Decimal("10000000")
 

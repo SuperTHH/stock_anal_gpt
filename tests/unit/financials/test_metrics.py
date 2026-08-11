@@ -358,6 +358,24 @@ def test_annual_dividend_history_drives_strategy_metrics_without_action_dates() 
     assert "annual-dividend-2025" in result.metrics["announced_dividend_yield"].input_fact_ids
 
 
+def test_signed_capex_outflow_is_normalized_for_fcf_metrics() -> None:
+    """Legacy PDF versions may preserve the statement's negative outflow sign."""
+    result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
+        series=financial_series(
+            updates={date(2025, 12, 31): {"capital_expenditure": "-60"}}
+        ),
+        closing_price=Decimal("24"),
+        share_capital=share_capital(),
+        dividends=[dividend(2025, "0.8", "80")],
+        report_cutoff_at=AS_OF,
+        known_at=AS_OF,
+    )
+
+    assert result.metrics["free_cash_flow"].value == Decimal("120")
+    assert result.metrics["fcf_yield"].value == Decimal("0.05")
+    assert result.metrics["fcf_coverage"].value == Decimal("1.5")
+
+
 def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:
     """Catches formula drift, Q1 annualization, float rounding, and lost evidence IDs."""
     result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(

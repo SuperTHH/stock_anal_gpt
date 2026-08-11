@@ -68,6 +68,7 @@ class _ActionEvidence(BaseModel):
     extraction_method: Literal["MANUAL_REVIEW"]
     actions: tuple[_ActionEvidenceRow, ...] = ()
     no_dividend_fiscal_year: int | None = None
+    no_material_actions: bool = False
 
     @field_validator("reviewed_at")
     @classmethod
@@ -82,8 +83,18 @@ class _ActionEvidence(BaseModel):
 
     @model_validator(mode="after")
     def action_or_explicit_no_dividend(self) -> _ActionEvidence:
-        if bool(self.actions) == (self.no_dividend_fiscal_year is not None):
-            raise ValueError("exactly one of actions or no_dividend_fiscal_year is required")
+        evidence_modes = sum(
+            (
+                bool(self.actions),
+                self.no_dividend_fiscal_year is not None,
+                self.no_material_actions,
+            )
+        )
+        if evidence_modes != 1:
+            raise ValueError(
+                "exactly one of actions, no_dividend_fiscal_year, "
+                "or no_material_actions is required"
+            )
         if self.no_dividend_fiscal_year is not None and not (
             2000 <= self.no_dividend_fiscal_year <= 2100
         ):
@@ -247,6 +258,10 @@ class OfficialEvidenceIngestionService:
                     item.document_kind is not DocumentKind.DIVIDEND_RECORD
                     or item.report_period is None
                     or payload.no_dividend_fiscal_year != item.report_period.year
+                ):
+                    raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
+                if payload.no_material_actions and (
+                    item.document_kind is not DocumentKind.CAPITAL_ACTION_TIMELINE
                 ):
                     raise ValueError("OFFICIAL_EVIDENCE_KIND_MISMATCH")
                 actions = tuple(

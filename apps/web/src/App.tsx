@@ -134,6 +134,14 @@ function candidateCount(report: ReportPayload, strategy: StrategyType): number {
   return report.candidate_pools[strategy]?.length ?? 0;
 }
 
+function candidateStatusCounts(report: ReportPayload, strategy: StrategyType) {
+  const rows = report.candidate_pools[strategy] ?? [];
+  return {
+    candidate: rows.filter((row) => row.candidate_status === "CANDIDATE").length,
+    watch: rows.filter((row) => row.candidate_status === "WATCH").length,
+  };
+}
+
 function formatDateTime(value?: string | null): string {
   return value ? value.replace("T", " ").replace("Z", "").slice(0, 16) : "未记录";
 }
@@ -213,7 +221,7 @@ function Overview({ report, goTo }: { report: ReportPayload; goTo: (page: Page) 
       <section className="kpi-row" aria-label="报告概况">
         <div><span>报告日期</span><strong>{report.snapshot.report_date}</strong></div>
         <div><span>数据截至</span><strong>{report.snapshot.market_cutoff_at.slice(0, 16)}</strong></div>
-        <div><span>策略候选</span><strong>{Object.values(report.candidate_pools).flat().length}</strong></div>
+        <div><span>已评分策略席位</span><strong>{Object.values(report.candidate_pools).flat().length}</strong></div>
         <div><span>官方事件</span><strong>{report.official_events?.length ?? 0}</strong></div>
       </section>
       <section className="section-block">
@@ -231,7 +239,10 @@ function Overview({ report, goTo }: { report: ReportPayload; goTo: (page: Page) 
               <h3>{strategyNames[strategy]}</h3>
               <ReadinessBadge readiness={report.pool_readiness?.[strategy]} />
               <strong className="large-number">{candidateCount(report, strategy)}</strong>
-              <span>只候选 / 观察标的</span>
+              <span>
+                已评分标的 · 候选 {candidateStatusCounts(report, strategy).candidate} ·
+                观察 {candidateStatusCounts(report, strategy).watch}
+              </span>
               <div className="rule" />
               <p>仅显示本策略因子与排名，不产生统一总分或自动买入指令。</p>
             </article>
@@ -732,7 +743,9 @@ function Quality({ report }: { report: ReportPayload }) {
     currentPage * SOURCE_PAGE_SIZE,
   );
   const fallbackCount = report.quality_summary?.fallback_reason_counts
-    ?.XBRL_UNAVAILABLE_OR_NOT_INGESTED ?? 0;
+    ?.XBRL_NOT_INGESTED_PDF_FALLBACK
+    ?? report.quality_summary?.fallback_reason_counts?.XBRL_UNAVAILABLE_OR_NOT_INGESTED
+    ?? 0;
 
   function resetPage() {
     setSourcePage(1);
@@ -754,7 +767,12 @@ function Quality({ report }: { report: ReportPayload }) {
           ))}
         </div>
         <div className="domain-evidence-grid">
-          <span>公司行动 {report.quality_summary?.corporate_action_count ?? 0} 条</span>
+          <span>
+            公司行动已核查 {report.quality_summary?.corporate_action_screen_count ?? 0}/
+            {report.quality_summary?.corporate_action_screen_target_count
+              ?? report.pool_readiness?.QUALITY_GROWTH?.universe_size
+              ?? 0} · 事件 {report.quality_summary?.corporate_action_count ?? 0} 条
+          </span>
           <span>年度分红 {report.quality_summary?.annual_dividend_record_count ?? 0} 条</span>
           <span>风险证据 {report.quality_summary?.official_risk_screen_count ?? 0} 条</span>
           <span>官方事件 {report.quality_summary?.official_event_count ?? report.official_events?.length ?? 0} 条</span>
@@ -781,7 +799,8 @@ function Quality({ report }: { report: ReportPayload }) {
           </p>
           {fallbackCount > 0 && (
             <p className="quality-callout">
-              XBRL 未获取或未入库时使用交易所/巨潮官方 PDF 回退；本报告涉及 {fallbackCount} 份，不代表来源为非官方。
+              本批文件尚未进入 XBRL 解析链路，使用交易所/巨潮官方 PDF 回退；
+              本报告涉及 {fallbackCount} 份，不代表来源为非官方。
             </p>
           )}
         </section>

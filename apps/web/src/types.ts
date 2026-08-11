@@ -104,9 +104,11 @@ export interface ReportPayload {
     manifest_status_distribution?: Record<string, number>;
     xbrl_used_count?: number;
     pdf_used_count?: number;
-    fallback_reason_counts?: Record<string, number>;
-    corporate_action_count?: number;
-    annual_dividend_record_count?: number;
+      fallback_reason_counts?: Record<string, number>;
+      corporate_action_count?: number;
+      corporate_action_screen_count?: number;
+      corporate_action_screen_target_count?: number;
+      annual_dividend_record_count?: number;
     official_risk_screen_count?: number;
     official_event_count?: number;
     financial_fact_count?: number;
