@@ -68,6 +68,35 @@ class AcquisitionStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
+class EvidenceTaskStatus(StrEnum):
+    PLANNED = "PLANNED"
+    DISCOVERED = "DISCOVERED"
+    DOWNLOADED = "DOWNLOADED"
+    PARSED = "PARSED"
+    AWAITING_REVIEW = "AWAITING_REVIEW"
+    SATISFIED = "SATISFIED"
+    RETRYABLE_FAILED = "RETRYABLE_FAILED"
+    BLOCKED = "BLOCKED"
+
+
+class EvidenceCohort(StrEnum):
+    YIELD_GE_5 = "YIELD_GE_5"
+    YIELD_3_TO_5 = "YIELD_3_TO_5"
+    LIQUIDITY_FILL = "LIQUIDITY_FILL"
+
+
+class EvidenceKind(StrEnum):
+    PERIODIC_REPORT = "PERIODIC_REPORT"
+    DIVIDEND_YEAR = "DIVIDEND_YEAR"
+    RISK_SCREEN = "RISK_SCREEN"
+    CORPORATE_ACTION = "CORPORATE_ACTION"
+
+
+class ReviewDecision(StrEnum):
+    CONFIRM = "CONFIRM"
+    RETURN = "RETURN"
+
+
 class DocumentKind(StrEnum):
     PERIODIC_REPORT = "PERIODIC_REPORT"
     DIVIDEND_RECORD = "DIVIDEND_RECORD"

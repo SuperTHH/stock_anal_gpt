@@ -27,6 +27,7 @@ def create_local_app(data_dir: Path) -> FastAPI:
     return create_app(
         LocalReadOnlyReportRepository(database),
         data_dir / "reports",
+        data_dir / "normalized",
     )
 
 

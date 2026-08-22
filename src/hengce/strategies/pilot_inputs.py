@@ -188,6 +188,7 @@ class PilotStrategyInputBuilder:
                 self._security_input(
                     code,
                     member.security_name,
+                    getattr(member, "industry_l1", None),
                     quality_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -201,6 +202,7 @@ class PilotStrategyInputBuilder:
                 self._security_input(
                     code,
                     member.security_name,
+                    getattr(member, "industry_l1", None),
                     value_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -217,6 +219,7 @@ class PilotStrategyInputBuilder:
                 self._security_input(
                     code,
                     member.security_name,
+                    getattr(member, "industry_l1", None),
                     dividend_factors,
                     hard_filter,
                     report_cutoff_at,
@@ -234,6 +237,7 @@ class PilotStrategyInputBuilder:
     def _security_input(
         code: str,
         security_name: str,
+        industry_l1: str | None,
         factors: dict[str, FactorInput],
         hard_filter: HardFilterResult,
         report_cutoff_at: datetime,
@@ -261,7 +265,7 @@ class PilotStrategyInputBuilder:
         return SecurityStrategyInput(
             ts_code=code,
             security_name=security_name,
-            industry_l1=None,
+            industry_l1=industry_l1,
             factors=timed_factors,
             hard_filter_passed=hard_filter.passed,
             selection_reasons=("试点策略规则满足",),

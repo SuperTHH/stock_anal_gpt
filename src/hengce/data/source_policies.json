@@ -19,12 +19,13 @@
   {
     "source_id": "sse",
     "source_name": "上海证券交易所",
-    "allowed_domains": ["sse.com.cn", "www.sse.com.cn", "static.sse.com.cn"],
+    "allowed_domains": ["sse.com.cn", "www.sse.com.cn", "query.sse.com.cn", "static.sse.com.cn"],
     "allowed_schemes": ["https"],
     "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "financial_pdf", "official_event"],
     "domain_purposes": {
       "sse.com.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
       "www.sse.com.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "query.sse.com.cn": ["corporate_action"],
       "static.sse.com.cn": ["financial_pdf"]
     },
     "fetch_frequency": "policy_defined",
@@ -41,12 +42,13 @@
   {
     "source_id": "szse",
     "source_name": "深圳证券交易所",
-    "allowed_domains": ["szse.cn", "www.szse.cn", "disc.static.szse.cn"],
+    "allowed_domains": ["szse.cn", "www.szse.cn", "docs.static.szse.cn", "disc.static.szse.cn"],
     "allowed_schemes": ["https"],
     "allowed_purposes": ["security_master", "trading_status", "corporate_action", "xbrl", "financial_pdf", "official_event"],
     "domain_purposes": {
       "szse.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
       "www.szse.cn": ["security_master", "trading_status", "corporate_action", "xbrl", "official_event"],
+      "docs.static.szse.cn": ["corporate_action"],
       "disc.static.szse.cn": ["financial_pdf"]
     },
     "fetch_frequency": "policy_defined",
@@ -63,10 +65,10 @@
   {
     "source_id": "cninfo",
     "source_name": "巨潮资讯",
-    "allowed_domains": ["cninfo.com.cn", "www.cninfo.com.cn", "static.cninfo.com.cn"],
+    "allowed_domains": ["cninfo.com.cn", "www.cninfo.com.cn", "static.cninfo.com.cn", "dataclouds.cninfo.com.cn"],
     "allowed_schemes": ["https"],
     "allowed_purposes": ["filing", "financial_pdf", "official_event"],
-    "domain_purposes": {"static.cninfo.com.cn": ["financial_pdf"]},
+    "domain_purposes": {"static.cninfo.com.cn": ["financial_pdf"], "dataclouds.cninfo.com.cn": ["financial_pdf"]},
     "fetch_frequency": "policy_defined",
     "full_text_rule": "personal_research_attachment",
     "attachment_rule": "public_filing_only",

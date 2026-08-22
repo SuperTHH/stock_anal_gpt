@@ -123,7 +123,7 @@ class PdfFinancialIngestionService:
                 error_code=error_code,
             )
 
-        filing_id = self._filing_id(descriptor)
+        filing_id = self._filing_id(descriptor, extracted.parser_version)
         document = self.extractor.build_document(
             filing_id=filing_id,
             descriptor=descriptor,
@@ -162,7 +162,7 @@ class PdfFinancialIngestionService:
         )
 
     @staticmethod
-    def _filing_id(descriptor: FilingDescriptor) -> str:
+    def _filing_id(descriptor: FilingDescriptor, parser_version: str) -> str:
         identity = json.dumps(
             {
                 "source_id": descriptor.source_id,
@@ -170,6 +170,7 @@ class PdfFinancialIngestionService:
                 "report_period": descriptor.report_period.isoformat(),
                 "report_type": descriptor.report_type.value,
                 "raw_object_hash": descriptor.raw_object_hash,
+                "parser_version": parser_version,
             },
             ensure_ascii=False,
             sort_keys=True,

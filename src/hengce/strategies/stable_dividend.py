@@ -16,3 +16,11 @@ STABLE_DIVIDEND_V1 = StrategyDefinition(
         FactorSpec("dividend_cut_safety", Decimal("0.10")),
     ),
 )
+
+STABLE_DIVIDEND_FULL_MARKET_V1 = StrategyDefinition(
+    strategy_type=StrategyType.STABLE_DIVIDEND,
+    version="stable-dividend-full-market-v1",
+    factors=STABLE_DIVIDEND_V1.factors,
+    minimum_candidate_values=(("dividend_yield", Decimal("0.05")),),
+    industry_normalization_minimum_size=20,
+)

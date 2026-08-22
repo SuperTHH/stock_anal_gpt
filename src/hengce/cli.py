@@ -7,6 +7,7 @@ import re
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -16,10 +17,15 @@ import typer
 from pydantic import SecretStr
 
 from hengce.bootstrap import bootstrap_state
+from hengce.collectors.cninfo_reports import CninfoPeriodicReportCollector
+from hengce.collectors.exchange_dividends import (
+    SseImplementedDividendCollector,
+    SzseImplementedDividendCollector,
+)
 from hengce.collectors.security_master import OfficialSecurityMasterCsvImporter
 from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
-from hengce.contracts.enums import DiscoveryMethod, ReportType
+from hengce.contracts.enums import DiscoveryMethod, EvidenceCohort, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
 from hengce.contracts.official_event import OfficialEvent
 from hengce.financials.mapping import (
@@ -36,6 +42,14 @@ from hengce.financials.xbrl import ArelleXbrlProcessor
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
 from hengce.services.financial_ingestion import FinancialIngestionService
+from hengce.services.full_market_evidence import (
+    FullMarketEvidencePlanner,
+    FullMarketEvidenceReconciliationService,
+)
+from hengce.services.full_market_evidence_acquisition import (
+    FullMarketEvidenceAcquisitionService,
+)
+from hengce.services.full_market_research import FullMarketResearchService
 from hengce.services.initializer import HistoricalInitializer
 from hengce.services.market_ingestion import MarketIngestionService
 from hengce.services.pilot_acceptance import PilotAcceptanceValidator
@@ -45,11 +59,14 @@ from hengce.services.pilot_reconstruction import (
     PilotRunSummary,
 )
 from hengce.state.event_repository import OfficialEventRepository
+from hengce.state.evidence_repository import FullMarketEvidenceRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
+from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.financial import FinancialFactWarehouse
 from hengce.warehouse.market import MarketWarehouse
+from hengce.warehouse.market_research import FullMarketResearchWarehouse
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -96,6 +113,24 @@ def parse_trade_date(value: str) -> date:
         raise typer.BadParameter("trade date must use YYYY-MM-DD") from error
     if parsed.isoformat() != value:
         raise typer.BadParameter("trade date must use YYYY-MM-DD")
+    return parsed
+
+
+def parse_decimal_option(
+    value: str,
+    option_name: str,
+    *,
+    minimum: Decimal,
+    maximum: Decimal | None = None,
+) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise typer.BadParameter(f"{option_name} must be a decimal") from error
+    if not parsed.is_finite() or parsed < minimum or (
+        maximum is not None and parsed > maximum
+    ):
+        raise typer.BadParameter(f"{option_name} is out of range")
     return parsed
 
 
@@ -280,6 +315,225 @@ def ingest_market(
     with httpx.Client() as client:
         result = build_market_ingestion(settings, client, policy_file).run(parsed_trade_date)
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+@app.command("ingest-exchange-dividends")
+def ingest_exchange_dividends(
+    market_date: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Collect implemented cash dividends from official SSE/SZSE public tables."""
+    parsed_market_date = parse_trade_date(market_date)
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings, policy_file)
+    guard = PolicyGuard(state)
+    raw_store = RawObjectStore(settings.data_dir / "raw")
+
+    def clock() -> datetime:
+        return datetime.now(ZoneInfo(settings.timezone))
+
+    with httpx.Client(follow_redirects=True) as client:
+        sse = SseImplementedDividendCollector(
+            client=client,
+            guard=guard,
+            raw_store=raw_store,
+            clock=clock,
+        ).fetch(parsed_market_date)
+        szse = SzseImplementedDividendCollector(
+            client=client,
+            guard=guard,
+            raw_store=raw_store,
+            clock=clock,
+        ).fetch(parsed_market_date)
+    records = sse + szse
+    path = ImplementedDividendWarehouse(settings.data_dir / "normalized").write_records(
+        parsed_market_date,
+        records,
+    )
+    typer.echo(json.dumps(
+        {
+            "market_date": parsed_market_date.isoformat(),
+            "record_count": len(records),
+            "security_count": len({item.ts_code for item in records}),
+            "sse_record_count": len(sse),
+            "szse_record_count": len(szse),
+            "artifact_path": str(path),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ))
+
+
+@app.command("build-full-market-research")
+def build_full_market_research(
+    market_date: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    target_size: Annotated[int, typer.Option(min=100, max=500)] = 300,
+    minimum_amount: Annotated[str, typer.Option()] = "50000",
+    high_dividend_yield: Annotated[str, typer.Option()] = "0.03",
+) -> None:
+    """Freeze the dynamic funnel, depth-evidence plan, and strategy readiness."""
+    parsed_market_date = parse_trade_date(market_date)
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    snapshot = FullMarketResearchService(
+        state=bootstrap_state(settings),
+        data_dir=data_dir,
+        clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
+    ).build(
+        parsed_market_date,
+        target_size=target_size,
+        minimum_amount=parse_decimal_option(
+            minimum_amount,
+            "minimum-amount",
+            minimum=Decimal(0),
+        ),
+        high_dividend_yield=parse_decimal_option(
+            high_dividend_yield,
+            "high-dividend-yield",
+            minimum=Decimal(0),
+            maximum=Decimal(1),
+        ),
+    )
+    typer.echo(json.dumps(
+        {
+            "snapshot_id": snapshot.snapshot_id,
+            "market_date": snapshot.market_date.isoformat(),
+            "market_universe_count": snapshot.market_universe_count,
+            "low_cost_eligible_count": snapshot.low_cost_eligible_count,
+            "funnel_count": snapshot.funnel_count,
+            "high_dividend_funnel_count": snapshot.high_dividend_funnel_count,
+            "depth_ready_count": snapshot.depth_ready_count,
+            "evidence_completed_count": snapshot.evidence_completed_count,
+            "evidence_item_count": snapshot.evidence_item_count,
+            "pool_statuses": {
+                strategy.value: pool.status.value
+                for strategy, pool in snapshot.pools.items()
+            },
+            "manifest_hash": snapshot.manifest_hash,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ))
+
+
+@app.command("plan-full-market-evidence")
+def plan_full_market_evidence(
+    market_date: Annotated[str, typer.Option()],
+    cohort: Annotated[EvidenceCohort | None, typer.Option()] = None,
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Create idempotent evidence tasks from one frozen full-market snapshot."""
+    parsed_market_date = parse_trade_date(market_date)
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings)
+    snapshot = FullMarketResearchWarehouse(data_dir / "normalized").read(
+        parsed_market_date
+    )
+    if snapshot is None:
+        raise typer.BadParameter("full-market research snapshot is missing")
+    planner = FullMarketEvidencePlanner(
+        repository=FullMarketEvidenceRepository(state.path),
+        clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
+    )
+    runs = (planner.plan(snapshot, cohort),) if cohort is not None else planner.plan_all(snapshot)
+    typer.echo(json.dumps(
+        {
+            "market_date": parsed_market_date.isoformat(),
+            "snapshot_id": snapshot.snapshot_id,
+            "runs": [
+                {
+                    "run_id": run.run_id,
+                    "cohort": run.cohort.value,
+                    "member_count": len(run.member_codes),
+                    "task_count": run.task_count,
+                }
+                for run in runs
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ))
+
+
+@app.command("run-full-market-evidence")
+def run_full_market_evidence(
+    run_id: Annotated[str, typer.Option()],
+    stage: Annotated[str, typer.Option()] = "discover",
+    max_items: Annotated[int, typer.Option(min=1, max=1000)] = 10,
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Resume one policy-limited evidence acquisition stage."""
+    if not run_id.strip():
+        raise typer.BadParameter("run-id must not be empty")
+    if stage not in {
+        "discover",
+        "download",
+        "parse",
+        "prefill-risk",
+        "retry",
+        "reconcile",
+    }:
+        raise typer.BadParameter(
+            "stage must be discover, download, parse, prefill-risk, retry, or reconcile"
+        )
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings)
+    repository = FullMarketEvidenceRepository(state.path)
+    if repository.get_run(run_id) is None:
+        raise typer.BadParameter("evidence run is missing")
+    guard = PolicyGuard(state)
+    raw_store = RawObjectStore(data_dir / "raw")
+    def clock() -> datetime:
+        return datetime.now(ZoneInfo(settings.timezone))
+    with httpx.Client() as client:
+        collector = CninfoPeriodicReportCollector(
+            client=client,
+            guard=guard,
+            raw_store=raw_store,
+            clock=clock,
+        )
+        service = FullMarketEvidenceAcquisitionService(
+            repository=repository,
+            collector=collector,
+            client=client,
+            guard=guard,
+            raw_store=raw_store,
+            clock=clock,
+        )
+        if stage == "discover":
+            result = service.discover(run_id, max_securities=max_items)
+        elif stage == "download":
+            result = service.download(run_id, max_tasks=max_items)
+        elif stage == "prefill-risk":
+            result = service.prefill_risk(run_id, max_tasks=max_items)
+        elif stage == "retry":
+            result = service.retry_failed(run_id, max_tasks=max_items)
+        elif stage == "reconcile":
+            result = FullMarketEvidenceReconciliationService(
+                repository=repository,
+                data_dir=data_dir,
+                clock=clock,
+            ).reconcile(run_id, max_tasks=max_items)
+        else:
+            result = service.parse(run_id, max_tasks=max_items)
+    typer.echo(json.dumps({"run_id": run_id, "stage": stage, **result}, sort_keys=True))
 
 
 @app.command("initialize-history")

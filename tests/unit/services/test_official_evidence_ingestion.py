@@ -12,6 +12,7 @@ from hengce.contracts.enums import (
     DocumentKind,
     QualityStatus,
 )
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.contracts.pilot import (
     AcquisitionManifestItem,
     PilotUniverseMember,
@@ -264,11 +265,14 @@ def test_ingests_reviewed_explicit_no_dividend_without_fabricating_action(
     assert result.ingested is True
     assert result.action_count == 0
     assert len(result.source_record_ids) == 1
-    assert action_repository.visible_actions(
-        item.ts_code,
-        as_of=CUTOFF,
-        known_at=KNOWN_AT,
-    ) == ()
+    assert (
+        action_repository.visible_actions(
+            item.ts_code,
+            as_of=CUTOFF,
+            known_at=KNOWN_AT,
+        )
+        == ()
+    )
     annual_records = AnnualDividendRepository(action_repository.path).visible_records(
         item.ts_code,
         as_of=CUTOFF,
@@ -317,11 +321,14 @@ def test_ingests_reviewed_no_material_action_screen_without_fabricating_event(
     assert stored_item.status is AcquisitionStatus.INGESTED
     assert result.ingested is True
     assert result.action_count == 0
-    assert action_repository.visible_actions(
-        item.ts_code,
-        as_of=CUTOFF,
-        known_at=KNOWN_AT,
-    ) == ()
+    assert (
+        action_repository.visible_actions(
+            item.ts_code,
+            as_of=CUTOFF,
+            known_at=KNOWN_AT,
+        )
+        == ()
+    )
 
 
 def test_ingests_annual_report_dividend_evidence_without_fabricating_action_dates(
@@ -424,6 +431,75 @@ def test_ingests_reviewed_risk_screen_with_explicit_filter_facts(
     assert result.action_count == 0
     assert result.risk_record_id is not None
     assert result.source_record_ids == (result.risk_record_id,)
+
+
+def test_ingests_exchange_dividend_timeline_without_fabricating_publication_time(
+    tmp_path: Path,
+) -> None:
+    """Exchange facts close the action screen using ex-date as a conservative bound."""
+    raw_store = RawObjectStore(tmp_path / "raw")
+    reference = raw_store.put(
+        source_id="sse",
+        source_url="https://query.sse.com.cn/commonQuery.do?fixture=1",
+        collected_at=KNOWN_AT,
+        content_type="application/json",
+        payload=b'{"fixture":"implemented-dividend"}',
+    )
+    awaiting = _downloaded_item(
+        item_id="exchange-capital-actions",
+        document_kind=DocumentKind.CAPITAL_ACTION_TIMELINE,
+        raw_hash=reference.content_hash,
+    ).model_copy(
+        update={
+            "status": AcquisitionStatus.AWAITING_MANUAL,
+            "source_url": None,
+            "discovery_method": None,
+            "published_at": None,
+            "collected_at": None,
+            "content_hash": None,
+            "version": None,
+            "raw_object_hash": None,
+            "quality_status": QualityStatus.MISSING,
+            "error_code": "OFFICIAL_ATTACHMENT_REQUIRED",
+            "attempt_count": 0,
+        }
+    )
+    service, pilot_repository, action_repository = _service(tmp_path, awaiting)
+    record = ImplementedDividend(
+        record_id="implemented-dividend-fixture",
+        source_id="sse",
+        source_url="https://www.sse.com.cn/market/stockdata/dividends/dividend/index_his.shtml",
+        published_at=None,
+        effective_at=datetime(2026, 6, 11, tzinfo=SHANGHAI),
+        collected_at=KNOWN_AT,
+        version="sse-implemented-2026-07-22",
+        content_hash=reference.content_hash,
+        license_policy="personal-non-commercial-research",
+        quality_status=QualityStatus.VALID,
+        valid_from=KNOWN_AT,
+        ts_code="600001.SH",
+        record_date=date(2026, 6, 10),
+        ex_date=date(2026, 6, 11),
+        cash_dividend_per_share=Decimal("0.50"),
+    )
+
+    result = service.ingest_exchange_dividend_timeline(awaiting.item_id, (record,))
+
+    stored = pilot_repository.get_manifest_item(awaiting.item_id)
+    assert stored is not None
+    assert stored.status is AcquisitionStatus.INGESTED
+    assert stored.discovery_method is DiscoveryMethod.PUBLIC_PAGE
+    actions = action_repository.visible_actions(
+        awaiting.ts_code,
+        as_of=CUTOFF,
+        known_at=KNOWN_AT,
+    )
+    assert len(actions) == 1
+    assert actions[0].published_at == datetime(2026, 6, 11, tzinfo=SHANGHAI)
+    assert actions[0].effective_at == actions[0].published_at
+    assert actions[0].fiscal_year == 2025
+    assert actions[0].content_hash == reference.content_hash
+    assert result.ingested is True
 
 
 def test_invalid_evidence_returns_to_manual_queue_without_partial_facts(

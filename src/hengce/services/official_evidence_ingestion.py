@@ -25,10 +25,12 @@ from hengce.contracts.enums import (
     AcquisitionStatus,
     ActionStatus,
     ActionType,
+    DiscoveryMethod,
     DocumentKind,
     QualityStatus,
 )
 from hengce.contracts.market import CorporateAction
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.contracts.risk import OfficialRiskScreen
 from hengce.raw_store.store import RawObjectStore
 from hengce.state.action_repository import CorporateActionRepository
@@ -319,6 +321,140 @@ class OfficialEvidenceIngestionService:
             risk_record_id=None,
             source_record_ids=record_ids,
             error_code=None,
+        )
+
+    def ingest_exchange_dividend_timeline(
+        self,
+        item_id: str,
+        records: tuple[ImplementedDividend, ...],
+    ) -> OfficialEvidenceIngestionResult:
+        """Close one capital-action screen from exchange-confirmed events.
+
+        The exchange datasets do not expose announcement timestamps.  The ex-date is
+        therefore used as a conservative latest-publication bound, while ``valid_from``
+        remains the actual collection time so point-in-time queries cannot see it early.
+        """
+        item = self.pilot_repository.get_manifest_item(item_id)
+        if item is None:
+            raise ValueError("ACQUISITION_ITEM_NOT_FOUND")
+        if (
+            item.status is not AcquisitionStatus.AWAITING_MANUAL
+            or item.document_kind is not DocumentKind.CAPITAL_ACTION_TIMELINE
+            or not records
+            or any(record.ts_code != item.ts_code for record in records)
+        ):
+            raise ValueError("OFFICIAL_EXCHANGE_ACTION_ITEM_INVALID")
+        now = self.clock()
+        visible = tuple(
+            record
+            for record in records
+            if record.ex_date <= item.report_cutoff_at.date()
+            and record.collected_at <= now
+            and record.valid_from <= now
+            and record.quality_status in {QualityStatus.VALID, QualityStatus.DERIVED}
+        )
+        if not visible:
+            raise ValueError("OFFICIAL_EXCHANGE_ACTION_EVIDENCE_MISSING")
+        for record in visible:
+            self.raw_store.validate_content_hash(record.content_hash)
+        actions = tuple(self._build_exchange_dividend_action(record) for record in visible)
+        self.action_repository.save_versions(actions)
+        latest = max(
+            visible,
+            key=lambda record: (record.collected_at, record.ex_date, record.record_id),
+        )
+        latest_bound = datetime.combine(
+            latest.ex_date,
+            datetime.min.time(),
+            tzinfo=_SHANGHAI,
+        )
+        discovered = type(item).model_validate(
+            {
+                **item.model_dump(),
+                "status": AcquisitionStatus.DISCOVERED,
+                "source_id": latest.source_id,
+                "source_url": str(latest.source_url),
+                "discovery_method": DiscoveryMethod.PUBLIC_PAGE,
+                "published_at": latest_bound,
+                "effective_at": latest_bound,
+                "collected_at": latest.collected_at,
+                "content_hash": latest.content_hash,
+                "version": latest.version,
+                "raw_object_hash": latest.content_hash,
+                "quality_status": QualityStatus.UNVERIFIED,
+                "error_code": None,
+                "attempt_count": item.attempt_count + 1,
+            }
+        )
+        self.pilot_repository.transition(
+            item.item_id,
+            AcquisitionStatus.AWAITING_MANUAL,
+            discovered,
+            now,
+        )
+        downloaded = discovered.model_copy(update={"status": AcquisitionStatus.DOWNLOADED})
+        self.pilot_repository.transition(
+            item.item_id,
+            AcquisitionStatus.DISCOVERED,
+            downloaded,
+            now,
+        )
+        verified = downloaded.model_copy(
+            update={
+                "status": AcquisitionStatus.VERIFIED,
+                "quality_status": QualityStatus.VALID,
+            }
+        )
+        self.pilot_repository.transition(
+            item.item_id,
+            AcquisitionStatus.DOWNLOADED,
+            verified,
+            now,
+        )
+        self.pilot_repository.transition(
+            item.item_id,
+            AcquisitionStatus.VERIFIED,
+            verified.model_copy(update={"status": AcquisitionStatus.INGESTED}),
+            now,
+        )
+        return OfficialEvidenceIngestionResult(
+            item_id=item.item_id,
+            ingested=True,
+            action_count=len(actions),
+            risk_record_id=None,
+            source_record_ids=tuple(action.record_id for action in actions),
+            error_code=None,
+        )
+
+    @staticmethod
+    def _build_exchange_dividend_action(
+        record: ImplementedDividend,
+    ) -> CorporateAction:
+        publication_bound = datetime.combine(
+            record.ex_date,
+            datetime.min.time(),
+            tzinfo=_SHANGHAI,
+        )
+        return CorporateAction(
+            record_id=f"exchange-action-{record.record_id}",
+            source_id=record.source_id,
+            source_url=record.source_url,
+            published_at=publication_bound,
+            effective_at=publication_bound,
+            collected_at=record.collected_at,
+            version=f"{record.version}:capital-action-v1",
+            content_hash=record.content_hash,
+            license_policy=record.license_policy,
+            quality_status=record.quality_status,
+            supersedes_id=None,
+            valid_from=record.valid_from,
+            ts_code=record.ts_code,
+            action_type=ActionType.CASH_DIVIDEND,
+            record_date=record.record_date,
+            ex_date=record.ex_date,
+            fiscal_year=record.ex_date.year - 1,
+            cash_dividend_per_share=record.cash_dividend_per_share,
+            action_status=ActionStatus.IMPLEMENTED,
         )
 
     def _validate_common_evidence(

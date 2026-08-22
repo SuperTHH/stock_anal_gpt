@@ -38,10 +38,23 @@ class StrategyDefinition:
     strategy_type: StrategyType
     version: str
     factors: tuple[FactorSpec, ...]
+    minimum_candidate_values: tuple[tuple[str, Decimal], ...] = ()
+    industry_normalization_minimum_size: int | None = None
 
     def __post_init__(self) -> None:
         if sum((factor.weight for factor in self.factors), Decimal(0)) != Decimal(1):
             raise ValueError("STRATEGY_WEIGHTS_INVALID")
+        factor_names = {factor.name for factor in self.factors}
+        if any(
+            name not in factor_names or not minimum.is_finite()
+            for name, minimum in self.minimum_candidate_values
+        ):
+            raise ValueError("STRATEGY_CANDIDATE_MINIMUM_INVALID")
+        if (
+            self.industry_normalization_minimum_size is not None
+            and self.industry_normalization_minimum_size < 2
+        ):
+            raise ValueError("STRATEGY_INDUSTRY_NORMALIZATION_SIZE_INVALID")
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +159,13 @@ class StrategyEngine:
                 and not item.cycle_position_available
             ):
                 status = CandidateStatus.WATCH
+            if any(
+                (factor := item.factors.get(name)) is None
+                or factor.value is None
+                or factor.value < minimum
+                for name, minimum in self.definition.minimum_candidate_values
+            ):
+                status = CandidateStatus.WATCH
             candidates.append(
                 StrategyCandidate(
                     report_date=report_date,
@@ -233,8 +253,11 @@ class StrategyEngine:
                 used_market_fallback=False,
             )
 
+        normalization_population, normalization_scope, used_market_fallback = (
+            self._normalization_context(item, population)
+        )
         values = self._values(
-            population,
+            normalization_population,
             spec.name,
             data_cutoff_at=data_cutoff_at,
             known_at=known_at,
@@ -252,9 +275,31 @@ class StrategyEngine:
             weighted_score=normalized * spec.weight,
             quality_status=factor.quality_status,
             source_record_ids=factor.source_record_ids,
-            normalization_scope="pilot_universe",
-            used_market_fallback=False,
+            normalization_scope=normalization_scope,
+            used_market_fallback=used_market_fallback,
         )
+
+    @staticmethod
+    def _industry_population(
+        item: SecurityStrategyInput,
+        population: list[SecurityStrategyInput],
+    ) -> list[SecurityStrategyInput]:
+        if item.industry_l1 is None:
+            return []
+        return [candidate for candidate in population if candidate.industry_l1 == item.industry_l1]
+
+    def _normalization_context(
+        self,
+        item: SecurityStrategyInput,
+        population: list[SecurityStrategyInput],
+    ) -> tuple[list[SecurityStrategyInput], str, bool]:
+        minimum_size = self.definition.industry_normalization_minimum_size
+        if minimum_size is None:
+            return population, "pilot_universe", False
+        industry = self._industry_population(item, population)
+        if len(industry) >= minimum_size:
+            return industry, f"industry_l1:{item.industry_l1}", False
+        return population, "full_market", True
 
     @staticmethod
     def _values(

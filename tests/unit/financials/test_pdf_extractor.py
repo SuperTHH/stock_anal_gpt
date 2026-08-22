@@ -11,9 +11,7 @@ from hengce.contracts.enums import DiscoveryMethod, QualityStatus, ReportType
 from hengce.contracts.financial import FilingDescriptor
 from hengce.financials.pdf_extractor import CninfoPdfExtractor
 
-FIXTURE = (
-    Path(__file__).parents[2] / "fixtures" / "pdf" / "pilot_extracted_pages.json"
-)
+FIXTURE = Path(__file__).parents[2] / "fixtures" / "pdf" / "pilot_extracted_pages.json"
 PDF_BYTES = b"%PDF-1.7\nFIXTURE DATA - NOT A REAL ISSUER\n%%EOF"
 
 
@@ -83,6 +81,186 @@ def test_extracts_identity_units_negative_values_pages_and_lineage(
     assert all(len(candidate.source_text_hash) == 64 for candidate in result.candidates)
     assert result.pdf_content_hash == content_hash
     assert result.parser_version == "cninfo-pdf-pilot-v1"
+
+
+def test_extracts_consolidated_table_when_pdf_places_visual_title_last(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for page in page_payload[1:]:
+        lines = page["text"].splitlines()
+        title = lines.pop(0).removeprefix("合并")
+        unit = next(line for line in lines if "单位：" in line)
+        lines.remove(unit)
+        page["text"] = "\n".join(["项目 合并数 公司数 合并数 公司数", *lines, title, unit])
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_recovers_q1_summary_and_reordered_capex_row(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    filing = descriptor(content_hash).model_copy(
+        update={
+            "report_period": date(2025, 3, 31),
+            "report_type": ReportType.Q1,
+        }
+    )
+    page_payload = pages()
+    page_payload[2]["text"] = (
+        "§2 主要财务数据\n"
+        "归属于上市公司股东的扣除非经常性损益的净利润（千元）\n"
+        "170 160\n"
+        "项目 合并数 公司数 合并数 公司数\n"
+        "经营活动产生的现金流量净额 220 200\n"
+        "1,178 1,000\n"
+        "投资支付的现金 500 400\n"
+        "投资活动产生的现金流量净额 -50 -40\n"
+        "筹资活动产生的现金流量净额 -20 -10\n"
+        "汇率变动对现金及现金等价物的影响 0 0\n"
+        "现金及现金等价物净增加额 150 150\n"
+        "购建固定资产、无形资产和其他长期资产支付的现金\n"
+        "现金流量表\n单位：人民币千元\n"
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=filing)
+
+    assert result.facts["adjusted_net_profit"] == Decimal("170000")
+    assert result.facts["capital_expenditure"] == Decimal("1178000")
+
+
+def test_accepts_dual_listed_a_h_security_code_label(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    filing = descriptor(content_hash).model_copy(
+        update={"ts_code": "000063.SZ", "exchange": "SZSE"}
+    )
+    page_payload = pages()
+    page_payload[0]["text"] = (
+        "FIXTURE DATA - NOT A REAL ISSUER\n"
+        "证券代码（A/H）：000063/00763\n"
+        "2025年年度报告\n报告期：2025-12-31"
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=filing)
+
+    assert "PDF_LAYOUT_UNSUPPORTED" not in result.issues
+
+
+def test_annual_bond_indicator_table_supplies_adjusted_profit(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170", "未支持摘要字段 | 170"
+    )
+    page_payload.append(
+        {
+            "page_number": 95,
+            "text": (
+                "主要指标 2025 年（元） 2024 年（元） 本期比上年同期增减（%）\n"
+                "归属于上市公司股东的扣除非经常性损益的净利润 "
+                "21,616,538,793 19,531,070,917 10.68"
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+
+    assert result.facts["adjusted_net_profit"] == Decimal("21616538793")
+
+
+def test_derives_equity_when_a_scanned_continuation_page_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = "\n".join(
+        line for line in page_payload[1]["text"].splitlines() if "所有者权益合计" not in line
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+
+    assert result.facts["equity"] == Decimal("12000000")
+    assert ("equity", ("total_assets", "total_liabilities")) in result.derivations
+
+
+def test_extracts_current_total_from_annual_share_change_table(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[-1]["text"] = (
+        "股份变动情况表\n单位：股\n"
+        "三、股份总数 26,329,312,240 100 0 0 0 -2,741,000 "
+        "-2,741,000 26,326,571,240 100"
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+
+    assert result.facts["total_shares"] == Decimal("26326571240")
+
+
+def test_annual_summary_accepts_cny_millions_and_year_over_year_header(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u540e\u7684\u51c0\u5229\u6da6 | 170",
+        "\u672a\u652f\u6301\u7684\u6458\u8981\u5b57\u6bb5 | 170",
+    )
+    page_payload.append(
+        {
+            "page_number": 10,
+            "text": (
+                "\u9879\u76ee 2025\u5e74 2024\u5e74 \u540c\u6bd4\u589e\u51cf 2023\u5e74\n"
+                "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u767e\u4e07\u5143\n"
+                "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\u7684\u6263\u9664\u975e\u7ecf\u5e38\u6027"
+                "\u635f\u76ca\u7684\u51c0\u5229\u6da6 | 170"
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("170000000")
+
+
+def test_annual_summary_accepts_ordinary_shareholder_adjusted_profit_label(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    original_label = (
+        "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\u7684"
+        "\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u7684\u51c0\u5229\u6da6 | 170"
+    )
+    ordinary_shareholder_label = (
+        "\u5f52\u5c5e\u4e8e\u4e0a\u5e02\u516c\u53f8\u666e\u901a\u80a1\u80a1\u4e1c"
+        "\u7684\u6263\u9664\u975e\u7ecf\u5e38\u6027\u635f\u76ca\u7684\u51c0\u5229\u6da6 | 170"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        original_label,
+        ordinary_shareholder_label,
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
 
 
 def test_labeled_six_digit_a_share_code_matches_descriptor_suffix(
@@ -266,9 +444,7 @@ def test_income_and_cash_flow_accept_structural_table_header(
     )
     for index in (2, 3):
         lines = page_payload[index]["text"].splitlines()
-        page_payload[index]["text"] = "\n".join(
-            [lines[0], lines[2], statement_header, *lines[3:]]
-        )
+        page_payload[index]["text"] = "\n".join([lines[0], lines[2], statement_header, *lines[3:]])
 
     result = extractor(page_payload).extract(
         pdf_path=path,
@@ -288,12 +464,16 @@ def test_blank_financing_cash_flow_row_is_explicit_zero(
     """A visible blank total row is zero, not an absent disclosure."""
     path, content_hash = write_pdf(tmp_path)
     page_payload = pages()
-    page_payload[3]["text"] = page_payload[3]["text"].replace(
-        "筹资活动产生的现金流量净额 | (20)",
-        "筹资活动产生的现金流量净额",
-    ).replace(
-        "现金及现金等价物净增加额 | 150",
-        "现金及现金等价物净增加额 | 170",
+    page_payload[3]["text"] = (
+        page_payload[3]["text"]
+        .replace(
+            "筹资活动产生的现金流量净额 | (20)",
+            "筹资活动产生的现金流量净额",
+        )
+        .replace(
+            "现金及现金等价物净增加额 | 150",
+            "现金及现金等价物净增加额 | 170",
+        )
     )
 
     result = extractor(page_payload).extract(
@@ -347,6 +527,104 @@ def test_cny_thousand_unit_scales_statement_facts(
     assert result.issues == ()
     assert result.facts["total_assets"] == Decimal("2000000")
     assert result.facts["operating_cash_flow"] == Decimal("220000")
+
+
+def test_total_shares_keeps_statement_unit_multiplier(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    share_lines = page_payload[4]["text"].splitlines()
+    page_payload[4]["text"] = "\n".join(
+        [
+            share_lines[0],
+            "\u5355\u4f4d\uff1a\u5343\u80a1",
+            f"{share_lines[2].partition('|')[0]}| 100,000",
+        ]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_shares"] == Decimal("100000000")
+    candidate = next(
+        item for item in result.candidates if item.canonical_fact_name == "total_shares"
+    )
+    assert candidate.currency == "SHARES"
+    assert candidate.unit_multiplier == Decimal("1000")
+
+
+def test_annual_period_heading_with_inline_cny_thousand_activates_statement(
+    tmp_path: Path,
+) -> None:
+    """Audited annual statements can put `CNY thousands` on the year heading."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    cash_flow_lines = page_payload[3]["text"].splitlines()
+    page_payload[3]["text"] = "\n".join(
+        [
+            cash_flow_lines[0],
+            "2025\u5e74\u5ea6 \u4eba\u6c11\u5e01\u5343\u5143",
+            *cash_flow_lines[3:],
+        ]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["operating_cash_flow"] == Decimal("220000")
+
+
+def test_balance_date_heading_with_inline_cny_thousand_activates_statement(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    balance_lines = page_payload[1]["text"].splitlines()
+    page_payload[1]["text"] = "\n".join(
+        [
+            balance_lines[0],
+            "2025\u5e7412\u670831\u65e5 \u4eba\u6c11\u5e01\u5343\u5143",
+            *balance_lines[3:],
+        ]
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("2000000")
+
+
+def test_slash_note_placeholder_cash_flow_rows_are_parsed(
+    tmp_path: Path,
+) -> None:
+    """SSE tables often use `/` as the empty note column before current value."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    cash_flow_lines = page_payload[3]["text"].splitlines()
+    for index in range(3, 8):
+        label, separator, value = cash_flow_lines[index].partition("|")
+        assert separator
+        cash_flow_lines[index] = f"{label} / {value.strip()} {value.strip()}"
+    page_payload[3]["text"] = "\n".join(cash_flow_lines)
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+    assert result.facts["investing_cash_flow"] == Decimal("-500000")
 
 
 def test_zero_padded_visible_q1_period_identifies_report(
@@ -422,9 +700,7 @@ def test_annual_balance_sheet_accepts_period_end_opening_balance_header(
     path, content_hash = write_pdf(tmp_path)
     page_payload = pages()
     lines = page_payload[1]["text"].splitlines()
-    page_payload[1]["text"] = "\n".join(
-        [lines[0], lines[2], "项目 期末余额 期初余额", *lines[3:]]
-    )
+    page_payload[1]["text"] = "\n".join([lines[0], lines[2], "项目 期末余额 期初余额", *lines[3:]])
 
     result = extractor(page_payload).extract(
         pdf_path=path,
@@ -479,12 +755,7 @@ def test_ignores_parent_company_statements_after_consolidated_statements(
             },
             {
                 "page_number": 47,
-                "text": (
-                    "母公司 利润表\n"
-                    "单位：人民币万元\n"
-                    "营业收入 | 900\n"
-                    "净利润 | 160\n"
-                ),
+                "text": ("母公司 利润表\n单位：人民币万元\n营业收入 | 900\n净利润 | 160\n"),
             },
             {
                 "page_number": 48,
@@ -671,9 +942,7 @@ def test_suffixed_cover_issuer_code_outranks_later_labeled_peer_code(
     )
     wrong = extractor(page_payload).extract(
         pdf_path=path,
-        descriptor=descriptor(content_hash).model_copy(
-            update={"ts_code": "688981.SH"}
-        ),
+        descriptor=descriptor(content_hash).model_copy(update={"ts_code": "688981.SH"}),
     )
 
     assert correct.quality_status is QualityStatus.VALID
@@ -946,6 +1215,30 @@ def test_plain_share_capital_label_is_total_shares_inside_balance_sheet(
     assert result.facts["total_shares"] == Decimal("100000000")
 
 
+def test_explicit_share_change_total_overrides_accounting_share_capital(
+    tmp_path: Path,
+) -> None:
+    """A reverse-merger issuer's accounting 股本 need not equal listed shares."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[4]["text"] = page_payload[4]["text"].replace(
+        "期末总股本 | 100,000,000",
+        "股本 328,300,769.56 328,300,769.56",
+    )
+    page_payload[3]["text"] += (
+        "\n三、股份总数 14,442,199,726 100.00% 0 0 0 0 0 "
+        "14,442,199,726 100.00%\n"
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID
+    assert result.facts["total_shares"] == Decimal("14442199726")
+
+
 def test_split_equity_row_with_value_before_continuation_is_supported(
     tmp_path: Path,
 ) -> None:
@@ -956,9 +1249,7 @@ def test_split_equity_row_with_value_before_continuation_is_supported(
         "\u6240\u6709\u8005\u6743\u76ca\u5408\u8ba1 | 1,200",
         "\u6240\u6709\u8005\u6743\u76ca\uff08\u6216\u80a1\u4e1c\u6743 1,200 1,100",
     )
-    page_payload[2]["text"] = (
-        "\u76ca\uff09\u5408\u8ba1\n" + page_payload[2]["text"]
-    )
+    page_payload[2]["text"] = "\u76ca\uff09\u5408\u8ba1\n" + page_payload[2]["text"]
 
     result = extractor(page_payload).extract(
         pdf_path=path,
@@ -1051,12 +1342,11 @@ def test_derives_interest_bearing_debt_only_from_complete_visible_components(
 
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["interest_bearing_debt"] == Decimal("75")
-    assert document.normalization_metadata[
-        "interest_bearing_debt_derivation_version"
-    ] == "interest-bearing-debt-components-v1"
-    assert document.normalization_metadata[
-        "interest_bearing_debt_components"
-    ] == (
+    assert (
+        document.normalization_metadata["interest_bearing_debt_derivation_version"]
+        == "interest-bearing-debt-components-v1"
+    )
+    assert document.normalization_metadata["interest_bearing_debt_components"] == (
         "bonds_payable,current_portion_noncurrent_liabilities,"
         "lease_liabilities,long_term_borrowings,short_term_borrowings"
     )
@@ -1070,12 +1360,7 @@ def test_incomplete_debt_components_never_create_an_estimated_total(
     page_payload = pages()
     page_payload[1]["text"] = page_payload[1]["text"].replace(
         "有息负债 | 250",
-        (
-            "短期借款 | 100\n"
-            "一年内到期的非流动负债 | 50\n"
-            "长期借款 | 0\n"
-            "应付债券 | 0"
-        ),
+        ("短期借款 | 100\n一年内到期的非流动负债 | 50\n长期借款 | 0\n应付债券 | 0"),
     )
 
     result = extractor(page_payload).extract(
@@ -1086,6 +1371,31 @@ def test_incomplete_debt_components_never_create_an_estimated_total(
     assert result.quality_status is QualityStatus.UNVERIFIED
     assert "PDF_REQUIRED_FACTS_MISSING" in result.issues
     assert "interest_bearing_debt" not in result.facts
+
+
+def test_slash_blank_debt_rows_are_explicit_zero_components(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    balance_lines = page_payload[1]["text"].splitlines()
+    debt_index = next(index for index, line in enumerate(balance_lines) if "| 250" in line)
+    balance_lines[debt_index : debt_index + 1] = [
+        "短期借款 / - -",
+        "一年内到期的非流动负债 | 50",
+        "长期借款 / - -",
+        "应付债券 / - -",
+        "租赁负债 | 25",
+    ]
+    page_payload[1]["text"] = "\n".join(balance_lines)
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["interest_bearing_debt"] == Decimal("750000")
 
 
 def test_omitted_bonds_row_is_zero_only_in_complete_reconciled_liability_section(
@@ -1340,10 +1650,7 @@ def test_cover_accepts_issuer_alongside_second_share_class_code(
     page_payload = pages()
     page_payload[0]["text"] = page_payload[0]["text"].replace(
         "\u865a\u6784\u516c\u53f8 699998.SH",
-        (
-            "\u8bc1\u5238\u4ee3\u7801\uff1a699998\n"
-            "\u8bc1\u5238\u4ee3\u7801\uff1a999998"
-        ),
+        ("\u8bc1\u5238\u4ee3\u7801\uff1a699998\n\u8bc1\u5238\u4ee3\u7801\uff1a999998"),
     )
 
     result = extractor(page_payload).extract(
@@ -1369,10 +1676,7 @@ def test_front_matter_accepts_issuer_alongside_second_share_class_code(
         1,
         {
             "page_number": 2,
-            "text": (
-                "\u8bc1\u5238\u4ee3\u7801\uff1a699998\n"
-                "\u8bc1\u5238\u4ee3\u7801\uff1a999998"
-            ),
+            "text": ("\u8bc1\u5238\u4ee3\u7801\uff1a699998\n\u8bc1\u5238\u4ee3\u7801\uff1a999998"),
         },
     )
 
@@ -1623,6 +1927,27 @@ def test_truncated_capital_expenditure_label_with_value_is_supported(
     assert result.facts["capital_expenditure"] == Decimal("500000")
 
 
+def test_financial_statement_unit_accepts_amount_unit_wording(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for page in page_payload:
+        if isinstance(page["text"], str):
+            page["text"] = page["text"].replace(
+                "单位：人民币万元",
+                "除特别注明外，金额单位均为人民币万元",
+            )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+
+
 def test_content_hash_mismatch_is_rejected_before_text_extraction(
     tmp_path: Path,
 ) -> None:
@@ -1713,7 +2038,4 @@ def test_zero_based_reader_page_numbers_become_one_based_lineage(
 
     assert document.fact_lineage["total_assets"].page_number == 2
     assert document.fact_lineage["adjusted_net_profit"].page_number == 3
-    assert all(
-        lineage.page_number > 0
-        for lineage in document.fact_lineage.values()
-    )
+    assert all(lineage.page_number > 0 for lineage in document.fact_lineage.values())

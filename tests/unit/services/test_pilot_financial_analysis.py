@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ from hengce.services.pilot_financial_analysis import (
 CUTOFF = datetime(2026, 7, 22, 13, 30, tzinfo=UTC)
 
 
-def test_analyzer_assembles_five_periods_and_resolves_latest_share_capital() -> None:
+def test_analyzer_prefers_annual_share_baseline_and_applies_later_actions() -> None:
     share_fact = AssembledFinancialFact(
         canonical_fact_name="total_shares",
         value=Decimal("100"),
@@ -36,12 +37,28 @@ def test_analyzer_assembles_five_periods_and_resolves_latest_share_capital() -> 
     series = FinancialSeriesResult(
         ts_code="600001.SH",
         periods={
+            date(2025, 12, 31): FinancialPeriodSnapshot(
+                report_period=date(2025, 12, 31),
+                report_kind="ANNUAL",
+                source_kind="PDF",
+                filing_id="filing-annual",
+                facts={
+                    "total_shares": replace(
+                        share_fact,
+                        value=Decimal("100"),
+                        input_record_id="share-fact-annual",
+                        filing_id="filing-annual",
+                    )
+                },
+            ),
             date(2026, 3, 31): FinancialPeriodSnapshot(
                 report_period=date(2026, 3, 31),
                 report_kind="Q1",
                 source_kind="PDF",
                 filing_id="filing-q1",
-                facts={"total_shares": share_fact},
+                facts={
+                    "total_shares": replace(share_fact, value=Decimal("50"))
+                },
             )
         },
         blocked_reasons=(),

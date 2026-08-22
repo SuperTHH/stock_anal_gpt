@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -8,6 +9,7 @@ from hengce.strategies.engine import (
     StrategyEngine,
 )
 from hengce.strategies.quality_growth import QUALITY_GROWTH_V1
+from hengce.strategies.stable_dividend import STABLE_DIVIDEND_FULL_MARKET_V1
 
 CUTOFF = datetime(2026, 7, 29, 13, tzinfo=UTC)
 
@@ -50,8 +52,7 @@ def complete_values(value: str) -> dict[str, str]:
     return {spec.name: value for spec in QUALITY_GROWTH_V1.factors}
 
 
-def test_pilot_normalization_never_displays_industry_or_fallback_scope() -> None:
-    """Catches leaking an industry rank into the fixed thirty-security pilot sample."""
+def test_pilot_strategy_preserves_pilot_universe_normalization() -> None:
     result = StrategyEngine(QUALITY_GROWTH_V1).rank(
         [
             security_input("699998.SH", complete_values("10")),
@@ -64,11 +65,69 @@ def test_pilot_normalization_never_displays_industry_or_fallback_scope() -> None
 
     top = result[0]
     assert top.ts_code == "699999.SH"
-    assert all(not detail.used_market_fallback for detail in top.factor_details)
     assert all(
         detail.normalization_scope == "pilot_universe"
         for detail in top.factor_details
     )
+    assert all(not detail.used_market_fallback for detail in top.factor_details)
+
+
+def test_dynamic_normalization_uses_industry_population_when_at_least_twenty() -> None:
+    population = [
+        security_input(f"{600000 + index:06d}.SH", complete_values(str(index)), industry="银行")
+        for index in range(20)
+    ]
+    population.append(
+        security_input("000001.SZ", complete_values("1000"), industry="电子")
+    )
+
+    dynamic_definition = replace(
+        QUALITY_GROWTH_V1,
+        version="quality-growth-full-market-test-v1",
+        industry_normalization_minimum_size=20,
+    )
+    result = StrategyEngine(dynamic_definition).rank(
+        population,
+        report_date=date(2026, 7, 29),
+        data_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    bank = next(item for item in result if item.ts_code == "600019.SH")
+    assert all(detail.normalization_scope == "industry_l1:银行" for detail in bank.factor_details)
+    assert all(not detail.used_market_fallback for detail in bank.factor_details)
+
+
+def test_dynamic_normalization_falls_back_to_full_market() -> None:
+    dynamic_definition = replace(
+        QUALITY_GROWTH_V1,
+        version="quality-growth-full-market-test-v1",
+        industry_normalization_minimum_size=20,
+    )
+    result = StrategyEngine(dynamic_definition).rank(
+        [
+            security_input("699998.SH", complete_values("10")),
+            security_input("699999.SH", complete_values("20")),
+        ],
+        report_date=date(2026, 7, 29),
+        data_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert all(detail.normalization_scope == "full_market" for detail in result[0].factor_details)
+    assert all(detail.used_market_fallback for detail in result[0].factor_details)
+
+
+def test_stable_dividend_below_five_percent_can_only_be_watch() -> None:
+    values = {spec.name: "1" for spec in STABLE_DIVIDEND_FULL_MARKET_V1.factors}
+    values["dividend_yield"] = "0.0499"
+    item = security_input("600000.SH", values)
+
+    candidate = StrategyEngine(STABLE_DIVIDEND_FULL_MARKET_V1).rank(
+        [item], report_date=date(2026, 7, 29), data_cutoff_at=CUTOFF, known_at=CUTOFF
+    )[0]
+
+    assert candidate.candidate_status is CandidateStatus.WATCH
 
 
 def test_equal_scores_use_ts_code_ascending_tie_break() -> None:

@@ -217,7 +217,95 @@ tbody tr:hover { background: #efefeb; }
   gap: 16px;
   margin-top: 18px;
 }
+
+.evidence-run-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.evidence-run-grid article {
+  display: grid;
+  gap: 5px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.review-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 18px;
+}
+
+.review-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.review-list button {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.review-list button.active { border-color: var(--ink); }
+.risk-review-fields { display: grid; gap: 12px; margin-top: 18px; }
+.risk-review-fields label { display: grid; gap: 5px; }
+.risk-review-fields textarea { min-height: 80px; }
+.review-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+@media (max-width: 900px) {
+  .evidence-run-grid { grid-template-columns: 1fr; }
+  .review-layout { grid-template-columns: 1fr; }
+}
 .source-pagination button:disabled { opacity: .45; cursor: not-allowed; }
+.market-date-badge {
+  border: 1px solid #809d89; background: #e3ece6; padding: 7px 10px;
+  color: #28563d; font: 12px/18px Consolas, "JetBrains Mono", monospace;
+}
+.market-scope-note {
+  display: grid; gap: 4px; margin-bottom: 16px; padding: 12px 14px;
+  border-left: 4px solid #c58a22; background: #f4e9d2;
+}
+.market-scope-note span { color: #5e645f; line-height: 1.6; }
+.market-kpis { margin-bottom: 16px; }
+.market-toolbar {
+  display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(140px, .7fr));
+  gap: 12px; margin-bottom: 12px;
+}
+.market-toolbar label { display: grid; gap: 6px; color: #5e645f; font-size: 11px; }
+.market-toolbar select, .market-toolbar input {
+  min-height: 40px; padding: 8px 10px; border: 1px solid #9ca29c;
+  background: #fff; color: #1c231f;
+}
+.coverage-warning {
+  margin-bottom: 12px; padding: 8px 10px; border: 1px solid #c8cbc5;
+  background: #f4f4ef; color: #5e645f; font-size: 12px;
+}
+.funnel-flow {
+  display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr) 26px) minmax(130px, 1fr);
+  align-items: center; margin-bottom: 12px;
+}
+.funnel-flow > div { padding: 12px; border: 1px solid #c8cbc5; background: #f7f7f2; }
+.funnel-flow span { display: block; color: #6f746f; font-size: 11px; }
+.funnel-flow strong { display: block; margin-top: 4px; font: 500 20px/26px Consolas, monospace; }
+.funnel-flow b { text-align: center; color: #6f746f; }
+.dynamic-pools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.dynamic-pools > div { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; padding: 12px; border: 1px solid #c8cbc5; }
+.dynamic-pools > div > span:not(.readiness-badge), .dynamic-pools small { grid-column: 1 / -1; color: #5e645f; }
+.funnel-detail { margin-top: 14px; }
+.funnel-detail summary { min-height: 36px; padding: 8px 0; cursor: pointer; font-weight: 600; }
+.table-wrap td a { color: #1a3c2b; display: block; white-space: nowrap; }
 .empty-panel { margin-top: 24px; padding: 24px; border: 1px solid #c8cbc5; background: #fff; }
 .error-state { border-color: #c58a22; background: #f4e9d2; }
 footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #c8cbc5; color: #6f746f; font-size: 11px; }
@@ -240,8 +328,16 @@ footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #c8cbc5; col
   .event-narrative { grid-template-columns: 1fr; }
   .domain-evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-toolbar { grid-template-columns: 1fr; }
+  .market-toolbar { grid-template-columns: 1fr 1fr; }
+  .funnel-flow { grid-template-columns: 1fr; gap: 8px; }
+  .funnel-flow b { transform: rotate(90deg); }
+  .dynamic-pools { grid-template-columns: 1fr; }
   .status-strip { align-items: flex-start; flex-direction: column; gap: 4px; }
   .pilot-banner { align-items: flex-start; flex-direction: column; gap: 8px; }
   .pilot-times { justify-content: flex-start; }
   .blocked-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  .market-toolbar { grid-template-columns: 1fr; }
 }

@@ -18,6 +18,7 @@ from hengce.contracts.enums import (
     StrategyType,
 )
 from hengce.contracts.market import MarketBar, SecurityMaster
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.contracts.official_event import OfficialEvent
 from hengce.contracts.pilot import AcquisitionManifestItem
 from hengce.contracts.risk import OfficialRiskScreen
@@ -464,6 +465,152 @@ def test_production_ingestion_routes_non_periodic_official_evidence(
 
     assert fake.calls == sorted(item.item_id for item in selected)
     assert output["downloaded_pending_ingestion_count"] == 0
+
+
+def test_production_ingestion_closes_action_screen_from_exchange_dividends(
+    tmp_path: Path,
+) -> None:
+    """Catches exchange evidence being available but left in the manual queue."""
+    settings = _seed_real_shape_inputs(tmp_path / "data")
+    state = bootstrap_state(settings)
+    pilot_repository = PilotRepository(state.path)
+
+    class FakeDividendWarehouse:
+        def __init__(self, record: ImplementedDividend) -> None:
+            self.record = record
+
+        def read_records(self, market_date: date) -> list[ImplementedDividend]:
+            assert market_date == MARKET_DATE
+            return [self.record]
+
+    class FakeOfficialEvidenceIngestion:
+        def run(self, item_id: str) -> object:
+            raise AssertionError(f"unexpected manual evidence call: {item_id}")
+
+        def ingest_exchange_dividend_timeline(
+            self,
+            item_id: str,
+            records: tuple[ImplementedDividend, ...],
+        ) -> object:
+            assert records == (record,)
+            current = pilot_repository.get_manifest_item(item_id)
+            assert current is not None
+            discovered = AcquisitionManifestItem.model_validate(
+                {
+                    **current.model_dump(),
+                    "status": AcquisitionStatus.DISCOVERED,
+                    "source_id": "sse",
+                    "source_url": str(record.source_url),
+                    "discovery_method": DiscoveryMethod.PUBLIC_PAGE,
+                    "published_at": datetime(2026, 6, 11, tzinfo=SHANGHAI),
+                    "effective_at": datetime(2026, 6, 11, tzinfo=SHANGHAI),
+                    "collected_at": KNOWN_AT,
+                    "content_hash": record.content_hash,
+                    "raw_object_hash": record.content_hash,
+                    "version": record.version,
+                    "quality_status": QualityStatus.UNVERIFIED,
+                    "error_code": None,
+                    "attempt_count": 1,
+                }
+            )
+            pilot_repository.transition(
+                item_id,
+                AcquisitionStatus.AWAITING_MANUAL,
+                discovered,
+                KNOWN_AT,
+            )
+            downloaded = discovered.model_copy(
+                update={"status": AcquisitionStatus.DOWNLOADED}
+            )
+            pilot_repository.transition(
+                item_id,
+                AcquisitionStatus.DISCOVERED,
+                downloaded,
+                KNOWN_AT,
+            )
+            verified = downloaded.model_copy(
+                update={
+                    "status": AcquisitionStatus.VERIFIED,
+                    "quality_status": QualityStatus.VALID,
+                }
+            )
+            pilot_repository.transition(
+                item_id,
+                AcquisitionStatus.DOWNLOADED,
+                verified,
+                KNOWN_AT,
+            )
+            pilot_repository.transition(
+                item_id,
+                AcquisitionStatus.VERIFIED,
+                verified.model_copy(update={"status": AcquisitionStatus.INGESTED}),
+                KNOWN_AT,
+            )
+            return object()
+
+    stages = PilotProductionStages(
+        state=state,
+        data_dir=settings.data_dir,
+        clock=lambda: KNOWN_AT,
+        official_evidence_ingestion_service=FakeOfficialEvidenceIngestion(),
+        implemented_dividend_warehouse=None,
+    )
+    context = PilotStageContext(
+        stage_name="test",
+        market_date=MARKET_DATE,
+        report_cutoff_at=CUTOFF,
+        known_at=KNOWN_AT,
+        acquisition_mode="manual-only",
+        input_hash="a" * 64,
+        data_dir=settings.data_dir,
+    )
+    stages.freeze_universe(context)
+    stages.plan_acquisition(context)
+    selected = next(
+        item
+        for item in pilot_repository.list_manifest(
+            stages._universe(context).universe_id
+        )
+        if item.document_kind is DocumentKind.CAPITAL_ACTION_TIMELINE
+    )
+    awaiting = selected.model_copy(
+        update={
+            "status": AcquisitionStatus.AWAITING_MANUAL,
+            "quality_status": QualityStatus.MISSING,
+            "error_code": "OFFICIAL_ATTACHMENT_REQUIRED",
+        }
+    )
+    pilot_repository.transition(
+        selected.item_id,
+        AcquisitionStatus.PLANNED,
+        awaiting,
+        KNOWN_AT,
+    )
+    record = ImplementedDividend(
+        record_id="exchange-dividend-fixture",
+        source_id="sse",
+        source_url="https://www.sse.com.cn/market/stockdata/dividends/",
+        published_at=None,
+        effective_at=datetime(2026, 6, 11, tzinfo=SHANGHAI),
+        collected_at=KNOWN_AT,
+        version="fixture-v1",
+        content_hash="b" * 64,
+        license_policy="personal-non-commercial-research",
+        quality_status=QualityStatus.VALID,
+        valid_from=KNOWN_AT,
+        ts_code=selected.ts_code,
+        record_date=date(2026, 6, 10),
+        ex_date=date(2026, 6, 11),
+        cash_dividend_per_share=Decimal("0.50"),
+    )
+    stages.implemented_dividend_warehouse = FakeDividendWarehouse(record)
+
+    output = stages.ingest_documents(context)
+
+    stored = pilot_repository.get_manifest_item(selected.item_id)
+    assert stored is not None
+    assert stored.status is AcquisitionStatus.INGESTED
+    assert output["exchange_action_screen_count"] == 1
 
 
 def test_production_stages_configure_official_evidence_ingestion_by_default(

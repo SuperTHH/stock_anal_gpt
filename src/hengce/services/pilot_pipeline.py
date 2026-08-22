@@ -16,6 +16,7 @@ from hengce.contracts.enums import (
     QualityStatus,
     StrategyType,
 )
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.contracts.official_event import ReportSource
 from hengce.contracts.pilot import (
     AcquisitionManifestItem,
@@ -65,6 +66,7 @@ from hengce.strategies.readiness import (
     IndependentPoolRunner,
 )
 from hengce.strategies.stable_dividend import STABLE_DIVIDEND_V1
+from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.market import MarketWarehouse
 
 _DEFINITIONS = {
@@ -96,6 +98,7 @@ class PilotProductionStages:
         clock: Callable[[], datetime],
         pdf_ingestion_service: object | None = None,
         official_evidence_ingestion_service: object | None = None,
+        implemented_dividend_warehouse: object | None = None,
         financial_analyzer: object | None = None,
         hard_filter_provider: object | None = None,
     ) -> None:
@@ -108,6 +111,11 @@ class PilotProductionStages:
         self.dividend_repository = AnnualDividendRepository(state.path)
         self.event_repository = OfficialEventRepository(state.path)
         self.market_warehouse = MarketWarehouse(data_dir / "normalized")
+        self.implemented_dividend_warehouse = (
+            implemented_dividend_warehouse
+            if implemented_dividend_warehouse is not None
+            else ImplementedDividendWarehouse(data_dir / "normalized")
+        )
         self.report_repository = ReportRepository(state.path)
         self.pdf_repository = PdfFinancialDocumentRepository(state.path)
         self.financial_repository = FinancialFilingRepository(state.path)
@@ -122,7 +130,7 @@ class PilotProductionStages:
                 raw_store=RawObjectStore(data_dir / "raw"),
                 repository=self.pdf_repository,
                 pilot_repository=self.pilot_repository,
-                extractor=CninfoPdfExtractor(parser_version="cninfo-pdf-pilot-v5"),
+                extractor=CninfoPdfExtractor(parser_version="cninfo-pdf-pilot-v8"),
                 clock=clock,
             )
         )
@@ -141,9 +149,7 @@ class PilotProductionStages:
         )
         self.financial_assembler = PointInTimeFinancialAssembler(
             query=self.financial_query,
-            pdf_provider=lambda ts_code, period: self.pdf_repository.list_versions(
-                ts_code, period
-            ),
+            pdf_provider=lambda ts_code, period: self.pdf_repository.list_versions(ts_code, period),
         )
         self.financial_analyzer = (
             financial_analyzer
@@ -295,9 +301,7 @@ class PilotProductionStages:
             if current is None:
                 raise ValueError("ACQUISITION_ITEM_NOT_FOUND")
             if current.status is AcquisitionStatus.PLANNED:
-                discovered = current.model_copy(
-                    update={"status": AcquisitionStatus.DISCOVERED}
-                )
+                discovered = current.model_copy(update={"status": AcquisitionStatus.DISCOVERED})
                 current = self.pilot_repository.transition(
                     current.item_id,
                     AcquisitionStatus.PLANNED,
@@ -355,6 +359,27 @@ class PilotProductionStages:
                 self.official_evidence_ingestion_service.run(  # type: ignore[attr-defined]
                     item.item_id
                 )
+        exchange_records = self.implemented_dividend_warehouse.read_records(  # type: ignore[attr-defined]
+            context.market_date
+        )
+        records_by_security: dict[str, list[ImplementedDividend]] = {}
+        for record in exchange_records:
+            records_by_security.setdefault(record.ts_code, []).append(record)
+        exchange_action_screen_count = 0
+        manifest = self.pilot_repository.list_manifest(self._universe(context).universe_id)
+        for item in manifest:
+            records = records_by_security.get(item.ts_code, [])
+            if (
+                item.status is AcquisitionStatus.AWAITING_MANUAL
+                and item.document_kind is DocumentKind.CAPITAL_ACTION_TIMELINE
+                and records
+                and self.official_evidence_ingestion_service is not None
+            ):
+                self.official_evidence_ingestion_service.ingest_exchange_dividend_timeline(  # type: ignore[attr-defined]
+                    item.item_id,
+                    tuple(records),
+                )
+                exchange_action_screen_count += 1
         manifest = self.pilot_repository.list_manifest(self._universe(context).universe_id)
         ingested = tuple(item for item in manifest if item.status is AcquisitionStatus.INGESTED)
         xbrl_count = sum(
@@ -380,6 +405,7 @@ class PilotProductionStages:
             "xbrl_used_count": xbrl_count,
             "pdf_used_count": pdf_count,
             "downloaded_pending_ingestion_count": downloaded_count,
+            "exchange_action_screen_count": exchange_action_screen_count,
             "manual_todo_count": self._manual_todo_count(manifest),
             "manifest_status_distribution": self._status_distribution(manifest),
         }
@@ -398,9 +424,7 @@ class PilotProductionStages:
             "corporate_action_count": self._table_count("corporate_action_versions"),
             "corporate_action_screen_count": action_screen_count,
             "corporate_action_screen_target_count": len(universe.members),
-            "annual_dividend_record_count": self._table_count(
-                "annual_dividend_record_versions"
-            ),
+            "annual_dividend_record_count": self._table_count("annual_dividend_record_versions"),
             "share_capital_count": 0,
             "fallback_reason_counts": {},
         }
@@ -479,14 +503,10 @@ class PilotProductionStages:
             "corporate_action_count": self._table_count("corporate_action_versions"),
             "corporate_action_screen_count": action_screen_count,
             "corporate_action_screen_target_count": len(universe.members),
-            "annual_dividend_record_count": self._table_count(
-                "annual_dividend_record_versions"
-            ),
+            "annual_dividend_record_count": self._table_count("annual_dividend_record_versions"),
             "share_capital_count": self._share_capital_count(metrics),
             "derived_metric_count": self._derived_metric_count(metrics),
-            "official_risk_screen_count": self._table_count(
-                "official_risk_screen_versions"
-            ),
+            "official_risk_screen_count": self._table_count("official_risk_screen_versions"),
             "official_event_count": len(official_events),
             "narrative_template_versions": dict(_NARRATIVE_TEMPLATE_VERSIONS),
         }
@@ -520,11 +540,7 @@ class PilotProductionStages:
                 "market": QualityStatus.VALID,
                 "security_master": QualityStatus.VALID,
                 "pilot_universe": QualityStatus.VALID,
-                "manifest": (
-                    QualityStatus.PARTIAL
-                    if manual_todo_count
-                    else QualityStatus.VALID
-                ),
+                "manifest": (QualityStatus.PARTIAL if manual_todo_count else QualityStatus.VALID),
                 "financials": (QualityStatus.VALID if fact_count > 0 else QualityStatus.MISSING),
                 "corporate_actions": (
                     _coverage_quality_status(
@@ -542,11 +558,7 @@ class PilotProductionStages:
                     if quality_summary["official_risk_screen_count"]
                     else QualityStatus.MISSING
                 ),
-                "events": (
-                    QualityStatus.VALID
-                    if official_events
-                    else QualityStatus.MISSING
-                ),
+                "events": (QualityStatus.VALID if official_events else QualityStatus.MISSING),
                 "metrics": (
                     QualityStatus.VALID
                     if quality_summary["derived_metric_count"]
@@ -602,9 +614,7 @@ class PilotProductionStages:
             "corporate_action_screen_target_count": len(universe.members),
             "share_capital_count": quality_summary["share_capital_count"],
             "derived_metric_count": quality_summary["derived_metric_count"],
-            "official_risk_screen_count": quality_summary[
-                "official_risk_screen_count"
-            ],
+            "official_risk_screen_count": quality_summary["official_risk_screen_count"],
             "official_event_count": len(official_events),
             "pool_coverage": {
                 strategy.value: str(result.readiness.coverage_ratio)
@@ -944,8 +954,7 @@ class PilotProductionStages:
                 or item.source_url is None
                 or item.collected_at is None
                 or item.version is None
-                or item.quality_status
-                not in {QualityStatus.VALID, QualityStatus.DERIVED}
+                or item.quality_status not in {QualityStatus.VALID, QualityStatus.DERIVED}
             ):
                 continue
             add(
@@ -965,8 +974,7 @@ class PilotProductionStages:
             )
 
         bars = {
-            str(bar["ts_code"]): bar
-            for bar in self.market_warehouse.read_bars(context.market_date)
+            str(bar["ts_code"]): bar for bar in self.market_warehouse.read_bars(context.market_date)
         }
         master = self.state.get_security_master_universe()
         components = {
@@ -979,10 +987,7 @@ class PilotProductionStages:
             if bar is not None:
                 for record_id in (
                     str(bar["record_id"]),
-                    (
-                        f"closing-price:{context.market_date.isoformat()}:"
-                        f"{member.ts_code}"
-                    ),
+                    (f"closing-price:{context.market_date.isoformat()}:{member.ts_code}"),
                 ):
                     add_fact_source(
                         record_id=record_id,
@@ -1000,9 +1005,7 @@ class PilotProductionStages:
             component = components.get(member.ts_code)
             if component is not None:
                 add_fact_source(
-                    record_id=(
-                        f"security-master:{master.universe_hash}:{member.ts_code}"
-                    ),
+                    record_id=(f"security-master:{master.universe_hash}:{member.ts_code}"),
                     domain="security_master",
                     source_id=component.source_id,
                     source_url=component.source_url,
@@ -1054,9 +1057,7 @@ class PilotProductionStages:
                             collected_at=document.valid_from,
                             valid_from=document.valid_from,
                             version=document.version,
-                            license_policy=(
-                                "official-public-attachment-personal-research"
-                            ),
+                            license_policy=("official-public-attachment-personal-research"),
                             quality_status=document.quality_status,
                         )
 

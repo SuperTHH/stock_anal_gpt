@@ -66,7 +66,7 @@ class PdfFinancialDocumentRepository:
                     or str(predecessor["report_period"])
                     != report_period.isoformat()
                     or datetime.fromisoformat(str(predecessor["published_at"]))
-                    >= validated.published_at
+                    > validated.published_at
                     or datetime.fromisoformat(str(predecessor["valid_from"]))
                     >= validated.valid_from
                 ):

@@ -69,4 +69,5 @@ class OfficialSecurityMasterCsvImporter:
             list_date=datetime.strptime(row["list_date"], "%Y%m%d").date(),
             security_type=row["security_type"],
             is_in_scope=True,
+            industry_l1=(row.get("industry_l1") or "").strip() or None,
         )

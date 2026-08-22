@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { loadLatestReport } from "./api";
+import {
+  decideEvidenceReview,
+  loadEvidenceStatus,
+  loadFullMarket,
+  loadFullMarketResearch,
+  loadLatestReport,
+} from "./api";
 import type {
   Candidate,
+  EvidenceTask,
   FactorDetail,
+  FullMarketPayload,
+  FullMarketResearchPayload,
   PoolReadiness,
   ReportPayload,
   ReportSource,
@@ -11,12 +20,14 @@ import type {
 } from "./types";
 import "./styles.css";
 
-type Page = "每日研究总览" | "策略候选池" | "个股研究" | "官方事件流" | "数据质量与来源";
+type Page = "每日研究总览" | "全市场行情与分红" | "策略候选池" | "个股研究" | "证据审核队列" | "官方事件流" | "数据质量与来源";
 
 const pages: Page[] = [
   "每日研究总览",
+  "全市场行情与分红",
   "策略候选池",
   "个股研究",
+  "证据审核队列",
   "官方事件流",
   "数据质量与来源",
 ];
@@ -63,6 +74,12 @@ const fourDecimalFactorValues = new Set([
   "cashflow_coverage",
 ]);
 
+const cohortNames = {
+  YIELD_GE_5: "股息率≥5%",
+  YIELD_3_TO_5: "股息率3%–5%",
+  LIQUIDITY_FILL: "流动性补充",
+};
+
 type SecuritySelection = {
   tsCode: string;
   strategy: StrategyType;
@@ -90,6 +107,8 @@ function normalizationScopeName(scope: string): string {
   if (scope === "pilot_universe") return "30只试点样本";
   if (scope === "demo-market") return "演示样本";
   if (scope === "unavailable") return "不可用";
+  if (scope === "full_market") return "全市场可评分样本";
+  if (scope.startsWith("industry_l1:")) return `${scope.slice("industry_l1:".length)}行业内`;
   return scope;
 }
 
@@ -132,6 +151,15 @@ function deduplicatedSources(
 
 function candidateCount(report: ReportPayload, strategy: StrategyType): number {
   return report.candidate_pools[strategy]?.length ?? 0;
+}
+
+function candidateDividendYield(candidate: Candidate): string {
+  const factor = candidate.factor_details.find(
+    (detail) => detail.factor_name === "dividend_yield",
+  );
+  if (!factor || factor.raw_value === null) return "数据不足";
+  const value = Number(factor.raw_value);
+  return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "数据不足";
 }
 
 function candidateStatusCounts(report: ReportPayload, strategy: StrategyType) {
@@ -257,10 +285,12 @@ function CandidateTable({
   candidates,
   onSelect,
   readiness,
+  showDividendYield = false,
 }: {
   candidates: Candidate[];
   onSelect: (candidate: Candidate) => void;
   readiness?: PoolReadiness;
+  showDividendYield?: boolean;
 }) {
   if (readiness?.status === "BLOCKED") {
     const missing = Object.entries(readiness.missing_by_security);
@@ -302,7 +332,11 @@ function CandidateTable({
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>策略内名次</th><th>标的</th><th>代码</th><th>状态</th><th>入选理由</th><th>风险</th><th>完整度</th><th>策略分</th></tr>
+          <tr>
+            <th>策略内名次</th><th>标的</th><th>代码</th><th>状态</th>
+            {showDividendYield && <th>股息率</th>}
+            <th>入选理由</th><th>风险</th><th>完整度</th><th>策略分</th>
+          </tr>
         </thead>
         <tbody>
           {candidates.map((candidate) => (
@@ -311,6 +345,9 @@ function CandidateTable({
               <td>{candidate.security_name ?? "名称数据不足"}</td>
               <td className="mono">{candidate.ts_code}</td>
               <td>{candidate.candidate_status === "CANDIDATE" ? "候选" : "观察"}</td>
+              {showDividendYield && (
+                <td className="numeric mono">{candidateDividendYield(candidate)}</td>
+              )}
               <td>{candidate.selection_reasons.join("；")}</td>
               <td>{candidate.risk_flags.join("；") || "暂无结构化风险标记"}</td>
               <td className="numeric mono">{Math.round(Number(candidate.data_completeness) * 100)}%</td>
@@ -325,18 +362,27 @@ function CandidateTable({
 
 function StrategyPools({
   report,
+  research,
   openSecurity,
 }: {
   report: ReportPayload;
+  research: FullMarketResearchPayload | null;
   openSecurity: (candidate: Candidate, strategy: StrategyType) => void;
 }) {
   const [strategy, setStrategy] = useState<StrategyType>("QUALITY_GROWTH");
+  const dynamicPool = research?.pools[strategy];
+  const candidates = research?.candidate_pools[strategy] ?? report.candidate_pools[strategy] ?? [];
   return (
     <>
       <header className="page-header">
         <div><p className="eyebrow">策略内独立排序</p><h1>策略候选池</h1></div>
       </header>
-      <StatusStrip report={report} />
+      {research ? (
+        <section className="market-scope-note">
+          <strong>全市场动态策略 · 行情日 {research.market_date}</strong>
+          <span>由 {research.market_universe_count.toLocaleString()} 只沪深 A 股初筛至 {research.funnel_count} 只，当前 {research.depth_ready_count} 只具备完整深度证据。</span>
+        </section>
+      ) : <StatusStrip report={report} />}
       <div className="tabs" role="tablist" aria-label="策略选择">
         {(Object.keys(strategyNames) as StrategyType[]).map((item) => (
           <button
@@ -346,49 +392,326 @@ function StrategyPools({
             key={item}
             onClick={() => setStrategy(item)}
           >
-            {strategyNames[item]} <span className="mono">{candidateCount(report, item)}</span>
-            {report.pool_readiness?.[item] && (
-              <span className={`tab-status ${report.pool_readiness[item]?.status.toLowerCase()}`}>
-                {report.pool_readiness[item]?.status}
+            {strategyNames[item]} <span className="mono">{research?.candidate_pools[item]?.length ?? candidateCount(report, item)}</span>
+            {(research?.pools[item] ?? report.pool_readiness?.[item]) && (
+              <span className={`tab-status ${(research?.pools[item]?.status ?? report.pool_readiness?.[item]?.status)?.toLowerCase()}`}>
+                {research?.pools[item]?.status ?? report.pool_readiness?.[item]?.status}
               </span>
             )}
           </button>
         ))}
       </div>
-      <CandidateTable
-        candidates={report.candidate_pools[strategy] ?? []}
-        onSelect={(candidate) => openSecurity(candidate, strategy)}
-        readiness={report.pool_readiness?.[strategy]}
-      />
+      {dynamicPool?.status === "BLOCKED" ? (
+        <section className="blocked-panel">
+          <p className="eyebrow">全市场动态策略池 BLOCKED</p>
+          <h2>当前没有具备完整评分字段的标的</h2>
+          <p>{dynamicPool.blocking_codes.join("；")}</p>
+        </section>
+      ) : (
+        <CandidateTable
+          candidates={candidates}
+          onSelect={(candidate) => openSecurity(candidate, strategy)}
+          readiness={research ? undefined : report.pool_readiness?.[strategy]}
+          showDividendYield={strategy === "STABLE_DIVIDEND"}
+        />
+      )}
+    </>
+  );
+}
+
+const boardNames: Record<string, string> = {
+  MAIN_SH: "沪市主板",
+  MAIN_SZ: "深市主板",
+  CHINEXT: "创业板",
+  STAR: "科创板",
+};
+
+function groupedOfficialDividendSources(urls: string[]): Array<{ url: string; label: string; count: number }> {
+  const groups = new Map<string, { url: string; label: string; count: number }>();
+  urls.forEach((url) => {
+    const hostname = new URL(url).hostname;
+    const exchange = hostname.includes("szse.cn") ? "深交所" : "上交所";
+    const existing = groups.get(exchange);
+    if (existing) existing.count += 1;
+    else groups.set(exchange, { url, label: `${exchange}官方分红来源`, count: 1 });
+  });
+  return [...groups.values()];
+}
+
+function FullMarket() {
+  const [payload, setPayload] = useState<FullMarketPayload | null>(null);
+  const [research, setResearch] = useState<FullMarketResearchPayload | null>(null);
+  const [marketError, setMarketError] = useState<string | null>(null);
+  const [researchError, setResearchError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [board, setBoard] = useState("");
+  const [dividendData, setDividendData] = useState("ALL");
+  const [minimumDividendYield, setMinimumDividendYield] = useState("0");
+  const [sortBy, setSortBy] = useState("DIVIDEND_YIELD");
+  const [descending, setDescending] = useState(true);
+  const [researchPage, setResearchPage] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMarketError(null);
+    loadFullMarket({
+      page, search, board, dividendData, minimumDividendYield, sortBy, descending,
+    }).then((result) => {
+      if (!cancelled) setPayload(result);
+    }).catch((reason: Error) => {
+      if (!cancelled) setMarketError(reason.message);
+    });
+    return () => { cancelled = true; };
+  }, [board, descending, dividendData, minimumDividendYield, page, search, sortBy]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResearchError(null);
+    loadFullMarketResearch().then((result) => {
+      if (!cancelled) setResearch(result);
+    }).catch((reason: Error) => {
+      if (!cancelled) setResearchError(reason.message);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  function resetPage() { setPage(1); }
+
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <p className="eyebrow">沪深 A 股 · 真实行情 · 官方已实施分红</p>
+          <h1>全市场行情与分红</h1>
+        </div>
+        <span className="market-date-badge">{payload ? `行情日 ${payload.market_date}` : "读取最新行情"}</span>
+      </header>
+      {marketError && (
+        <div className="empty-panel error-state">
+          <h2>全市场快照暂不可用</h2>
+          <p>{marketError}</p>
+        </div>
+      )}
+      {!payload && !marketError && <div className="empty-panel">正在读取全市场快照…</div>}
+      {payload && (
+        <>
+          <section className="market-scope-note">
+            <strong>独立初筛数据，不等于三策略研究已覆盖全市场</strong>
+            <span>
+              股息率 = {payload.summary.dividend_window_start} 至 {payload.summary.dividend_window_end}
+              已实施现金分红合计 ÷ {payload.market_date} 收盘价；缺少官方分红记录时显示数据不足。
+            </span>
+          </section>
+          {research && (
+            <section className="section-block funnel-section" aria-label="全市场研究漏斗">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">阶段 3–6 · 动态范围 · 证据不足时阻断</p>
+                  <h2>全市场研究漏斗</h2>
+                </div>
+                <span className="market-date-badge">快照 {research.snapshot_id}</span>
+              </div>
+              <div className="funnel-flow">
+                <div><span>沪深市场范围</span><strong>{research.market_universe_count.toLocaleString()}</strong></div>
+                <b aria-hidden="true">→</b>
+                <div><span>低成本过滤通过</span><strong>{research.low_cost_eligible_count.toLocaleString()}</strong></div>
+                <b aria-hidden="true">→</b>
+                <div><span>深度证据计划</span><strong>{research.funnel_count.toLocaleString()}</strong></div>
+                <b aria-hidden="true">→</b>
+                <div><span>可评分</span><strong>{research.depth_ready_count.toLocaleString()}</strong></div>
+              </div>
+              <div className="coverage-warning">
+                深度证据完成 {research.evidence_completed_count.toLocaleString()} / {research.evidence_item_count.toLocaleString()} 项；
+                初筛中股息率达到 3% 的股票 {research.high_dividend_funnel_count} 只。缺失证据不会按零值评分。
+              </div>
+              <div className="dynamic-pools">
+                {strategyOrder.map((strategy) => {
+                  const pool = research.pools[strategy];
+                  return (
+                    <div key={strategy}>
+                      <strong>{strategyNames[strategy]}</strong>
+                      <span className={`readiness-badge ${pool.status === "BLOCKED" ? "blocked" : ""}`}>
+                        {pool.status}
+                      </span>
+                      <span>{pool.complete_factor_count} / {pool.universe_size} 可评分</span>
+                      <small>{pool.blocking_codes.join("；") || `候选 ${pool.candidate_count} 只`}</small>
+                    </div>
+                  );
+                })}
+              </div>
+              <details className="funnel-detail">
+                <summary>查看前 20 只初筛股票及证据缺口</summary>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>股票</th><th>代码</th><th>入选路径</th><th>股息率</th><th>证据进度</th><th>主要缺口</th></tr></thead>
+                    <tbody>{research.funnel.slice((researchPage - 1) * 20, researchPage * 20).map((row) => (
+                      <tr key={row.ts_code}>
+                        <td>{row.name}</td><td className="mono">{row.ts_code}</td>
+                        <td>{row.entry_reasons.join("；")}</td>
+                        <td className="numeric mono">{row.dividend_yield === null ? "数据不足" : `${(Number(row.dividend_yield) * 100).toFixed(2)}%`}</td>
+                        <td className="numeric mono">{row.evidence.completed_item_count} / {row.evidence.required_item_count}</td>
+                        <td>{row.evidence.missing_items.slice(0, 3).join("；") || "已完成"}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+                <div className="source-pagination" aria-label="初筛股票分页">
+                  <button className="outline-button" disabled={researchPage === 1} onClick={() => setResearchPage((value) => Math.max(1, value - 1))}>上一页</button>
+                  <span>第 {researchPage} / {Math.max(1, Math.ceil(research.funnel.length / 20))} 页</span>
+                  <button className="outline-button" disabled={researchPage >= Math.ceil(research.funnel.length / 20)} onClick={() => setResearchPage((value) => Math.min(Math.ceil(research.funnel.length / 20), value + 1))}>下一页</button>
+                </div>
+              </details>
+            </section>
+          )}
+          {researchError && (
+            <div className="coverage-warning">研究漏斗快照不可用：{researchError}</div>
+          )}
+          <section className="kpi-row market-kpis" aria-label="全市场数据覆盖">
+            <div><span>证券主表</span><strong>{payload.summary.universe_count.toLocaleString()}</strong></div>
+            <div><span>当日行情</span><strong>{payload.summary.market_bar_count.toLocaleString()}</strong></div>
+            <div><span>行情采集失败</span><strong>{(payload.summary.market_collection_failed_count ?? 0).toLocaleString()}</strong></div>
+            <div><span>分红可计算</span><strong>{payload.summary.dividend_security_count.toLocaleString()}</strong></div>
+            <div><span>股息率 ≥ 5%</span><strong>{payload.summary.yield_at_least_5_percent_count} 只</strong></div>
+            <div><span>行业已分类</span><strong>{payload.summary.industry_security_count.toLocaleString()}</strong></div>
+          </section>
+          <section className="section-block">
+            <div className="market-toolbar">
+              <label>
+                <span>代码或名称</span>
+                <input
+                  type="search" aria-label="代码或名称" value={search}
+                  placeholder="输入股票代码或名称"
+                  onChange={(event) => { setSearch(event.target.value); resetPage(); }}
+                />
+              </label>
+              <label>
+                <span>板块</span>
+                <select aria-label="板块" value={board} onChange={(event) => { setBoard(event.target.value); resetPage(); }}>
+                  <option value="">全部板块</option>
+                  {Object.entries(boardNames).map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>分红数据</span>
+                <select aria-label="分红数据" value={dividendData} onChange={(event) => { setDividendData(event.target.value); resetPage(); }}>
+                  <option value="ALL">全部股票</option>
+                  <option value="AVAILABLE">仅分红可计算</option>
+                  <option value="MISSING">仅数据不足</option>
+                </select>
+              </label>
+              <label>
+                <span>最低股息率</span>
+                <select aria-label="最低股息率" value={minimumDividendYield} onChange={(event) => { setMinimumDividendYield(event.target.value); resetPage(); }}>
+                  <option value="0">不限</option>
+                  <option value="0.03">3%</option>
+                  <option value="0.05">5%</option>
+                  <option value="0.07">7%</option>
+                </select>
+              </label>
+              <label>
+                <span>排序</span>
+                <select
+                  aria-label="排序"
+                  value={`${sortBy}:${descending ? "DESC" : "ASC"}`}
+                  onChange={(event) => {
+                    const [field, direction] = event.target.value.split(":");
+                    setSortBy(field);
+                    setDescending(direction === "DESC");
+                    resetPage();
+                  }}
+                >
+                  <option value="DIVIDEND_YIELD:DESC">股息率从高到低</option>
+                  <option value="AMOUNT:DESC">成交额从高到低</option>
+                  <option value="TS_CODE:ASC">代码从小到大</option>
+                </select>
+              </label>
+            </div>
+            <div className="coverage-warning">
+              官方分红覆盖 {coveragePercent(payload.summary.dividend_coverage_ratio)} · 行业分类覆盖 {coveragePercent(payload.summary.industry_coverage_ratio)} · 当前筛选 {payload.total.toLocaleString()} 只
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr>
+                  <th>股票</th><th>代码</th><th>板块</th><th>一级行业</th><th>行情状态</th><th className="numeric">收盘价</th>
+                  <th className="numeric">近12月每股分红</th><th className="numeric">股息率</th>
+                  <th>分红事件</th><th>来源</th>
+                </tr></thead>
+                <tbody>
+                  {payload.items.map((row) => (
+                    <tr key={row.ts_code}>
+                      <td>{row.name}</td><td className="mono">{row.ts_code}</td>
+                      <td>{boardNames[row.board] ?? row.board}</td>
+                      <td>{row.industry_l1 ?? "数据不足"}</td>
+                      <td>{row.market_data_status === "OFFICIAL_NO_TRADING" ? "官方确认无交易" : row.market_data_status === "COLLECTION_FAILED" ? "采集失败" : "有效"}</td>
+                      <td className="numeric mono">{fixedNumber(row.close)}</td>
+                      <td className="numeric mono">{fixedNumber(row.trailing_12m_cash_dividend_per_share, 3)}</td>
+                      <td className="numeric mono">{row.dividend_yield === null ? "数据不足" : `${(Number(row.dividend_yield) * 100).toFixed(2)}%`}</td>
+                      <td>{row.dividend_event_count ? `${row.dividend_event_count} 次` : "无官方记录"}</td>
+                      <td>{row.dividend_source_urls.length ? groupedOfficialDividendSources(row.dividend_source_urls).map((source) => (
+                        <a href={source.url} target="_blank" rel="noreferrer" key={source.label} aria-label="官方分红来源">
+                          {source.label}{source.count > 1 ? `（${source.count}份）` : ""}
+                        </a>
+                      )) : "数据不足"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {!payload.items.length && <div className="empty-panel">没有符合当前条件的股票。</div>}
+            <div className="source-pagination" aria-label="全市场分页">
+              <button className="outline-button" disabled={page === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+              <span>第 {page} / {payload.page_count} 页</span>
+              <button className="outline-button" disabled={page >= payload.page_count} onClick={() => setPage((value) => Math.min(payload.page_count, value + 1))}>下一页</button>
+            </div>
+          </section>
+        </>
+      )}
     </>
   );
 }
 
 function SecurityResearch({
   report,
+  research,
   selected,
   onSelect,
 }: {
   report: ReportPayload;
+  research: FullMarketResearchPayload | null;
   selected: SecuritySelection | null;
   onSelect: (selection: SecuritySelection) => void;
 }) {
-  const securities = uniqueSecurities(report);
+  const pools = research?.candidate_pools ?? report.candidate_pools;
+  const securityMap = new Map<string, Candidate>();
+  strategyOrder.forEach((item) => {
+    (pools[item] ?? []).forEach((candidateItem) => {
+      if (!securityMap.has(candidateItem.ts_code)) {
+        securityMap.set(candidateItem.ts_code, candidateItem);
+      }
+    });
+  });
+  const securities = [...securityMap.values()];
+  const findCandidate = (code: string, item: StrategyType) =>
+    pools[item]?.find((candidateItem) => candidateItem.ts_code === code) ?? null;
+  const findStrategies = (code: string) =>
+    strategyOrder.filter((item) => findCandidate(code, item));
   const fallback = securities[0] ?? null;
   const tsCode = selected && securities.some((item) => item.ts_code === selected.tsCode)
     ? selected.tsCode
     : fallback?.ts_code ?? "";
-  const availableStrategies = candidateStrategies(report, tsCode);
+  const availableStrategies = findStrategies(tsCode);
   const strategy = selected && availableStrategies.includes(selected.strategy)
     ? selected.strategy
     : availableStrategies[0] ?? strategyOrder[0];
-  const candidate = strategyCandidate(report, tsCode, strategy);
+  const candidate = findCandidate(tsCode, strategy);
   const sources = new Map<string, ReportSource>(
-    (report.source_records ?? []).map((source) => [source.record_id, source]),
+    [...(report.source_records ?? []), ...(research?.source_records ?? [])]
+      .map((source) => [source.record_id, source]),
   );
 
   function selectSecurity(nextTsCode: string) {
-    const nextStrategies = candidateStrategies(report, nextTsCode);
+    const nextStrategies = findStrategies(nextTsCode);
     onSelect({
       tsCode: nextTsCode,
       strategy: nextStrategies.includes(strategy) ? strategy : nextStrategies[0] ?? strategy,
@@ -398,7 +721,10 @@ function SecurityResearch({
   return (
     <>
       <header className="page-header">
-        <div><p className="eyebrow">已发布报告内的结构化研究</p><h1>个股研究</h1></div>
+        <div>
+          <p className="eyebrow">{research ? `全市场动态快照 ${research.market_date}` : "已发布报告内的结构化研究"}</p>
+          <h1>个股研究</h1>
+        </div>
         {securities.length > 0 && (
           <label className="security-picker">
             <span>股票选择（{securities.length}只）</span>
@@ -416,7 +742,7 @@ function SecurityResearch({
         <>
           <div className="tabs research-tabs" role="tablist" aria-label="个股策略选择">
             {strategyOrder.map((item) => {
-              const strategyItem = strategyCandidate(report, tsCode, item);
+              const strategyItem = findCandidate(tsCode, item);
               return (
                 <button
                   role="tab"
@@ -437,7 +763,7 @@ function SecurityResearch({
           </div>
           <section className="research-summary" aria-label="当前策略评分">
             <strong>{strategyNames[strategy]}</strong>
-            <span>策略内排名 {candidate.rank_in_strategy} / {report.candidate_pools[strategy]?.length ?? 0}</span>
+            <span>策略内排名 {candidate.rank_in_strategy} / {pools[strategy]?.length ?? 0}</span>
             <span>策略得分 {fixedNumber(candidate.strategy_score)}</span>
             <span>状态 {candidate.candidate_status === "CANDIDATE" ? "候选" : "观察"}</span>
             <span>数据完整度 {fixedNumber(String(Number(candidate.data_completeness) * 100))}%</span>
@@ -723,7 +1049,13 @@ function aggregateReportSources(sources: ReportSource[]): AggregatedSource[] {
 
 const SOURCE_PAGE_SIZE = 12;
 
-function Quality({ report }: { report: ReportPayload }) {
+function Quality({
+  report,
+  research,
+}: {
+  report: ReportPayload;
+  research: FullMarketResearchPayload | null;
+}) {
   const [domainFilter, setDomainFilter] = useState("ALL");
   const [sourceSearch, setSourceSearch] = useState("");
   const [sourcePage, setSourcePage] = useState(1);
@@ -756,6 +1088,20 @@ function Quality({ report }: { report: ReportPayload }) {
       <header className="page-header">
         <div><p className="eyebrow">可追溯与可复现</p><h1>数据质量与来源</h1></div>
       </header>
+      {research && (
+        <section className="section-block">
+          <h2>全市场动态证据状态</h2>
+          <div className="domain-evidence-grid">
+            <span>深度漏斗 {research.funnel_count} 只</span>
+            <span>已满足 {research.evidence_completed_count.toLocaleString()} / {research.evidence_item_count.toLocaleString()} 项</span>
+            <span>待补齐 {(research.evidence_item_count - research.evidence_completed_count).toLocaleString()} 项</span>
+            <span>可评分 {research.depth_ready_count} 只</span>
+          </div>
+          <p className="quality-note">
+            这是 {research.market_date} 冻结快照的当前待办；官方来源的人工确认项请在“证据审核队列”处理。
+          </p>
+        </section>
+      )}
       <section className="section-block">
         <h2>数据域状态</h2>
         <div className="quality-list quality-domain-list">
@@ -780,7 +1126,7 @@ function Quality({ report }: { report: ReportPayload }) {
       </section>
       {report.pool_readiness && (
         <section className="section-block">
-          <h2>试点策略池完整度</h2>
+          <h2>历史试点报告（只读审计）</h2>
           <div className="quality-pools">
             {strategyOrder.map((strategy) => {
               const readiness = report.pool_readiness?.[strategy];
@@ -795,7 +1141,7 @@ function Quality({ report }: { report: ReportPayload }) {
           <p className="quality-note">
             XBRL 使用 {report.quality_summary?.xbrl_used_count ?? 0} 份 ·
             PDF 回退 {report.quality_summary?.pdf_used_count ?? 0} 份 ·
-            人工待办 {report.manual_todo_count ?? report.snapshot.manual_todo_count ?? 0} 项
+            历史人工待办 {report.manual_todo_count ?? report.snapshot.manual_todo_count ?? 0} 项（不计入当前全市场待办）
           </p>
           {fallbackCount > 0 && (
             <p className="quality-callout">
@@ -884,12 +1230,127 @@ function Quality({ report }: { report: ReportPayload }) {
   );
 }
 
+const riskFields: Array<[string, string]> = [
+  ["audit_opinion_standard", "标准审计意见"],
+  ["major_investigation_open", "重大调查未结"],
+  ["delisting_risk", "退市风险"],
+  ["is_suspended", "停牌"],
+  ["publication_order_known", "公告顺序明确"],
+];
+
+function EvidenceReviewQueue() {
+  const [payload, setPayload] = useState<Awaited<ReturnType<typeof loadEvidenceStatus>> | null>(null);
+  const [selected, setSelected] = useState<EvidenceTask | null>(null);
+  const [values, setValues] = useState<Record<string, boolean | string | null>>({});
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  function refresh() {
+    setError(null);
+    loadEvidenceStatus("AWAITING_REVIEW")
+      .then((result) => {
+        setPayload(result);
+        setSelected((current) => result.items.find((item) => item.task_id === current?.task_id) ?? result.items[0] ?? null);
+      })
+      .catch((reason: Error) => setError(reason.message));
+  }
+
+  useEffect(refresh, []);
+  useEffect(() => {
+    setValues(selected?.prefilled_values ?? {});
+    setNote("");
+  }, [selected]);
+
+  const complete = riskFields.every(([key]) => typeof values[key] === "boolean")
+    && Object.prototype.hasOwnProperty.call(values, "st_status");
+
+  function decide(decision: "CONFIRM" | "RETURN") {
+    if (!selected) return;
+    decideEvidenceReview(selected, decision, values, note)
+      .then(() => refresh())
+      .catch((reason: Error) => setError(reason.message));
+  }
+
+  return (
+    <>
+      <header className="page-header">
+        <div><p className="eyebrow">全市场动态证据</p><h1>证据审核队列</h1></div>
+        <span>{payload ? `待审核 ${payload.total} 项` : "读取中"}</span>
+      </header>
+      {payload && (
+        <section className="evidence-run-grid">
+          {payload.runs.map((run) => (
+            <article key={run.run_id}>
+              <strong>{cohortNames[run.cohort]}</strong>
+              <span>{run.member_codes.length} 只</span>
+              <span>{run.satisfied_count} / {run.task_count} 项满足</span>
+            </article>
+          ))}
+        </section>
+      )}
+      {error && <div className="empty-panel error-state">{error}</div>}
+      {!error && payload?.items.length === 0 && (
+        <div className="empty-panel">当前没有等待人工确认的证据。</div>
+      )}
+      {payload && payload.items.length > 0 && (
+        <div className="review-layout">
+          <section className="review-list">
+            {payload.items.map((task) => (
+              <button
+                className={selected?.task_id === task.task_id ? "active" : ""}
+                key={task.task_id}
+                onClick={() => setSelected(task)}
+              >
+                <strong>{task.security_name}</strong>
+                <span className="mono">{task.ts_code}</span>
+                <span>{task.evidence_kind}</span>
+              </button>
+            ))}
+          </section>
+          {selected && (
+            <section className="section-block review-detail">
+              <p className="eyebrow">{cohortNames[selected.cohort]} · 版本 {selected.version}</p>
+              <h2>{selected.security_name} <span className="mono">{selected.ts_code}</span></h2>
+              {selected.source_title && <p>{selected.source_title}</p>}
+              {selected.source_page && <p>PDF 第 {selected.source_page} 页</p>}
+              {selected.source_url ? <a href={selected.source_url} target="_blank" rel="noreferrer">打开官方原文</a> : <p>官方来源尚未附加</p>}
+              {selected.excerpt && <blockquote>{selected.excerpt}</blockquote>}
+              <div className="risk-review-fields">
+                {riskFields.map(([key, label]) => (
+                  <label key={key}>
+                    <span>{label}</span>
+                    <select
+                      value={typeof values[key] === "boolean" ? String(values[key]) : ""}
+                      onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value === "true" }))}
+                    >
+                      <option value="">待确认</option>
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </label>
+                ))}
+                <label><span>ST状态</span><input value={String(values.st_status ?? "")} onChange={(event) => setValues((current) => ({ ...current, st_status: event.target.value || null }))} /></label>
+                <label><span>审核备注</span><textarea value={note} onChange={(event) => setNote(event.target.value)} /></label>
+              </div>
+              <div className="review-actions">
+                <button className="outline-button" onClick={() => decide("RETURN")}>退回修正</button>
+                <button disabled={!complete} onClick={() => decide("CONFIRM")}>确认有效</button>
+              </div>
+            </section>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   const demoMode = new URLSearchParams(window.location.search).get("demo") === "1";
   const [report, setReport] = useState<ReportPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("每日研究总览");
   const [selected, setSelected] = useState<SecuritySelection | null>(null);
+  const [fullMarketResearch, setFullMarketResearch] = useState<FullMarketResearchPayload | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -912,12 +1373,22 @@ export default function App() {
     };
   }, [demoMode]);
 
+  useEffect(() => {
+    if (demoMode) return;
+    let cancelled = false;
+    loadFullMarketResearch()
+      .then((payload) => { if (!cancelled) setFullMarketResearch(payload); })
+      .catch(() => { if (!cancelled) setFullMarketResearch(null); });
+    return () => { cancelled = true; };
+  }, [demoMode]);
+
   const content = useMemo(() => {
     if (!report) return null;
     if (page === "策略候选池") {
       return (
         <StrategyPools
           report={report}
+          research={fullMarketResearch}
           openSecurity={(candidate, strategy) => {
             setSelected({ tsCode: candidate.ts_code, strategy });
             setPage("个股研究");
@@ -925,13 +1396,26 @@ export default function App() {
         />
       );
     }
-    if (page === "个股研究") {
-      return <SecurityResearch report={report} selected={selected} onSelect={setSelected} />;
+    if (page === "全市场行情与分红") {
+      return <FullMarket />;
     }
+    if (page === "个股研究") {
+      return (
+        <SecurityResearch
+          report={report}
+          research={fullMarketResearch}
+          selected={selected}
+          onSelect={setSelected}
+        />
+      );
+    }
+    if (page === "证据审核队列") return <EvidenceReviewQueue />;
     if (page === "官方事件流") return <Events report={report} />;
-    if (page === "数据质量与来源") return <Quality report={report} />;
+    if (page === "数据质量与来源") {
+      return <Quality report={report} research={fullMarketResearch} />;
+    }
     return <Overview report={report} goTo={setPage} />;
-  }, [page, report, selected]);
+  }, [fullMarketResearch, page, report, selected]);
 
   return (
     <div className="app-shell">
@@ -956,11 +1440,11 @@ export default function App() {
               <div className="stale-banner">上一版报告 · 本次更新未完成</div>
             )}
             <div className="utility-row">
-              <span>{report.snapshot.report_date}</span>
-              <span className="mono">{report.snapshot.report_id}</span>
-              <span>数据截至 {formatDateTime(report.snapshot.market_cutoff_at)}</span>
+              <span>{fullMarketResearch?.market_date ?? report.snapshot.report_date}</span>
+              <span className="mono">{fullMarketResearch?.snapshot_id ?? report.snapshot.report_id}</span>
+              <span>{fullMarketResearch ? "全市场动态主状态" : `数据截至 ${formatDateTime(report.snapshot.market_cutoff_at)}`}</span>
             </div>
-            {!demoMode && <PilotContextBanner report={report} />}
+            {!demoMode && !fullMarketResearch && <PilotContextBanner report={report} />}
           </>
         )}
         {!report && !error && <div className="empty-panel">正在读取已发布报告…</div>}

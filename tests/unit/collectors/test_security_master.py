@@ -64,6 +64,21 @@ def test_importer_excludes_wrong_currency_and_unknown_board(tmp_path: Path) -> N
     assert [record.ts_code for record in records] == ["699999.SH"]
 
 
+def test_importer_preserves_optional_official_industry_classification(tmp_path: Path) -> None:
+    path = tmp_path / "master-with-industry.csv"
+    path.write_text(
+        "ts_code,symbol,name,exchange,board,currency,list_date,security_type,industry_l1\n"
+        "600000.SH,600000,浦发银行,SSE,MAIN_SH,CNY,19991110,A_SHARE,金融业\n"
+        "600004.SH,600004,白云机场,SSE,MAIN_SH,CNY,20030428,A_SHARE,\n",
+        encoding="utf-8",
+    )
+
+    records = OfficialSecurityMasterCsvImporter().parse(path, source_id="sse")
+
+    assert records[0].industry_l1 == "金融业"
+    assert records[1].industry_l1 is None
+
+
 def test_importer_rejects_duplicate_codes_after_scope_filtering(tmp_path: Path) -> None:
     path = tmp_path / "duplicate-master.csv"
     path.write_text(

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -105,6 +106,16 @@ class MarketWarehouse:
         with duckdb.connect() as connection:
             row = connection.execute("SELECT COUNT(*) FROM read_parquet(?)", [files]).fetchone()
         return int(row[0])
+
+    def latest_trade_date(self) -> date | None:
+        dates = [
+            date.fromisoformat(match.group(1))
+            for path in self.dataset.glob("trade_date=*")
+            if path.is_dir()
+            and (match := re.fullmatch(r"trade_date=(\d{4}-\d{2}-\d{2})", path.name))
+            and list(path.glob("part-*.parquet"))
+        ]
+        return max(dates) if dates else None
 
     def read_bars(self, trade_date: date) -> list[dict[str, object]]:
         files = self._files(trade_date)

@@ -215,6 +215,138 @@ test("all pages stay pinned to one published report while strategy tabs remain i
   expect(screen.getByText("report-2026-07-29-v1")).toBeInTheDocument();
 });
 
+test("stable dividend pool shows each stock dividend yield as a percentage", async () => {
+  const stableDividendReport: ReportPayload = {
+    ...researchReport,
+    pool_readiness: {
+      ...researchReport.pool_readiness,
+      STABLE_DIVIDEND: {
+        ...researchReport.pool_readiness!.STABLE_DIVIDEND!,
+        status: "READY",
+        complete_factor_count: 24,
+        eligible_count: 24,
+        coverage_ratio: "0.8",
+        blocking_codes: [],
+      },
+    },
+  };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(stableDividendReport), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "策略候选池" }));
+  expect(screen.queryByRole("columnheader", { name: "股息率" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: /^稳定高股息/ }));
+
+  expect(screen.getByRole("columnheader", { name: "股息率" })).toBeInTheDocument();
+  expect(screen.getAllByText("1.87%")).toHaveLength(24);
+});
+
+test("full market page shows honest coverage denominators and filters yields above five percent", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.startsWith("/api/market/securities")) {
+      return new Response(JSON.stringify({
+        market_date: "2026-07-22",
+        universe_as_of: "2026-07-25T13:03:42Z",
+        universe_hash: "a".repeat(64),
+        page: 1,
+        page_size: 50,
+        page_count: 1,
+        total: 1,
+        summary: {
+          universe_count: 5201,
+          market_bar_count: 5198,
+          dividend_security_count: 1200,
+          dividend_coverage_ratio: "0.2307",
+          industry_security_count: 4690,
+          industry_coverage_ratio: "0.9017",
+          yield_at_least_5_percent_count: 88,
+          dividend_window_start: "2025-07-22",
+          dividend_window_end: "2026-07-22",
+        },
+        items: [{
+          ts_code: "000001.SZ", name: "平安银行", exchange: "SZSE", board: "MAIN_SZ",
+          industry_l1: "金融业",
+          trade_date: "2026-07-22", close: "5", amount: "100000",
+          trailing_12m_cash_dividend_per_share: "0.3", dividend_yield: "0.06",
+          dividend_event_count: 2,
+          dividend_source_urls: [
+            "https://docs.static.szse.cn/example.html",
+            "https://docs.static.szse.cn/example-2.html",
+          ],
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.startsWith("/api/market/research")) {
+      return new Response(JSON.stringify({
+        snapshot_id: "full-market-2026-07-22-test",
+        market_date: "2026-07-22",
+        market_universe_count: 5201,
+        low_cost_eligible_count: 4100,
+        funnel_count: 300,
+        high_dividend_funnel_count: 87,
+        depth_ready_count: 24,
+        evidence_item_count: 3600,
+        evidence_completed_count: 288,
+        funnel: [{
+          ts_code: "000001.SZ", name: "平安银行", board: "MAIN_SZ",
+          amount: "100000", dividend_yield: "0.06",
+          entry_reasons: ["股息率达到初筛门槛"],
+          evidence: {
+            periodic_report_count: 0, annual_dividend_count: 0,
+            risk_screen_available: false, corporate_action_screen_available: false,
+            required_item_count: 12, completed_item_count: 0,
+            missing_items: ["2023年年报", "2024年年报"], ready_for_scoring: false,
+          },
+        }],
+        pools: Object.fromEntries(["QUALITY_GROWTH", "DEEP_VALUE", "STABLE_DIVIDEND"].map(
+          (strategy) => [strategy, {
+            strategy_type: strategy, strategy_version: `${strategy}-full-market-v1`,
+            status: "READY", universe_size: 300, complete_factor_count: 24,
+            coverage_ratio: "0.08", required_coverage_ratio: "0",
+            minimum_complete_factor_count: 1,
+            blocking_codes: [], candidate_count: 0,
+          }],
+        )),
+        candidate_pools: { QUALITY_GROWTH: [], DEEP_VALUE: [], STABLE_DIVIDEND: [] },
+        source_records: [],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify(report), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  });
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "全市场行情与分红" }));
+  expect(await screen.findByRole("heading", { name: "全市场行情与分红" })).toBeInTheDocument();
+  expect(screen.getAllByText("5,201")).toHaveLength(2);
+  expect(screen.getByText("5,198")).toBeInTheDocument();
+  expect(screen.getByText("1,200")).toBeInTheDocument();
+  expect(screen.getByText("4,690")).toBeInTheDocument();
+  expect(screen.getAllByText("6.00%")).toHaveLength(2);
+  expect(screen.getByText("88 只")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "全市场研究漏斗" })).toBeInTheDocument();
+  expect(screen.getByText("288 / 3,600 项", { exact: false })).toBeInTheDocument();
+  expect(screen.getAllByText("候选 0 只")).toHaveLength(3);
+  expect(screen.getByRole("link", { name: "官方分红来源" })).toHaveAttribute(
+    "href", "https://docs.static.szse.cn/example.html",
+  );
+  expect(screen.getByText("深交所官方分红来源（2份）")).toBeInTheDocument();
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "最低股息率" }), "0.05");
+  await waitFor(() => expect(fetchSpy).toHaveBeenLastCalledWith(
+    expect.stringContaining("minimum_dividend_yield=0.05"), expect.anything(),
+  ));
+});
+
 test("historical pilot report shows its fixed boundary, cutoff, generation time, and pool readiness", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(JSON.stringify(report), {
@@ -285,7 +417,7 @@ test("production empty state never falls back to fictional prototype candidates"
   expect(screen.queryByText("远澜微材")).not.toBeInTheDocument();
 });
 
-test("five navigation destinations render from the loaded report without another latest fetch", async () => {
+test("five navigation destinations reuse one report and one latest research request", async () => {
   const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(JSON.stringify(report), {
       status: 200,
@@ -300,7 +432,7 @@ test("five navigation destinations render from the loaded report without another
     await user.click(screen.getByRole("button", { name: destination }));
     expect(screen.getByRole("heading", { name: destination })).toBeInTheDocument();
   }
-  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
 });
 
 test("individual research offers all 24 unique securities and changes the active company", async () => {
@@ -473,6 +605,89 @@ test("demo mode is explicit, watermarked, and does not call the production repor
     await screen.findByText("功能演示数据 · 虚构标的 · 非实时"),
   ).toBeInTheDocument();
   expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test("risk evidence review shows official page and submits an optimistic decision", async () => {
+  const task = {
+    task_id: "risk-task-1",
+    run_id: "evidence-run-1",
+    market_date: "2026-08-21",
+    cohort: "YIELD_GE_5",
+    ts_code: "000001.SZ",
+    security_name: "平安银行",
+    evidence_kind: "RISK_SCREEN",
+    evidence_period: "current",
+    status: "AWAITING_REVIEW",
+    version: 2,
+    source_url: "https://static.cninfo.com.cn/report.PDF",
+    source_title: "2025年年度报告",
+    source_page: 2,
+    excerpt: "出具标准无保留审计意见。",
+    prefilled_values: {
+      audit_opinion_standard: true,
+      major_investigation_open: null,
+      delisting_risk: false,
+      st_status: null,
+      is_suspended: null,
+      publication_order_known: true,
+    },
+    error_code: null,
+  } as const;
+  let reviewed = false;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/market/evidence-status")) {
+      return new Response(JSON.stringify({
+        market_date: "2026-08-21",
+        runs: [{
+          run_id: "evidence-run-1",
+          cohort: "YIELD_GE_5",
+          member_codes: ["000001.SZ"],
+          task_count: 540,
+          satisfied_count: 258,
+          completion_ratio: "0.4777",
+          status_counts: { AWAITING_REVIEW: 1 },
+        }],
+        page: 1,
+        page_count: 1,
+        total: reviewed ? 0 : 1,
+        items: reviewed ? [] : [task],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.includes("/api/market/evidence-reviews/") && init?.method === "POST") {
+      reviewed = true;
+      return new Response(JSON.stringify({ ...task, status: "SATISFIED", version: 3 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify(report), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "证据审核队列" }));
+  expect(await screen.findByText("PDF 第 2 页")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "打开官方原文" })).toHaveAttribute(
+    "href",
+    "https://static.cninfo.com.cn/report.PDF",
+  );
+  const investigation = screen.getByText("重大调查未结").closest("label")!;
+  const suspension = screen.getByText("停牌").closest("label")!;
+  await user.selectOptions(investigation.querySelector("select")!, "false");
+  await user.selectOptions(suspension.querySelector("select")!, "false");
+  await user.click(screen.getByRole("button", { name: "确认有效" }));
+
+  await waitFor(() => expect(reviewed).toBe(true));
+  const post = fetchSpy.mock.calls.find(([, init]) => init?.method === "POST");
+  expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({
+    expected_version: 2,
+    decision: "CONFIRM",
+    reviewed_values: { major_investigation_open: false, is_suspended: false },
+  });
 });
 
 test("demo mode demonstrates fictional names, official events, and source lineage", async () => {

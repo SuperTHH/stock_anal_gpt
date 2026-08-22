@@ -718,9 +718,10 @@ class PilotMetricCalculator:
         for record in visible_history:
             history_by_year.setdefault(record.fiscal_year, []).append(record)
 
+        latest_fiscal_year = report_cutoff_at.year - 1
         consecutive = 0
         continuity_ids: list[str] = []
-        year = 2025
+        year = latest_fiscal_year
         while True:
             annual_year_evidence = list(history_by_year.get(year, ()))
             annual_records = [
@@ -752,22 +753,22 @@ class PilotMetricCalculator:
 
         current_history = [
             record
-            for record in history_by_year.get(2025, ())
+            for record in history_by_year.get(latest_fiscal_year, ())
             if record.implementation_status is not ActionStatus.CANCELLED
         ]
         prior_history = [
             record
-            for record in history_by_year.get(2024, ())
+            for record in history_by_year.get(latest_fiscal_year - 1, ())
             if record.implementation_status is not ActionStatus.CANCELLED
         ]
         current = current_history or [
             action
-            for action in by_year.get(2025, ())
+            for action in by_year.get(latest_fiscal_year, ())
             if action.action_status is not ActionStatus.CANCELLED
         ]
         prior = prior_history or [
             action
-            for action in by_year.get(2024, ())
+            for action in by_year.get(latest_fiscal_year - 1, ())
             if action.action_status is not ActionStatus.CANCELLED
         ]
         current_ids = tuple(sorted(record.record_id for record in current))

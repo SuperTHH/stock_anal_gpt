@@ -87,6 +87,29 @@ def test_pdf_versions_are_immutable_and_visible_point_in_time(
     )
 
 
+def test_parser_revision_can_supersede_same_published_attachment(
+    tmp_path: Path,
+) -> None:
+    repo = repository(tmp_path)
+    published_at = datetime(2026, 3, 30, tzinfo=UTC)
+    original = document(
+        "pdf-parser-v1",
+        published_at=published_at,
+        valid_from=datetime(2026, 3, 31, tzinfo=UTC),
+    )
+    revised = document(
+        "pdf-parser-v2",
+        published_at=published_at,
+        valid_from=datetime(2026, 4, 2, tzinfo=UTC),
+        supersedes_id=original.filing_id,
+        value="110",
+    )
+
+    repo.save(PERIOD, original)
+
+    assert repo.save(PERIOD, revised) == revised
+
+
 @pytest.mark.parametrize("source_id", ["cninfo", "sse", "szse"])
 def test_repository_accepts_approved_official_pdf_sources(
     tmp_path: Path,

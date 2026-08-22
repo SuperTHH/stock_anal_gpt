@@ -781,6 +781,7 @@ def test_migrate_applies_state_migrations_idempotently(tmp_path: Path) -> None:
         "011_official_risk_screens",
             "012_annual_dividend_records",
             "013_official_events",
+            "014_full_market_evidence",
         }
     assert columns == {"source_id", "next_allowed_at", "updated_at"}
     assert lease_columns == {

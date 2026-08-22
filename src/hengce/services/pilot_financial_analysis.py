@@ -129,7 +129,19 @@ class PilotFinancialAnalyzer:
         known_at: datetime,
     ) -> ShareCapitalResult:
         periods = getattr(series, "periods", {})
-        for period in sorted(periods, reverse=True):
+        # Prefer the latest audited annual share baseline. Quarterly balance sheets
+        # can expose accounting share capital that is not the listed share count
+        # (notably after reverse mergers); subsequent corporate actions then adjust
+        # the audited baseline to the report cutoff.
+        ordered_periods = sorted(
+            periods,
+            key=lambda period: (
+                period.month == 12 and period.day == 31,
+                period,
+            ),
+            reverse=True,
+        )
+        for period in ordered_periods:
             snapshot = periods[period]
             fact = snapshot.facts.get("total_shares")
             if fact is None:
