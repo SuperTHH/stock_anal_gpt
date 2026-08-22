@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from datetime import date, datetime, time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -13,7 +15,9 @@ from pypdf import PdfReader
 
 from hengce.acquisition.downloader import validate_attachment_payload
 from hengce.collectors.cninfo_reports import CninfoPeriodicReportCollector, CninfoReport
+from hengce.contracts.dividend import AnnualDividendRecord
 from hengce.contracts.enums import (
+    ActionStatus,
     DiscoveryMethod,
     EvidenceCohort,
     EvidenceKind,
@@ -26,6 +30,7 @@ from hengce.contracts.financial import FilingDescriptor
 from hengce.financials.pdf_extractor import CninfoPdfExtractor
 from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
+from hengce.state.dividend_repository import AnnualDividendRepository
 from hengce.state.evidence_repository import FullMarketEvidenceRepository
 from hengce.state.pdf_financial_repository import PdfFinancialDocumentRepository
 
@@ -59,14 +64,38 @@ class FullMarketEvidenceAcquisitionService:
         )
         by_code: dict[str, list[FullMarketEvidenceTask]] = defaultdict(list)
         for task in tasks:
-            if task.evidence_kind is EvidenceKind.PERIODIC_REPORT:
+            if task.evidence_kind in {
+                EvidenceKind.PERIODIC_REPORT,
+                EvidenceKind.DIVIDEND_YEAR,
+            }:
                 by_code[task.ts_code].append(task)
         discovered = failed = 0
         for ts_code in sorted(by_code)[:max_securities]:
-            try:
-                reports = self.collector.reports(ts_code)
-            except (httpx.HTTPError, ValueError):
-                for task in by_code[ts_code]:
+            periodic_reports: tuple[CninfoReport, ...] | None = None
+            for task in by_code[ts_code]:
+                try:
+                    if task.evidence_kind is EvidenceKind.PERIODIC_REPORT:
+                        if periodic_reports is None:
+                            periodic_reports = self.collector.reports(ts_code)
+                        report = self._match(
+                            task.evidence_period,
+                            periodic_reports,
+                            task.market_date,
+                        )
+                    else:
+                        announcements = self.collector.dividend_announcements(
+                            ts_code,
+                            int(task.evidence_period),
+                        )
+                        report = next(
+                            (
+                                item
+                                for item in reversed(announcements)
+                                if item.published_at.date() <= task.market_date
+                            ),
+                            None,
+                        )
+                except (httpx.HTTPError, ValueError):
                     self.repository.transition(
                         task.task_id,
                         expected_version=task.version,
@@ -78,16 +107,20 @@ class FullMarketEvidenceAcquisitionService:
                         },
                     )
                     failed += 1
-                continue
-            for task in by_code[ts_code]:
-                report = self._match(task.evidence_period, reports, task.market_date)
+                    continue
                 if report is None:
                     self.repository.transition(
                         task.task_id,
                         expected_version=task.version,
                         status=EvidenceTaskStatus.BLOCKED,
                         observed_at=self.clock(),
-                        updates={"error_code": "OFFICIAL_PERIODIC_REPORT_NOT_FOUND"},
+                        updates={
+                            "error_code": (
+                                "OFFICIAL_PERIODIC_REPORT_NOT_FOUND"
+                                if task.evidence_kind is EvidenceKind.PERIODIC_REPORT
+                                else "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"
+                            )
+                        },
                     )
                     failed += 1
                     continue
@@ -100,9 +133,7 @@ class FullMarketEvidenceAcquisitionService:
                         "source_id": "cninfo",
                         "source_url": report.attachment_url,
                         "source_title": report.title,
-                        "source_record_ids": (
-                            f"cninfo-announcement:{report.announcement_id}",
-                        ),
+                        "source_record_ids": (f"cninfo-announcement:{report.announcement_id}",),
                         "published_at": report.published_at,
                         "error_code": None,
                     },
@@ -264,23 +295,35 @@ class FullMarketEvidenceAcquisitionService:
         )
         parsed = failed = 0
         documents = PdfFinancialDocumentRepository(self.repository.path)
+        dividends = AnnualDividendRepository(self.repository.path)
         extractor = CninfoPdfExtractor(parser_version="cninfo-pdf-full-market-v2")
         retryable_tasks = [
             task
             for task in tasks
-            if task.evidence_kind is EvidenceKind.PERIODIC_REPORT
+            if task.evidence_kind
+            in {
+                EvidenceKind.PERIODIC_REPORT,
+                EvidenceKind.DIVIDEND_YEAR,
+            }
             and (ts_code is None or task.ts_code == ts_code)
             and task.raw_object_hash is not None
             and (
                 task.status is EvidenceTaskStatus.DOWNLOADED
                 or (
                     include_blocked
-                    and (task.error_code or "").startswith("PDF_")
+                    and (
+                        (task.error_code or "").startswith("PDF_")
+                        or task.error_code == "OFFICIAL_DIVIDEND_TERMS_MISSING"
+                    )
                 )
             )
         ]
         for task in retryable_tasks[:max_tasks]:
-            if task.evidence_kind is not EvidenceKind.PERIODIC_REPORT:
+            if task.evidence_kind is EvidenceKind.DIVIDEND_YEAR:
+                if self._parse_dividend_task(task, dividends):
+                    parsed += 1
+                else:
+                    failed += 1
                 continue
             assert task.source_url is not None
             assert task.published_at is not None
@@ -347,9 +390,7 @@ class FullMarketEvidenceAcquisitionService:
                 filing_id=filing_id,
                 descriptor=descriptor,
                 extracted=extracted,
-                supersedes_id=(
-                    supersedes_id if supersedes_id != filing_id else None
-                ),
+                supersedes_id=(supersedes_id if supersedes_id != filing_id else None),
             )
             documents.save(period, document)
             intermediate = self.repository.transition(
@@ -370,6 +411,138 @@ class FullMarketEvidenceAcquisitionService:
             )
             parsed += 1
         return {"parsed": parsed, "failed": failed}
+
+    def _parse_dividend_task(
+        self,
+        task: FullMarketEvidenceTask,
+        repository: AnnualDividendRepository,
+    ) -> bool:
+        assert task.raw_object_hash is not None
+        assert task.source_url is not None
+        assert task.published_at is not None
+        assert task.collected_at is not None
+        pdf_path = self.raw_store.validate_content_hash(task.raw_object_hash)
+        try:
+            page_number, excerpt, per_share, ex_date = self._dividend_terms(pdf_path)
+        except (OSError, ValueError):
+            intermediate = self.repository.transition(
+                task.task_id,
+                expected_version=task.version,
+                status=EvidenceTaskStatus.PARSED,
+                observed_at=self.clock(),
+                updates={"error_code": None},
+            )
+            self.repository.transition(
+                task.task_id,
+                expected_version=intermediate.version,
+                status=EvidenceTaskStatus.BLOCKED,
+                observed_at=self.clock(),
+                updates={"error_code": "OFFICIAL_DIVIDEND_TERMS_MISSING"},
+            )
+            return False
+        identity = json.dumps(
+            {
+                "market_date": task.market_date.isoformat(),
+                "ts_code": task.ts_code,
+                "fiscal_year": int(task.evidence_period),
+                "raw_object_hash": task.raw_object_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        record_id = f"annual-dividend-{hashlib.sha256(identity).hexdigest()}"
+        effective_at = datetime.combine(
+            ex_date,
+            time.min,
+            tzinfo=task.published_at.tzinfo,
+        )
+        repository.save_version(
+            AnnualDividendRecord(
+                record_id=record_id,
+                source_id="cninfo",
+                source_url=task.source_url,
+                published_at=task.published_at,
+                effective_at=effective_at,
+                collected_at=task.collected_at,
+                version=f"cninfo-dividend-{task.raw_object_hash}",
+                content_hash=task.raw_object_hash,
+                license_policy="official-public-attachment-personal-research",
+                quality_status=QualityStatus.VALID,
+                supersedes_id=None,
+                valid_from=task.collected_at,
+                ts_code=task.ts_code,
+                fiscal_year=int(task.evidence_period),
+                has_cash_dividend=True,
+                cash_dividend_per_share=per_share,
+                cash_dividend_total=None,
+                implementation_status=ActionStatus.IMPLEMENTED,
+            )
+        )
+        intermediate = self.repository.transition(
+            task.task_id,
+            expected_version=task.version,
+            status=EvidenceTaskStatus.PARSED,
+            observed_at=self.clock(),
+            updates={
+                "source_page": page_number,
+                "excerpt": excerpt,
+                "prefilled_values": {
+                    "cash_dividend_per_share": str(per_share),
+                    "ex_date": ex_date.isoformat(),
+                },
+                "source_record_ids": tuple(dict.fromkeys((*task.source_record_ids, record_id))),
+                "error_code": None,
+            },
+        )
+        self.repository.transition(
+            task.task_id,
+            expected_version=intermediate.version,
+            status=EvidenceTaskStatus.SATISFIED,
+            observed_at=self.clock(),
+        )
+        return True
+
+    @staticmethod
+    def _dividend_terms(pdf_path: Path) -> tuple[int, str, Decimal, date]:
+        amount_pattern = re.compile(
+            r"每\s*(?P<shares>10|1)\s*股[^。；]{0,100}?"
+            r"(?:现金红利|现金股利|派现|现金)\s*(?:人民币)?"
+            r"(?P<amount>\d+(?:\.\d+)?)\s*元"
+        )
+        date_pattern = re.compile(
+            r"(?:除权除息日|除息日)\s*(?:为)?\s*[：:]?\s*"
+            r"(?P<year>20\d{2})[年/-](?P<month>\d{1,2})[月/-]"
+            r"(?P<day>\d{1,2})日?"
+        )
+        amount_match = None
+        amount_page = None
+        amount_excerpt = None
+        ex_date = None
+        for page_number, page in enumerate(PdfReader(pdf_path).pages, start=1):
+            text = re.sub(r"\s+", "", page.extract_text() or "")
+            if amount_match is None and (match := amount_pattern.search(text)) is not None:
+                amount_match = match
+                amount_page = page_number
+                amount_excerpt = match.group(0)[:160]
+            if ex_date is None and (match := date_pattern.search(text)) is not None:
+                ex_date = date(
+                    int(match.group("year")),
+                    int(match.group("month")),
+                    int(match.group("day")),
+                )
+        if amount_match is None or amount_page is None or amount_excerpt is None:
+            raise ValueError("DIVIDEND_AMOUNT_MISSING")
+        if ex_date is None:
+            raise ValueError("DIVIDEND_EX_DATE_MISSING")
+        try:
+            per_share = Decimal(amount_match.group("amount")) / Decimal(
+                amount_match.group("shares")
+            )
+        except InvalidOperation as error:
+            raise ValueError("DIVIDEND_AMOUNT_INVALID") from error
+        if per_share <= 0:
+            raise ValueError("DIVIDEND_AMOUNT_INVALID")
+        return amount_page, amount_excerpt, per_share, ex_date
 
     def retry_failed(self, run_id: str, *, max_tasks: int) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
@@ -455,11 +628,7 @@ class FullMarketEvidenceAcquisitionService:
                 continue
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             relevant = next(
-                (
-                    line
-                    for line in lines
-                    if "审计意见" in line or "保留意见" in line
-                ),
+                (line for line in lines if "审计意见" in line or "保留意见" in line),
                 lines[0] if lines else "",
             )
             excerpt = relevant[:500] or None
@@ -467,9 +636,7 @@ class FullMarketEvidenceAcquisitionService:
                 text.replace("无保留意见", "")
             ):
                 return page_number, excerpt, False
-            if "无保留意见" in text and not any(
-                marker in text for marker in modified_markers
-            ):
+            if "无保留意见" in text and not any(marker in text for marker in modified_markers):
                 return page_number, excerpt, True
             return page_number, excerpt, None
         return None, None, None

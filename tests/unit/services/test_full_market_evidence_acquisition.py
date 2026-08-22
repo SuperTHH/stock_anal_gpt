@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -49,6 +50,30 @@ def test_risk_prefill_uses_audited_pdf_page_without_inventing_other_risks(
     assert standard is True
     assert FullMarketEvidenceAcquisitionService._st_status("平安银行") is None
     assert FullMarketEvidenceAcquisitionService._st_status("*ST示例") == "*ST"
+
+
+def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
+    reader = _Reader()
+    reader.pages = [
+        _Page(
+            "2021年年度权益分派实施公告\n"
+            "向全体股东每10股派发现金红利人民币2.28元（含税）。\n"
+            "除权除息日：2022年7月22日"
+        )
+    ]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    page, excerpt, per_share, ex_date = (
+        FullMarketEvidenceAcquisitionService._dividend_terms(Path("ignored.pdf"))
+    )
+
+    assert page == 1
+    assert "每10股" in excerpt
+    assert per_share == Decimal("0.228")
+    assert ex_date == date(2022, 7, 22)
 
 
 def test_report_match_prefers_latest_correction_before_frozen_cutoff() -> None:

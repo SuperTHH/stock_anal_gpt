@@ -73,3 +73,52 @@ def test_cninfo_discovery_excludes_summary_and_keeps_original_and_correction(
     assert reports[-1].attachment_url.endswith("corrected.PDF")
     assert [call[2] for call in guard.calls] == ["filing", "filing"]
     assert len(tuple((tmp_path / "raw" / "provenance").glob("*.json"))) == 2
+
+
+def test_cninfo_dividend_discovery_filters_year_implementation_and_b_share(
+    tmp_path: Path,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"stockList": [{"code": "000001", "orgId": "gssz0000001"}]},
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "announcements": [
+                    {
+                        "announcementTitle": "2021年年度权益分派实施公告",
+                        "announcementTime": 1_655_827_200_000,
+                        "adjunctUrl": "a-share.PDF",
+                        "announcementId": "10",
+                    },
+                    {
+                        "announcementTitle": "2021年年度B股权益分派实施公告",
+                        "announcementTime": 1_655_827_200_000,
+                        "adjunctUrl": "b-share.PDF",
+                        "announcementId": "11",
+                    },
+                    {
+                        "announcementTitle": "2020年年度权益分派实施公告",
+                        "announcementTime": 1_655_827_200_000,
+                        "adjunctUrl": "wrong-year.PDF",
+                        "announcementId": "12",
+                    },
+                ]
+            },
+        )
+
+    guard = _Guard()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        reports = CninfoPeriodicReportCollector(
+            client=client,
+            guard=guard,  # type: ignore[arg-type]
+            raw_store=RawObjectStore(tmp_path / "raw"),
+            clock=lambda: NOW,
+        ).dividend_announcements("000001.SZ", 2021)
+
+    assert [item.announcement_id for item in reports] == ["10"]
