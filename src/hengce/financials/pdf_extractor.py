@@ -22,10 +22,9 @@ _NOTE_REFERENCE = (
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+|[A-Za-z])[）)])+)"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
-_LABELED_CODE = re.compile(r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*([0-9]{6})")
 _LABELED_CODE_DETAIL = re.compile(
     r"(?:证券代码(?:（A/H）|\(A/H\))?|股票代码|公司代码)\s*[：:]?\s*"
-    r"([0-9]{6})(?:\.([A-Z]{2,4}))?"
+    r"((?:[0-9]\s*){6})(?:\.([A-Z]{2,4}))?"
 )
 _REPORT_PERIOD = re.compile(r"报告期\s*[：:]\s*(\d{4}-\d{2}-\d{2})")
 _WHITESPACE_FACT = re.compile(
@@ -370,10 +369,14 @@ class CninfoPdfExtractor:
             or labeled_codes
             or set(_SUFFIXED_CODE.findall(joined))
         )
+        identity_matches = codes == {descriptor.ts_code} or (
+            not codes
+            and _issuer_name_matches(visible_text[0], descriptor.issuer_name)
+        )
         periods = set(_REPORT_PERIOD.findall(joined))
         report_markers = _REPORT_TYPE_MARKERS[descriptor.report_type]
         if (
-            codes != {descriptor.ts_code}
+            not identity_matches
             or not _period_matches(joined, periods, descriptor)
             or not any(marker in joined for marker in report_markers)
         ):
@@ -393,6 +396,7 @@ class CninfoPdfExtractor:
         flattened_state: _FlattenedStatementState | None = None
         flattened_complete = False
         formal_statements_complete = False
+        formal_statements_started = False
         for page_number, text in pages:
             if not text:
                 continue
@@ -422,6 +426,7 @@ class CninfoPdfExtractor:
             )
             if embedded_statement is not None:
                 statement_title, statement_type = embedded_statement
+                formal_statements_started = True
                 pending_statement = None
                 pending_statement_lines = 0
                 pending_statement_unit = None
@@ -454,7 +459,7 @@ class CninfoPdfExtractor:
                         boundary
                     )
                     for boundary in _FORMAL_STATEMENT_END_BOUNDARIES
-                ):
+                ) and formal_statements_started:
                     formal_statements_complete = True
                     statement_title = None
                     statement_type = None
@@ -551,6 +556,7 @@ class CninfoPdfExtractor:
                         statement_type=pending_statement[1],
                     ):
                         statement_title, statement_type = pending_statement
+                        formal_statements_started = True
                         inline_unit_match = _UNIT.search(line)
                         bare_unit_match = _BARE_CNY_UNIT.search(line)
                         unit = pending_statement_unit or (
@@ -573,6 +579,7 @@ class CninfoPdfExtractor:
                         statement_type=pending_statement[1],
                     ):
                         statement_title, statement_type = pending_statement
+                        formal_statements_started = True
                         unit = pending_statement_unit
                         pending_statement = None
                         pending_statement_lines = 0
@@ -1487,6 +1494,7 @@ def _statement_table_header_matches(
     if descriptor.report_type is ReportType.Q1:
         return normalized in {
             "项目本期发生额上期发生额",
+            "项目本期发生额上年同期发生额",
             f"项目{year}年第一季度{year - 1}年第一季度",
         }
     return False
@@ -1623,9 +1631,10 @@ def _period_matches(
 
 def _a_share_labeled_codes(text: str, default_suffix: str) -> set[str]:
     codes: set[str] = set()
-    for symbol, explicit_suffix in _LABELED_CODE_DETAIL.findall(text):
+    for raw_symbol, explicit_suffix in _LABELED_CODE_DETAIL.findall(text):
         if explicit_suffix and explicit_suffix not in {"SH", "SZ"}:
             continue
+        symbol = re.sub(r"\s+", "", raw_symbol)
         codes.add(f"{symbol}.{explicit_suffix or default_suffix}")
     exchange_name = {
         "SH": "\u4e0a\u6d77\u8bc1\u5238\u4ea4\u6613\u6240",
@@ -1643,6 +1652,16 @@ def _a_share_labeled_codes(text: str, default_suffix: str) -> set[str]:
                     for symbol in re.findall(r"(?<!\d)\d{6}(?!\d)", normalized_line)
                 )
     return codes
+
+
+def _issuer_name_matches(cover_text: str, issuer_name: str | None) -> bool:
+    if issuer_name is None:
+        return False
+    normalized_name = re.sub(r"\s+", "", issuer_name)
+    if len(normalized_name) < 4:
+        return False
+    normalized_cover = re.sub(r"\s+", "", cover_text)
+    return normalized_name in normalized_cover
 
 
 def _is_secondary_share_class_code(ts_code: str) -> bool:

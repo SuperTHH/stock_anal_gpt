@@ -345,6 +345,7 @@ class FullMarketEvidenceAcquisitionService:
                 taxonomy_refs=(),
                 discovery_method=DiscoveryMethod.PUBLIC_PAGE,
                 instance_entrypoint=None,
+                issuer_name=task.security_name,
             )
             extracted = extractor.extract(
                 pdf_path=self.raw_store.validate_content_hash(task.raw_object_hash),

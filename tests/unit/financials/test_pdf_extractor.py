@@ -1743,6 +1743,22 @@ def test_repeated_statement_title_preserves_active_table_context(
     assert result.facts["total_assets"] == Decimal("20000000")
 
 
+def test_table_of_contents_end_heading_does_not_disable_later_statements(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += "\n目录\n合并所有者权益变动表"
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
 def test_parenthesized_negative_allows_inner_pdf_spacing(
     tmp_path: Path,
 ) -> None:
@@ -1867,7 +1883,7 @@ def test_unsupported_or_ambiguous_pdf_never_becomes_valid(
     assert expected_issue in result.issues
 
 
-def test_q1_title_and_generic_balance_header_identify_implicit_period(
+def test_q1_title_and_generic_statement_headers_identify_implicit_period(
     tmp_path: Path,
 ) -> None:
     """Some official Q1 statements omit the date but retain structural headers."""
@@ -1891,7 +1907,10 @@ def test_q1_title_and_generic_balance_header_identify_implicit_period(
             [
                 lines[0],
                 "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143",
-                "\u9879\u76ee \u672c\u671f\u53d1\u751f\u989d \u4e0a\u671f\u53d1\u751f\u989d",
+                (
+                    "\u9879\u76ee \u672c\u671f\u53d1\u751f\u989d "
+                    "\u4e0a\u5e74\u540c\u671f\u53d1\u751f\u989d"
+                ),
                 *lines[3:],
             ]
         )
@@ -2215,6 +2234,46 @@ def test_financial_statement_unit_accepts_amount_unit_wording(
 
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["total_assets"] == Decimal("20000000")
+
+
+def test_labeled_a_share_code_accepts_pdf_inserted_digit_spacing(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "699998.SH",
+        "证券代码： 6 9 9 9 9 8",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+
+
+def test_code_free_cover_requires_matching_expected_issuer_name(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace("699998.SH", "")
+
+    without_name = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+    with_name = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash).model_copy(
+            update={"issuer_name": "虚构公司"}
+        ),
+    )
+
+    assert "PDF_LAYOUT_UNSUPPORTED" in without_name.issues
+    assert with_name.quality_status is QualityStatus.VALID, with_name.issues
 
 
 def test_content_hash_mismatch_is_rejected_before_text_extraction(

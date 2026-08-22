@@ -51,6 +51,7 @@ class FilingDescriptor(BaseModel):
     taxonomy_refs: tuple[str, ...]
     discovery_method: DiscoveryMethod
     instance_entrypoint: str | None
+    issuer_name: str | None = Field(default=None, min_length=1)
 
     @field_validator("published_at", "collected_at")
     @classmethod
