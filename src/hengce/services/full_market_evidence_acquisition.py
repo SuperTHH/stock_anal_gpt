@@ -423,7 +423,11 @@ class FullMarketEvidenceAcquisitionService:
         assert task.collected_at is not None
         pdf_path = self.raw_store.validate_content_hash(task.raw_object_hash)
         try:
-            page_number, excerpt, per_share, ex_date = self._dividend_terms(pdf_path)
+            page_number, excerpt, per_share, ex_date = self._dividend_terms(
+                pdf_path,
+                fiscal_year=int(task.evidence_period),
+                allow_positive="实施" in (task.source_title or ""),
+            )
         except (OSError, ValueError):
             intermediate = self.repository.transition(
                 task.task_id,
@@ -451,10 +455,10 @@ class FullMarketEvidenceAcquisitionService:
             separators=(",", ":"),
         ).encode()
         record_id = f"annual-dividend-{hashlib.sha256(identity).hexdigest()}"
-        effective_at = datetime.combine(
-            ex_date,
-            time.min,
-            tzinfo=task.published_at.tzinfo,
+        effective_at = (
+            datetime.combine(ex_date, time.min, tzinfo=task.published_at.tzinfo)
+            if ex_date is not None
+            else task.published_at
         )
         repository.save_version(
             AnnualDividendRecord(
@@ -472,7 +476,7 @@ class FullMarketEvidenceAcquisitionService:
                 valid_from=task.collected_at,
                 ts_code=task.ts_code,
                 fiscal_year=int(task.evidence_period),
-                has_cash_dividend=True,
+                has_cash_dividend=per_share is not None,
                 cash_dividend_per_share=per_share,
                 cash_dividend_total=None,
                 implementation_status=ActionStatus.IMPLEMENTED,
@@ -487,8 +491,11 @@ class FullMarketEvidenceAcquisitionService:
                 "source_page": page_number,
                 "excerpt": excerpt,
                 "prefilled_values": {
-                    "cash_dividend_per_share": str(per_share),
-                    "ex_date": ex_date.isoformat(),
+                    "has_cash_dividend": per_share is not None,
+                    "cash_dividend_per_share": (
+                        str(per_share) if per_share is not None else None
+                    ),
+                    "ex_date": ex_date.isoformat() if ex_date is not None else None,
                 },
                 "source_record_ids": tuple(dict.fromkeys((*task.source_record_ids, record_id))),
                 "error_code": None,
@@ -503,7 +510,12 @@ class FullMarketEvidenceAcquisitionService:
         return True
 
     @staticmethod
-    def _dividend_terms(pdf_path: Path) -> tuple[int, str, Decimal, date]:
+    def _dividend_terms(
+        pdf_path: Path,
+        *,
+        fiscal_year: int | None = None,
+        allow_positive: bool = True,
+    ) -> tuple[int, str, Decimal | None, date | None]:
         amount_pattern = re.compile(
             r"每\s*(?P<shares>10|1)\s*股[^。；]{0,100}?"
             r"(?:现金红利|现金股利|派现|现金)\s*(?:人民币)?"
@@ -518,18 +530,42 @@ class FullMarketEvidenceAcquisitionService:
         amount_page = None
         amount_excerpt = None
         ex_date = None
+        no_dividend = None
         for page_number, page in enumerate(PdfReader(pdf_path).pages, start=1):
             text = re.sub(r"\s+", "", page.extract_text() or "")
-            if amount_match is None and (match := amount_pattern.search(text)) is not None:
+            year_pattern = (
+                rf"(?:本年度|{fiscal_year}年度|公司(?:计划|拟)(?:年度)?)"
+                if fiscal_year
+                else r"(?:本年度|20\d{2}年度|公司(?:计划|拟)(?:年度)?)"
+            )
+            if no_dividend is None and (
+                match := re.search(
+                    year_pattern
+                    + r"[^。；]{0,160}?(?:不派发现金红利|不进行现金分红)",
+                    text,
+                )
+            ) is not None:
+                no_dividend = (page_number, match.group(0)[:160])
+            if (
+                allow_positive
+                and amount_match is None
+                and (match := amount_pattern.search(text)) is not None
+            ):
                 amount_match = match
                 amount_page = page_number
                 amount_excerpt = match.group(0)[:160]
-            if ex_date is None and (match := date_pattern.search(text)) is not None:
+            if (
+                allow_positive
+                and ex_date is None
+                and (match := date_pattern.search(text)) is not None
+            ):
                 ex_date = date(
                     int(match.group("year")),
                     int(match.group("month")),
                     int(match.group("day")),
                 )
+        if amount_match is None and no_dividend is not None:
+            return no_dividend[0], no_dividend[1], None, None
         if amount_match is None or amount_page is None or amount_excerpt is None:
             raise ValueError("DIVIDEND_AMOUNT_MISSING")
         if ex_date is None:
@@ -548,8 +584,14 @@ class FullMarketEvidenceAcquisitionService:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
             run_id=run_id,
-            statuses=(EvidenceTaskStatus.RETRYABLE_FAILED,),
+            statuses=(EvidenceTaskStatus.RETRYABLE_FAILED, EvidenceTaskStatus.BLOCKED),
             page_size=10000,
+        )
+        tasks = tuple(
+            task
+            for task in tasks
+            if task.status is EvidenceTaskStatus.RETRYABLE_FAILED
+            or task.error_code == "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"
         )
         retried = 0
         for task in tasks[:max_tasks]:

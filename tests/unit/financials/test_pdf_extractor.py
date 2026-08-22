@@ -125,6 +125,129 @@ def test_bank_report_does_not_require_industrial_balance_fields(tmp_path: Path) 
     assert "interest_bearing_debt" not in result.facts
 
 
+def test_combined_company_statement_uses_first_consolidated_columns(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for page, old, new in (
+        (page_payload[1], "合并资产负债表", "合并及公司资产负债表"),
+        (page_payload[2], "合并利润表", "合并及公司利润表"),
+        (page_payload[3], "合并现金流量表", "合并及公司现金流量表"),
+    ):
+        page["text"] = page["text"].replace(old, new)
+        page["text"] = page["text"].replace(" | ", " ")
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+
+
+def test_split_blank_cash_exchange_row_is_explicit_zero(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "汇率变动对现金及现金等价物的影响 | 0",
+        "汇率变动对现金及现金等价物的\n影响",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_exchange_effect"] == 0
+
+
+def test_repeated_interest_expense_uses_primary_statement_row(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[2]["text"] += "\n利息费用 | (1)"
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["interest_expense"] == Decimal("-200000")
+
+
+def test_complex_letter_note_reference_precedes_cash_value(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "经营活动产生的现金流量净额 | 220",
+        "经营活动产生的现金流量净额 四(65)(h) 220 210",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_equity_statement_boundary_prevents_note_fact_conflicts(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.append(
+        {
+            "page_number": 5,
+            "text": "\n".join(
+                [
+                    "2025年度合并及公司股东权益变动表",
+                    "单位：人民币万元",
+                    "合并资产负债表",
+                    "2025年12月31日",
+                    "短期借款 | 999",
+                    "净利润 | 999",
+                ]
+            ),
+        }
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["net_profit"] == Decimal("1800000")
+
+
+def test_long_adjusted_profit_label_without_same_page_heading(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "主要会计数据和财务指标\n",
+        "",
+    )
+    page_payload[0]["text"] += (
+        "\n归属于上市公司股东的扣除非经常性损益的\n"
+        "净利润（万元） 90 80"
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "扣除非经常性损益后的净利润 | 170\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("900000")
+
+
 def test_extracts_consolidated_table_when_pdf_places_visual_title_last(
     tmp_path: Path,
 ) -> None:

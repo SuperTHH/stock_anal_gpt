@@ -76,6 +76,31 @@ def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
     assert ex_date == date(2022, 7, 22)
 
 
+def test_dividend_terms_accept_explicit_official_no_dividend(monkeypatch) -> None:
+    reader = _Reader()
+    reader.pages = [
+        _Page(
+            "关于2021年度利润分配预案的公告\n"
+            "综合考虑公司经营情况，公司计划不派发现金红利，不送红股。"
+        )
+    ]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    page, excerpt, per_share, ex_date = (
+        FullMarketEvidenceAcquisitionService._dividend_terms(
+            Path("ignored.pdf"), fiscal_year=2021
+        )
+    )
+
+    assert page == 1
+    assert "不派发现金红利" in excerpt
+    assert per_share is None
+    assert ex_date is None
+
+
 def test_report_match_prefers_latest_correction_before_frozen_cutoff() -> None:
     reports = (
         CninfoReport(

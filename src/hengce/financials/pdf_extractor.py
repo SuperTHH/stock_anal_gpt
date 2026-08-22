@@ -19,7 +19,7 @@ _NUMBER = re.compile(rf"^{_ACCOUNTING_NUMBER}$")
 _CHINESE_NUMERAL = r"[一二三四五六七八九十]+"
 _NOTE_REFERENCE = (
     rf"(?:{_CHINESE_NUMERAL}、\d+(?:[（(]\d+[）)])?[A-Za-z]?|"
-    rf"{_CHINESE_NUMERAL}(?:[（(]\d+[）)])+[A-Za-z]?)"
+    rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+|[A-Za-z])[）)])+)"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
 _LABELED_CODE = re.compile(r"(?:证券代码|股票代码|公司代码)\s*[：:]?\s*([0-9]{6})")
@@ -85,6 +85,14 @@ _STATEMENT_TITLES = {
     "股份变动情况表": StatementType.BALANCE_SHEET,
 }
 _CONSOLIDATED_STATEMENT_TITLES = frozenset({"合并资产负债表", "合并利润表", "合并现金流量表"})
+_COMBINED_STATEMENT_TITLES = {
+    "合并及公司资产负债表": StatementType.BALANCE_SHEET,
+    "合并及母公司资产负债表": StatementType.BALANCE_SHEET,
+    "合并及公司利润表": StatementType.INCOME_STATEMENT,
+    "合并及母公司利润表": StatementType.INCOME_STATEMENT,
+    "合并及公司现金流量表": StatementType.CASH_FLOW,
+    "合并及母公司现金流量表": StatementType.CASH_FLOW,
+}
 _EMBEDDED_CONSOLIDATED_TITLES = {
     "资产负债表": ("合并资产负债表", StatementType.BALANCE_SHEET),
     "利润表": ("合并利润表", StatementType.INCOME_STATEMENT),
@@ -109,6 +117,14 @@ _EXTRACTION_BOUNDARIES = (
     "主要会计数据、财务指标发生变动的情况、原因",
     "主要会计数据、财务指标发生变动的情况及原因",
 )
+_FORMAL_STATEMENT_END_BOUNDARIES = (
+    "合并及公司股东权益变动表",
+    "合并及母公司股东权益变动表",
+    "合并及公司所有者权益变动表",
+    "合并及母公司所有者权益变动表",
+    "合并股东权益变动表",
+    "合并所有者权益变动表",
+)
 _ALIASES = {
     "资产总计": "total_assets",
     "流动资产合计": "current_assets",
@@ -128,6 +144,7 @@ _ALIASES = {
     "\u6240\u6709\u8005\u6743\u76ca\uff08\u6216\u80a1\u4e1c\u6743": "equity",
     "营业收入": "revenue",
     "营业收入合计": "revenue",
+    "营业总收入": "revenue",
     "营业成本": "operating_cost",
     "营业支出": "operating_cost",
     "净利润": "net_profit",
@@ -148,6 +165,10 @@ _ALIASES = {
     "实收资本（或股本）": "total_shares",
     "股本": "total_shares",
     "投资活动产生的现金流量净额": "investing_cash_flow",
+    "投资活动产生/(使用)的现金流量净额": "investing_cash_flow",
+    "投资活动产生/（使用）的现金流量净额": "investing_cash_flow",
+    "投资活动产生（使用）的现金流量净额": "investing_cash_flow",
+    "投资活动产生(使用)的现金流量净额": "investing_cash_flow",
     "投资活动使用的现金流量净额": "investing_cash_flow",
     "投资活动（使用）/产生的现金流量净额": "investing_cash_flow",
     "投资活动(使用)/产生的现金流量净额": "investing_cash_flow",
@@ -371,6 +392,7 @@ class CninfoPdfExtractor:
         noncurrent_liability_section_markers: list[tuple[int, str]] = []
         flattened_state: _FlattenedStatementState | None = None
         flattened_complete = False
+        formal_statements_complete = False
         for page_number, text in pages:
             if not text:
                 continue
@@ -393,7 +415,11 @@ class CninfoPdfExtractor:
                 candidates.extend(
                     _flattened_summary_candidates(raw_lines, page_number=page_number)
                 )
-            embedded_statement = _embedded_consolidated_statement(raw_lines)
+            embedded_statement = (
+                None
+                if formal_statements_complete
+                else _embedded_consolidated_statement(raw_lines)
+            )
             if embedded_statement is not None:
                 statement_title, statement_type = embedded_statement
                 pending_statement = None
@@ -423,6 +449,24 @@ class CninfoPdfExtractor:
             for raw_line in raw_lines:
                 line = raw_line.strip()
                 normalized_heading = _normalized_heading(line)
+                if any(
+                    normalized_heading.removesuffix("（续）").removesuffix("(续)").endswith(
+                        boundary
+                    )
+                    for boundary in _FORMAL_STATEMENT_END_BOUNDARIES
+                ):
+                    formal_statements_complete = True
+                    statement_title = None
+                    statement_type = None
+                    pending_statement = None
+                    pending_statement_lines = 0
+                    pending_statement_unit = None
+                    unit = None
+                    pending_label = ""
+                    annual_summary_spillover = False
+                    continue
+                if formal_statements_complete:
+                    continue
                 if (
                     embedded_statement is not None
                     and normalized_heading in _EMBEDDED_CONSOLIDATED_TITLES
@@ -646,6 +690,30 @@ class CninfoPdfExtractor:
                         continue
                 if parsed_line is None:
                     combined = _normalize_label(f"{pending_label}{line}")
+                    combined_blank_cash = _blank_cash_flow_component(combined)
+                    if (
+                        pending_label
+                        and combined_blank_cash is not None
+                        and statement_type is StatementType.CASH_FLOW
+                        and unit is not None
+                        and not re.search(_ACCOUNTING_NUMBER, line)
+                    ):
+                        currency, multiplier = unit
+                        candidates.append(
+                            PdfFactCandidate(
+                                canonical_fact_name=combined_blank_cash,
+                                value=Decimal(0),
+                                unit_multiplier=multiplier,
+                                currency=currency,
+                                page_number=page_number,
+                                statement_type=statement_type,
+                                source_text_hash=hashlib.sha256(
+                                    combined.encode("utf-8")
+                                ).hexdigest(),
+                            )
+                        )
+                        pending_label = ""
+                        continue
                     pending_label = (
                         combined
                         if _could_be_alias_prefix(combined)
@@ -722,6 +790,13 @@ class CninfoPdfExtractor:
                 ]
                 if summary_candidates:
                     name_candidates = summary_candidates[:1]
+            if name in {"interest_expense", "net_profit"}:
+                earliest_page = min(candidate.page_number for candidate in name_candidates)
+                name_candidates = [
+                    candidate
+                    for candidate in name_candidates
+                    if candidate.page_number == earliest_page
+                ][:1]
             values = {candidate.value for candidate in name_candidates}
             if len(values) != 1:
                 issues.add("PDF_FACT_CONFLICT")
@@ -1092,8 +1167,7 @@ def _flattened_summary_candidates(
     if not raw_lines:
         return []
     text = re.sub(r"\s+", " ", " ".join(raw_lines)).strip()
-    if "主要会计数据" not in text and "主要财务数据" not in text:
-        return []
+    has_summary_heading = "主要会计数据" in text or "主要财务数据" in text
     aliases = (
         "归属于上市公司普通股股东的扣除非经常性损益的净利润",
         "归属于上市公司股东的扣除非经常性损益的净利润",
@@ -1102,6 +1176,11 @@ def _flattened_summary_candidates(
     )
     unit = _page_unit(raw_lines)
     for alias in aliases:
+        if not has_summary_heading and alias in {
+            "扣除非经常性损益后归属于本行股东的净利润",
+            "扣除非经常性损益后的净利润",
+        }:
+            continue
         match = _flattened_alias_match(text, alias, allow_inline_unit=True)
         if match is None:
             continue
@@ -1136,7 +1215,8 @@ def _flattened_alias_match(
     *,
     allow_inline_unit: bool = False,
 ) -> re.Match[str] | None:
-    prefix = rf"(?<![\u4e00-\u9fffA-Za-z]){re.escape(alias)}"
+    alias_pattern = r"\s*".join(re.escape(character) for character in alias)
+    prefix = rf"(?<![\u4e00-\u9fffA-Za-z]){alias_pattern}"
     qualifier = r"(?:[（(][^（）()]{0,80}[）)])?"
     unit = (
         r"(?:[（(](?:人民币)?(?:元|千元|万元|百万元|亿元)[）)])?"
@@ -1243,6 +1323,17 @@ def _embedded_consolidated_statement(
 ) -> tuple[str, StatementType] | None:
     """Recognize issuer PDFs whose visual heading is extracted after the table."""
     normalized_lines = [_normalized_heading(line) for line in raw_lines]
+    combined = next(
+        (
+            (title, statement_type)
+            for line in normalized_lines
+            for title, statement_type in _COMBINED_STATEMENT_TITLES.items()
+            if line in {title, f"{title}（续）", f"{title}(续)"}
+        ),
+        None,
+    )
+    if combined is not None:
+        return combined
     if not any("合并数" in line for line in normalized_lines):
         return None
     matches = {
