@@ -473,6 +473,7 @@ def run_full_market_evidence(
     run_id: Annotated[str, typer.Option()],
     stage: Annotated[str, typer.Option()] = "discover",
     max_items: Annotated[int, typer.Option(min=1, max=1000)] = 10,
+    ts_code: Annotated[str | None, typer.Option()] = None,
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
 ) -> None:
     """Resume one policy-limited evidence acquisition stage."""
@@ -482,12 +483,14 @@ def run_full_market_evidence(
         "discover",
         "download",
         "parse",
+        "reparse-blocked",
         "prefill-risk",
         "retry",
         "reconcile",
     }:
         raise typer.BadParameter(
-            "stage must be discover, download, parse, prefill-risk, retry, or reconcile"
+            "stage must be discover, download, parse, reparse-blocked, "
+            "prefill-risk, retry, or reconcile"
         )
     settings = Settings.model_construct(
         data_dir=data_dir,
@@ -531,8 +534,15 @@ def run_full_market_evidence(
                 data_dir=data_dir,
                 clock=clock,
             ).reconcile(run_id, max_tasks=max_items)
+        elif stage == "reparse-blocked":
+            result = service.parse(
+                run_id,
+                max_tasks=max_items,
+                include_blocked=True,
+                ts_code=ts_code,
+            )
         else:
-            result = service.parse(run_id, max_tasks=max_items)
+            result = service.parse(run_id, max_tasks=max_items, ts_code=ts_code)
     typer.echo(json.dumps({"run_id": run_id, "stage": stage, **result}, sort_keys=True))
 
 

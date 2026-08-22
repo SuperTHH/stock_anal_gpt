@@ -129,20 +129,33 @@ _ALIASES = {
     "营业收入": "revenue",
     "营业收入合计": "revenue",
     "营业成本": "operating_cost",
+    "营业支出": "operating_cost",
     "净利润": "net_profit",
     "扣除非经常性损益后的净利润": "adjusted_net_profit",
     "归属于上市公司股东的扣除非经常性损益的净利润": ("adjusted_net_profit"),
     "归属于上市公司普通股股东的扣除非经常性损益的净利润": ("adjusted_net_profit"),
     "利息费用": "interest_expense",
+    "利息支出": "interest_expense",
     "经营活动产生的现金流量净额": "operating_cash_flow",
+    "经营活动产生/(使用)的现金流量净额": "operating_cash_flow",
+    "经营活动产生/（使用）的现金流量净额": "operating_cash_flow",
+    "经营活动产生(使用)的现金流量净额": "operating_cash_flow",
+    "经营活动产生（使用）的现金流量净额": "operating_cash_flow",
     "购建固定资产、无形资产和其他长期资产支付的现金": ("capital_expenditure"),
+    "购建固定资产、无形资产及其他长期资产支付的现金": ("capital_expenditure"),
+    "购建固定资产、无形资产及其他长期资产所支付的现金": ("capital_expenditure"),
     "期末总股本": "total_shares",
     "实收资本（或股本）": "total_shares",
     "股本": "total_shares",
     "投资活动产生的现金流量净额": "investing_cash_flow",
     "投资活动使用的现金流量净额": "investing_cash_flow",
+    "投资活动（使用）/产生的现金流量净额": "investing_cash_flow",
+    "投资活动(使用)/产生的现金流量净额": "investing_cash_flow",
     "筹资活动产生的现金流量净额": "financing_cash_flow",
     "筹资活动使用的现金流量净额": "financing_cash_flow",
+    "筹资活动产生/(使用)的现金流量净额": "financing_cash_flow",
+    "筹资活动产生/（使用）的现金流量净额": "financing_cash_flow",
+    "筹资活动(使用)/产生的现金流量净额": "financing_cash_flow",
     "筹资活动（使用）/产生的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
@@ -152,6 +165,7 @@ _ALIASES = {
     "现金及现金等价物净(减少)/增加额": "net_cash_change",
     "现金及现金等价物净（减少）/增加额": "net_cash_change",
     "股份总数": "total_shares",
+    "扣除非经常性损益后归属于本行股东的净利润": "adjusted_net_profit",
 }
 _INTEREST_BEARING_DEBT_COMPONENTS = frozenset(
     {
@@ -171,6 +185,57 @@ _CASH_FLOW_RECONCILIATION = (
     "cash_exchange_effect",
     "net_cash_change",
 )
+_BANK_REQUIRED_FACTS = frozenset(
+    {
+        "revenue",
+        "net_profit",
+        "adjusted_net_profit",
+        "operating_cash_flow",
+        "capital_expenditure",
+        "total_assets",
+        "total_liabilities",
+        "equity",
+        "total_shares",
+    }
+)
+_FLATTENED_FACTS_BY_STATEMENT = {
+    StatementType.BALANCE_SHEET: frozenset(
+        {
+            "total_assets", "current_assets", "cash_and_equivalents",
+            "total_liabilities", "current_liabilities", "interest_bearing_debt",
+            "short_term_borrowings", "current_portion_noncurrent_liabilities",
+            "long_term_borrowings", "bonds_payable", "lease_liabilities",
+            "equity", "total_shares",
+        }
+    ),
+    StatementType.INCOME_STATEMENT: frozenset(
+        {
+            "revenue",
+            "operating_cost",
+            "net_profit",
+            "adjusted_net_profit",
+            "interest_expense",
+        }
+    ),
+    StatementType.CASH_FLOW: frozenset(
+        {
+            "operating_cash_flow", "investing_cash_flow", "financing_cash_flow",
+            "cash_exchange_effect", "net_cash_change", "capital_expenditure",
+        }
+    ),
+}
+_FLATTENED_BOUNDARIES = (
+    "母公司资产负债表", "母公司利润表", "母公司现金流量表",
+    "银行资产负债表", "银行利润表", "银行现金流量表",
+    "合并所有者权益变动表", "母公司所有者权益变动表",
+    "合并股东权益变动表", "财务报表附注",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _FlattenedStatementState:
+    statement_type: StatementType
+    unit: tuple[str, Decimal]
 
 
 class _PdfPage(Protocol):
@@ -304,10 +369,30 @@ class CninfoPdfExtractor:
         pending_label = ""
         annual_summary_spillover = False
         noncurrent_liability_section_markers: list[tuple[int, str]] = []
+        flattened_state: _FlattenedStatementState | None = None
+        flattened_complete = False
         for page_number, text in pages:
             if not text:
                 continue
             raw_lines = text.splitlines()
+            (
+                flattened_candidates,
+                flattened_state,
+                flattened_noncurrent_marker,
+                flattened_complete,
+            ) = _flattened_page_candidates(
+                raw_lines,
+                page_number=page_number,
+                active_state=flattened_state,
+                extraction_complete=flattened_complete,
+            )
+            candidates.extend(flattened_candidates)
+            if flattened_noncurrent_marker is not None:
+                noncurrent_liability_section_markers.append(flattened_noncurrent_marker)
+            if page_number <= 20:
+                candidates.extend(
+                    _flattened_summary_candidates(raw_lines, page_number=page_number)
+                )
             embedded_statement = _embedded_consolidated_statement(raw_lines)
             if embedded_statement is not None:
                 statement_title, statement_type = embedded_statement
@@ -625,15 +710,12 @@ class CninfoPdfExtractor:
         for candidate in candidates:
             grouped.setdefault(candidate.canonical_fact_name, []).append(candidate)
         for name, name_candidates in grouped.items():
-            if name == "total_shares":
-                highest_priority = max(
-                    candidate.source_priority for candidate in name_candidates
-                )
-                name_candidates = [
-                    candidate
-                    for candidate in name_candidates
-                    if candidate.source_priority == highest_priority
-                ]
+            highest_priority = max(candidate.source_priority for candidate in name_candidates)
+            name_candidates = [
+                candidate
+                for candidate in name_candidates
+                if candidate.source_priority == highest_priority
+            ]
             if name == "adjusted_net_profit" and descriptor.report_type is ReportType.ANNUAL:
                 summary_candidates = [
                     candidate for candidate in name_candidates if candidate.page_number <= 20
@@ -723,7 +805,10 @@ class CninfoPdfExtractor:
 
         if fact_names_without_supported_unit - facts.keys():
             issues.add("PDF_LAYOUT_UNSUPPORTED")
-        if not CANONICAL_PILOT_FACTS.issubset(facts):
+        required_facts = (
+            _BANK_REQUIRED_FACTS if _is_bank_report(joined) else CANONICAL_PILOT_FACTS
+        )
+        if not required_facts.issubset(facts):
             issues.add("PDF_REQUIRED_FACTS_MISSING")
         self._validate_balance(facts, issues)
         self._validate_cash_flow(facts, issues)
@@ -893,6 +978,189 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
         return None
 
 
+def _flattened_page_candidates(
+    raw_lines: list[str],
+    *,
+    page_number: int,
+    active_state: _FlattenedStatementState | None,
+    extraction_complete: bool,
+) -> tuple[
+    list[PdfFactCandidate],
+    _FlattenedStatementState | None,
+    tuple[int, str] | None,
+    bool,
+]:
+    """Parse PDFs whose extraction layer flattens an entire table into one line."""
+    if extraction_complete:
+        return [], None, None, True
+    if len(raw_lines) > 10 or not raw_lines or max(map(len, raw_lines)) < 80:
+        return [], active_state, None, False
+    text = re.sub(r"\s+", " ", " ".join(raw_lines)).strip()
+    events: list[tuple[int, int, StatementType | None]] = []
+    for title in _CONSOLIDATED_STATEMENT_TITLES:
+        start = text.find(title)
+        if start >= 0:
+            events.append((start, start + len(title), _STATEMENT_TITLES[title]))
+    for title in _FLATTENED_BOUNDARIES:
+        start = text.find(title)
+        if start >= 0:
+            events.append((start, start + len(title), None))
+    events.sort(key=lambda item: (item[0], item[2] is None))
+
+    candidates: list[PdfFactCandidate] = []
+    noncurrent_marker = None
+    state = active_state
+    cursor = 0
+    for start, end, next_type in events:
+        if state is not None and start > cursor:
+            segment = text[cursor:start]
+            candidates.extend(
+                _flattened_segment_candidates(segment, page_number=page_number, state=state)
+            )
+            if state.statement_type is StatementType.BALANCE_SHEET and "非流动负债" in segment:
+                noncurrent_marker = (
+                    page_number,
+                    hashlib.sha256(segment.encode("utf-8")).hexdigest(),
+                )
+        if next_type is None:
+            if state is not None and state.statement_type is StatementType.CASH_FLOW:
+                extraction_complete = True
+            state = None
+        else:
+            unit = _page_unit([text])
+            state = (
+                _FlattenedStatementState(next_type, unit)
+                if unit is not None and unit[0] == "CNY"
+                else None
+            )
+        cursor = end
+    if state is not None and cursor < len(text):
+        segment = text[cursor:]
+        candidates.extend(
+            _flattened_segment_candidates(segment, page_number=page_number, state=state)
+        )
+        if state.statement_type is StatementType.BALANCE_SHEET and "非流动负债" in segment:
+            noncurrent_marker = (
+                page_number,
+                hashlib.sha256(segment.encode("utf-8")).hexdigest(),
+            )
+    return candidates, state, noncurrent_marker, extraction_complete
+
+
+def _flattened_segment_candidates(
+    segment: str,
+    *,
+    page_number: int,
+    state: _FlattenedStatementState,
+) -> list[PdfFactCandidate]:
+    candidates: list[PdfFactCandidate] = []
+    allowed = _FLATTENED_FACTS_BY_STATEMENT[state.statement_type]
+    currency, multiplier = state.unit
+    for alias in sorted(_ALIASES, key=len, reverse=True):
+        canonical_name = _ALIASES[alias]
+        if canonical_name not in allowed:
+            continue
+        match = _flattened_alias_match(segment, alias)
+        if match is None:
+            continue
+        number = _accounting_decimal(match.group("value"))
+        if number is None:
+            continue
+        if canonical_name == "capital_expenditure":
+            number = abs(number)
+        candidate_currency = "SHARES" if canonical_name == "total_shares" else currency
+        candidates.append(
+            PdfFactCandidate(
+                canonical_fact_name=canonical_name,
+                value=number * multiplier,
+                unit_multiplier=multiplier,
+                currency=candidate_currency,
+                page_number=page_number,
+                statement_type=state.statement_type,
+                source_text_hash=hashlib.sha256(match.group(0).encode("utf-8")).hexdigest(),
+                source_priority=20,
+            )
+        )
+    return candidates
+
+
+def _flattened_summary_candidates(
+    raw_lines: list[str],
+    *,
+    page_number: int,
+) -> list[PdfFactCandidate]:
+    if not raw_lines:
+        return []
+    text = re.sub(r"\s+", " ", " ".join(raw_lines)).strip()
+    if "主要会计数据" not in text and "主要财务数据" not in text:
+        return []
+    aliases = (
+        "归属于上市公司普通股股东的扣除非经常性损益的净利润",
+        "归属于上市公司股东的扣除非经常性损益的净利润",
+        "扣除非经常性损益后归属于本行股东的净利润",
+        "扣除非经常性损益后的净利润",
+    )
+    unit = _page_unit(raw_lines)
+    for alias in aliases:
+        match = _flattened_alias_match(text, alias, allow_inline_unit=True)
+        if match is None:
+            continue
+        number = _accounting_decimal(match.group("value"))
+        if number is None:
+            continue
+        inline_unit = _INLINE_CNY_UNIT.search(match.group(0))
+        if inline_unit is not None:
+            currency, multiplier = _UNIT_DEFINITIONS[inline_unit.group(1)]
+        elif unit is not None and unit[0] == "CNY":
+            currency, multiplier = unit
+        else:
+            continue
+        return [
+            PdfFactCandidate(
+                canonical_fact_name="adjusted_net_profit",
+                value=number * multiplier,
+                unit_multiplier=multiplier,
+                currency=currency,
+                page_number=page_number,
+                statement_type=StatementType.INCOME_STATEMENT,
+                source_text_hash=hashlib.sha256(match.group(0).encode("utf-8")).hexdigest(),
+                source_priority=20,
+            )
+        ]
+    return []
+
+
+def _flattened_alias_match(
+    text: str,
+    alias: str,
+    *,
+    allow_inline_unit: bool = False,
+) -> re.Match[str] | None:
+    prefix = rf"(?<![\u4e00-\u9fffA-Za-z]){re.escape(alias)}"
+    qualifier = r"(?:[（(][^（）()]{0,80}[）)])?"
+    unit = (
+        r"(?:[（(](?:人民币)?(?:元|千元|万元|百万元|亿元)[）)])?"
+        if allow_inline_unit
+        else ""
+    )
+    separator = r"\s*(?:[|｜]\s*)?"
+    note = rf"(?:(?:{_NOTE_REFERENCE})\s+)?"
+    return re.search(
+        rf"{prefix}{qualifier}{unit}{separator}{note}(?P<value>{_ACCOUNTING_NUMBER})",
+        text,
+    )
+
+
+def _accounting_decimal(raw_value: str) -> Decimal | None:
+    normalized = re.sub(r"\s+", "", raw_value).replace(",", "")
+    if normalized.startswith("(") and normalized.endswith(")"):
+        normalized = f"-{normalized[1:-1]}"
+    try:
+        return Decimal(normalized)
+    except InvalidOperation:
+        return None
+
+
 def _balance_reconciles(facts: dict[str, Decimal]) -> bool:
     try:
         assets = facts["total_assets"]
@@ -900,6 +1168,12 @@ def _balance_reconciles(facts: dict[str, Decimal]) -> bool:
     except KeyError:
         return False
     return difference <= max(Decimal(1), abs(assets) * Decimal("0.000001"))
+
+
+def _is_bank_report(text: str) -> bool:
+    return "银行资产负债表" in text or (
+        "吸收存款" in text and "发放贷款和垫款" in text
+    )
 
 
 def _parse_truncated_cash_exchange(line: str) -> tuple[str, Decimal] | None:

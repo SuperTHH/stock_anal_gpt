@@ -83,6 +83,48 @@ def test_extracts_identity_units_negative_values_pages_and_lineage(
     assert result.parser_version == "cninfo-pdf-pilot-v1"
 
 
+def test_extracts_financial_tables_flattened_to_single_lines(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    for page in page_payload[1:4]:
+        page["text"] = " ".join(page["text"].splitlines())
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_bank_report_does_not_require_industrial_balance_fields(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] += "\n银行资产负债表"
+    for unsupported in (
+        "流动资产合计 | 1,200\n",
+        "货币资金 | 300\n",
+        "流动负债合计 | 500\n",
+        "有息负债 | 250\n",
+        "营业成本 | 600\n",
+        "利息费用 | (20)\n",
+    ):
+        for page in page_payload:
+            page["text"] = page["text"].replace(unsupported, "")
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert "current_assets" not in result.facts
+    assert "interest_bearing_debt" not in result.facts
+
+
 def test_extracts_consolidated_table_when_pdf_places_visual_title_last(
     tmp_path: Path,
 ) -> None:

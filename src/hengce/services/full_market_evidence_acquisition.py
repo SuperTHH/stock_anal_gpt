@@ -244,11 +244,22 @@ class FullMarketEvidenceAcquisitionService:
                 failed += 1
         return {"awaiting_review": awaiting, "failed": failed}
 
-    def parse(self, run_id: str, *, max_tasks: int) -> dict[str, int]:
+    def parse(
+        self,
+        run_id: str,
+        *,
+        max_tasks: int,
+        include_blocked: bool = False,
+        ts_code: str | None = None,
+    ) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
             run_id=run_id,
-            statuses=(EvidenceTaskStatus.DOWNLOADED, EvidenceTaskStatus.BLOCKED),
+            statuses=(
+                (EvidenceTaskStatus.DOWNLOADED, EvidenceTaskStatus.BLOCKED)
+                if include_blocked
+                else (EvidenceTaskStatus.DOWNLOADED,)
+            ),
             page_size=10000,
         )
         parsed = failed = 0
@@ -258,10 +269,14 @@ class FullMarketEvidenceAcquisitionService:
             task
             for task in tasks
             if task.evidence_kind is EvidenceKind.PERIODIC_REPORT
+            and (ts_code is None or task.ts_code == ts_code)
             and task.raw_object_hash is not None
             and (
                 task.status is EvidenceTaskStatus.DOWNLOADED
-                or (task.error_code or "").startswith("PDF_")
+                or (
+                    include_blocked
+                    and (task.error_code or "").startswith("PDF_")
+                )
             )
         ]
         for task in retryable_tasks[:max_tasks]:
