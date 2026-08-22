@@ -18,7 +18,7 @@ _ACCOUNTING_NUMBER = r"(?:[-+]?[\d,]+(?:\.\d+)?|\(\s*[\d,]+(?:\.\d+)?\s*\))"
 _NUMBER = re.compile(rf"^{_ACCOUNTING_NUMBER}$")
 _CHINESE_NUMERAL = r"[一二三四五六七八九十]+"
 _NOTE_REFERENCE = (
-    rf"(?:{_CHINESE_NUMERAL}、\d+(?:[（(]\d+[）)])?[A-Za-z]?|"
+    rf"(?:注释\d+|{_CHINESE_NUMERAL}、\d+(?:[（(]\d+[）)])?[A-Za-z]?|"
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+|[A-Za-z])[）)])+)"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
@@ -1433,14 +1433,40 @@ def _statement_table_header_matches(
     descriptor: FilingDescriptor,
     statement_type: StatementType,
 ) -> bool:
-    if statement_type is StatementType.BALANCE_SHEET:
-        return re.sub(r"\s+", "", line.strip()) == "项目期末余额期初余额"
     normalized = re.sub(r"\s+", "", line.strip())
+    if statement_type is StatementType.BALANCE_SHEET:
+        period = descriptor.report_period
+        current_date = rf"{period.year}年0?{period.month}月0?{period.day}日"
+        comparative_date = (
+            rf"(?:{period.year}年0?1月0?1日|"
+            rf"{period.year - 1}年0?12月0?31日)"
+        )
+        return (
+            re.fullmatch(
+                r"(?:项目|资产|负债和所有者权益)"
+                rf"(?:附注{_CHINESE_NUMERAL})?"
+                r"期末余额(?:期初余额|年初余额|上年年末余额)",
+                normalized,
+            )
+            is not None
+            or re.fullmatch(
+                rf"项目(?:附注{_CHINESE_NUMERAL})?"
+                rf"{current_date}{comparative_date}",
+                normalized,
+            )
+            is not None
+        )
     year = descriptor.report_period.year
     if descriptor.report_type is ReportType.ANNUAL:
         return (
             re.fullmatch(
-                rf"项目(?:附注)?{year}年度{year - 1}年度",
+                rf"项目(?:附注{_CHINESE_NUMERAL})?{year}年度{year - 1}年度",
+                normalized,
+            )
+            is not None
+            or re.fullmatch(
+                rf"项目(?:附注{_CHINESE_NUMERAL})?"
+                r"(?:本期金额|本期发生额)(?:上期金额|上期发生额)",
                 normalized,
             )
             is not None

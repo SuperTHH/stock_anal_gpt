@@ -248,6 +248,67 @@ def test_long_adjusted_profit_label_without_same_page_heading(tmp_path: Path) ->
     assert result.facts["adjusted_net_profit"] == Decimal("900000")
 
 
+def test_statement_headers_accept_named_current_and_prior_columns(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "2025 年 12 月 31 日\n单位：人民币万元",
+        (
+            "2025年12月31日 编制单位：虚构公司 单位：人民币万元\n"
+            "资产 附注五 期末余额 年初余额"
+        ),
+    )
+    for page_index in (2, 3):
+        page_payload[page_index]["text"] = page_payload[page_index]["text"].replace(
+            "2025 年 1—12 月\n单位：人民币万元",
+            (
+                "2025年度 编制单位：虚构公司 单位：人民币万元\n"
+                "项目 附注五 本期金额 上期金额"
+            ),
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+def test_statement_headers_accept_annotated_dated_columns(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "2025 年 12 月 31 日\n单位：人民币万元",
+        (
+            "2025年12月31日 编制单位：虚构公司 单位：人民币万元\n"
+            "项目 附注五 2025年12月31日 2025年1月1日"
+        ),
+    ).replace(
+        "货币资金 | 300",
+        "货币资金 注释1 300 250",
+    )
+    for page_index in (2, 3):
+        page_payload[page_index]["text"] = page_payload[page_index]["text"].replace(
+            "2025 年 1—12 月\n单位：人民币万元",
+            (
+                "2025年度 编制单位：虚构公司 单位：人民币万元\n"
+                "项目 附注五 2025年度 2024年度"
+            ),
+        )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+
+
 def test_extracts_consolidated_table_when_pdf_places_visual_title_last(
     tmp_path: Path,
 ) -> None:

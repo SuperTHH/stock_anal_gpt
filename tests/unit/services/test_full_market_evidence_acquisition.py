@@ -76,6 +76,28 @@ def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
     assert ex_date == date(2022, 7, 22)
 
 
+def test_dividend_terms_parse_amount_before_cash_word(monkeypatch) -> None:
+    reader = _Reader()
+    reader.pages = [
+        _Page(
+            "2021年年度权益分派实施公告\n"
+            "向全体股东每10股派3.30元人民币现金（含税）。\n"
+            "除权除息日为：2022年7月11日"
+        )
+    ]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    _, _, per_share, ex_date = (
+        FullMarketEvidenceAcquisitionService._dividend_terms(Path("ignored.pdf"))
+    )
+
+    assert per_share == Decimal("0.33")
+    assert ex_date == date(2022, 7, 11)
+
+
 def test_dividend_terms_accept_explicit_official_no_dividend(monkeypatch) -> None:
     reader = _Reader()
     reader.pages = [

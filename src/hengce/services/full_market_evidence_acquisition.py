@@ -517,9 +517,9 @@ class FullMarketEvidenceAcquisitionService:
         allow_positive: bool = True,
     ) -> tuple[int, str, Decimal | None, date | None]:
         amount_pattern = re.compile(
-            r"每\s*(?P<shares>10|1)\s*股[^。；]{0,100}?"
-            r"(?:现金红利|现金股利|派现|现金)\s*(?:人民币)?"
-            r"(?P<amount>\d+(?:\.\d+)?)\s*元"
+            r"每\s*(?P<shares>10|1)\s*股[^。；]{0,30}?"
+            r"(?:派发?|分配)[^。；\d]{0,30}?"
+            r"(?P<amount>\d+(?:\.\d+)?)\s*元(?:人民币)?(?:现金)?"
         )
         date_pattern = re.compile(
             r"(?:除权除息日|除息日)\s*(?:为)?\s*[：:]?\s*"
