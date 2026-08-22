@@ -147,12 +147,8 @@ class CninfoPeriodicReportCollector:
                 if not searchkey and any(
                     (
                         "利润分配预案" in str(item.get("announcementTitle") or "")
-                        or (
-                            str(item.get("announcementTitle") or "").startswith(
-                                f"{fiscal_year}年年度报告"
-                            )
-                            and "摘要"
-                            not in str(item.get("announcementTitle") or "")
+                        or str(item.get("announcementTitle") or "").startswith(
+                            f"{fiscal_year}年年度报告"
                         )
                     )
                     for item in page_announcements
@@ -203,7 +199,6 @@ class CninfoPeriodicReportCollector:
                         "利润分配预案" not in title
                         and not title.startswith(f"{fiscal_year}年年度报告")
                     )
-                    or "摘要" in title
                     or "取消" in title
                 ):
                     continue

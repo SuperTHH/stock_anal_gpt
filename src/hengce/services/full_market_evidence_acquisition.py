@@ -588,10 +588,20 @@ class FullMarketEvidenceAcquisitionService:
             page_size=10000,
         )
         tasks = tuple(
-            task
-            for task in tasks
-            if task.status is EvidenceTaskStatus.RETRYABLE_FAILED
-            or task.error_code == "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"
+            sorted(
+                (
+                    task
+                    for task in tasks
+                    if task.status is EvidenceTaskStatus.RETRYABLE_FAILED
+                    or task.error_code == "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"
+                ),
+                key=lambda task: (
+                    task.status is not EvidenceTaskStatus.RETRYABLE_FAILED,
+                    task.ts_code,
+                    task.evidence_kind.value,
+                    task.evidence_period,
+                ),
+            )
         )
         retried = 0
         for task in tasks[:max_tasks]:

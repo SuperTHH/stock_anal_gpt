@@ -769,6 +769,10 @@ class CninfoPdfExtractor:
                         source_text_hash=hashlib.sha256(
                             raw_line.strip().encode("utf-8")
                         ).hexdigest(),
+                        source_priority=_formal_fact_priority(
+                            canonical_name,
+                            fact_source_line,
+                        ),
                     )
                 )
                 if annual_summary_spillover and canonical_name == "adjusted_net_profit":
@@ -1308,6 +1312,15 @@ def _normalize_label(label: str) -> str:
     return normalized
 
 
+def _formal_fact_priority(canonical_name: str, source_line: str) -> int:
+    normalized = _normalize_label(source_line)
+    if canonical_name == "revenue" and normalized.startswith("营业总收入"):
+        return 5
+    if canonical_name == "interest_expense" and normalized.startswith("利息费用"):
+        return 5
+    return 0
+
+
 def _normalized_heading(line: str) -> str:
     normalized = re.sub(r"\s+", "", line.strip())
     normalized = re.sub(r"^§\d+", "", normalized)
@@ -1566,6 +1579,15 @@ def _blank_debt_component(line: str) -> str | None:
 def _blank_cash_flow_component(line: str) -> str | None:
     normalized = _normalize_label(line)
     canonical = _ALIASES.get(normalized)
+    if canonical is None:
+        current_blank_with_prior = re.fullmatch(
+            rf"(?P<label>.+?)\s{{2,}}{_ACCOUNTING_NUMBER}",
+            line.strip(),
+        )
+        if current_blank_with_prior is not None:
+            canonical = _ALIASES.get(
+                _normalize_label(current_blank_with_prior.group("label"))
+            )
     if canonical is None:
         current_dash_with_prior = re.fullmatch(
             rf"(?P<label>.+?)\s+[-\u2014]\s+{_ACCOUNTING_NUMBER}(?:\s+.*)?",

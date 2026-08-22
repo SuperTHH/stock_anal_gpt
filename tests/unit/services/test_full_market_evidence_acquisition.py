@@ -173,6 +173,19 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
         observed_at=datetime(2026, 8, 22, tzinfo=UTC),
         updates={"source_url": "https://static.cninfo.com.cn/report.PDF"},
     )
+    blocked_source = next(
+        item
+        for item in tasks
+        if item.task_id != task.task_id
+        and item.status is EvidenceTaskStatus.PLANNED
+    )
+    blocked = repository.transition(
+        blocked_source.task_id,
+        expected_version=blocked_source.version,
+        status=EvidenceTaskStatus.BLOCKED,
+        observed_at=datetime(2026, 8, 22, tzinfo=UTC),
+        updates={"error_code": "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"},
+    )
     with httpx.Client() as client:
         service = FullMarketEvidenceAcquisitionService(
             repository=repository,
@@ -189,3 +202,6 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
     resumed = repository.get_task(failed.task_id)
     assert resumed is not None
     assert resumed.status is EvidenceTaskStatus.DISCOVERED
+    still_blocked = repository.get_task(blocked.task_id)
+    assert still_blocked is not None
+    assert still_blocked.status is EvidenceTaskStatus.BLOCKED

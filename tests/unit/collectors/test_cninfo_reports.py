@@ -175,3 +175,46 @@ def test_cninfo_dividend_discovery_falls_back_to_profit_distribution_plan(
         ).dividend_announcements("000543.SZ", 2021)
 
     assert [item.announcement_id for item in reports] == ["20"]
+
+
+def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_dividend(
+    tmp_path: Path,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"stockList": [{"code": "000899", "orgId": "gssz0000899"}]},
+            )
+        form = parse_qs(request.content.decode(), keep_blank_values=True)
+        if form["searchkey"] != [""]:
+            return httpx.Response(200, request=request, json={"announcements": []})
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "announcements": [
+                    {
+                        "announcementTitle": "2021年年度报告摘要",
+                        "announcementTime": 1_650_816_000_000,
+                        "adjunctUrl": "annual-summary.PDF",
+                        "announcementId": "21",
+                    }
+                ],
+                "hasMore": True,
+                "totalpages": 3,
+            },
+        )
+
+    guard = _Guard()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        reports = CninfoPeriodicReportCollector(
+            client=client,
+            guard=guard,  # type: ignore[arg-type]
+            raw_store=RawObjectStore(tmp_path / "raw"),
+            clock=lambda: NOW,
+        ).dividend_announcements("000899.SZ", 2021)
+
+    assert [item.announcement_id for item in reports] == ["21"]
+    assert reports[0].title == "2021年年度报告摘要"

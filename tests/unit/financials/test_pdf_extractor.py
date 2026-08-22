@@ -163,6 +163,28 @@ def test_split_blank_cash_exchange_row_is_explicit_zero(tmp_path: Path) -> None:
     assert result.facts["cash_exchange_effect"] == 0
 
 
+def test_blank_current_cash_flow_with_only_comparative_value_is_zero(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "筹资活动产生的现金流量净额 | (20)",
+        "筹资活动产生的现金流量净额  (999)",
+    ).replace(
+        "现金及现金等价物净增加额 | 150",
+        "现金及现金等价物净增加额 | 170",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["financing_cash_flow"] == 0
+
+
 def test_repeated_interest_expense_uses_primary_statement_row(tmp_path: Path) -> None:
     path, content_hash = write_pdf(tmp_path)
     page_payload = pages()
@@ -174,6 +196,27 @@ def test_repeated_interest_expense_uses_primary_statement_row(tmp_path: Path) ->
     )
 
     assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["interest_expense"] == Decimal("-200000")
+
+
+def test_finance_interest_expense_and_total_revenue_take_priority(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "营业收入 | 1,000",
+        "营业总收入 | 1,100\n营业收入 | 1,000",
+    ).replace(
+        "利息费用 | (20)",
+        "利息支出 | 1\n利息费用 | (20)",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["revenue"] == Decimal("11000000")
     assert result.facts["interest_expense"] == Decimal("-200000")
 
 
