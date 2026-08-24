@@ -158,6 +158,7 @@ _ALIASES = {
     "经营活动产生(使用)的现金流量净额": "operating_cash_flow",
     "经营活动产生（使用）的现金流量净额": "operating_cash_flow",
     "购建固定资产、无形资产和其他长期资产支付的现金": ("capital_expenditure"),
+    "购建固定资产、无形资产和其他长期资产所支付的现金": ("capital_expenditure"),
     "购建固定资产、无形资产及其他长期资产支付的现金": ("capital_expenditure"),
     "购建固定资产、无形资产及其他长期资产所支付的现金": ("capital_expenditure"),
     "期末总股本": "total_shares",
@@ -178,6 +179,7 @@ _ALIASES = {
     "筹资活动(使用)/产生的现金流量净额": "financing_cash_flow",
     "筹资活动（使用）/产生的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
+    "汇率变动对现金流量净额": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
     "现金及现金等价物净减少额": "net_cash_change",
     "现金及现金等价物净增加/(减少)额": "net_cash_change",
@@ -487,7 +489,10 @@ class CninfoPdfExtractor:
                             hashlib.sha256(line.encode("utf-8")).hexdigest(),
                         )
                     )
-                if normalized_heading in _EXTRACTION_BOUNDARIES:
+                if (
+                    normalized_heading in _EXTRACTION_BOUNDARIES
+                    or _period_prefixed_parent_statement(normalized_heading)
+                ):
                     statement_title = None
                     statement_type = None
                     pending_statement = None
@@ -497,14 +502,7 @@ class CninfoPdfExtractor:
                     pending_label = ""
                     annual_summary_spillover = False
                     continue
-                title = next(
-                    (
-                        (candidate, kind)
-                        for candidate, kind in _STATEMENT_TITLES.items()
-                        if candidate == normalized_heading
-                    ),
-                    None,
-                )
+                title = _formal_statement_title(normalized_heading)
                 if title is not None:
                     if statement_title == title[0] and statement_type is title[1]:
                         pending_label = ""
@@ -517,7 +515,12 @@ class CninfoPdfExtractor:
                     if title[0] in _CONSOLIDATED_STATEMENT_TITLES:
                         pending_statement = title
                         pending_statement_lines = 4
-                        pending_statement_unit = None
+                        inline_unit_match = _UNIT.search(line)
+                        pending_statement_unit = (
+                            _UNIT_DEFINITIONS[inline_unit_match.group(1)]
+                            if inline_unit_match is not None
+                            else None
+                        )
                     else:
                         statement_title = title[0]
                         statement_type = title[1]
@@ -1290,10 +1293,19 @@ def _parse_truncated_capital_expenditure(
             return None
         label = match.group("label")
         raw_value = match.group("value")
+    normalized_label = _normalize_label(label)
+    cash_paid_label = (
+        "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6"
+        "\u957f\u671f\u8d44\u4ea7\u6240\u652f\u4ed8\u7684\u73b0\u91d1"
+    )
+    if normalized_label == cash_paid_label.removesuffix("\u73b0\u91d1"):
+        parsed = _parse_fact_line(f"{cash_paid_label} | {raw_value.strip()}")
+        if parsed is not None and parsed[0] == "capital_expenditure":
+            return parsed
     truncated_label = (
         "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6\u957f"
     )
-    if _normalize_label(label) != truncated_label:
+    if normalized_label != truncated_label:
         return None
     full_label = (
         "\u8d2d\u5efa\u56fa\u5b9a\u8d44\u4ea7\u3001\u65e0\u5f62\u8d44\u4ea7\u548c\u5176\u4ed6"
@@ -1335,6 +1347,37 @@ def _normalized_heading(line: str) -> str:
         r"^(?:[（(]?[一二三四五六七八九十0-9]+[）)、.．])",
         "",
         normalized,
+    )
+
+
+def _formal_statement_title(
+    normalized_heading: str,
+) -> tuple[str, StatementType] | None:
+    for title, statement_type in _STATEMENT_TITLES.items():
+        if _statement_heading_matches(normalized_heading, title):
+            return title, statement_type
+    return None
+
+
+def _period_prefixed_parent_statement(normalized_heading: str) -> bool:
+    return any(
+        _statement_heading_matches(normalized_heading, title)
+        for title in ("母公司资产负债表", "母公司利润表", "母公司现金流量表")
+    )
+
+
+def _statement_heading_matches(normalized_heading: str, title: str) -> bool:
+    index = normalized_heading.find(title)
+    if index < 0:
+        return False
+    prefix = normalized_heading[:index]
+    suffix = normalized_heading[index + len(title):]
+    period_prefix = re.compile(
+        r"^(?:\d{4}年度|\d{4}年\d{1,2}月\d{1,2}日|"
+        r"\d{4}年\d{1,2}(?:—|－|-)\d{1,2}月)?$"
+    )
+    return (not prefix or period_prefix.fullmatch(prefix) is not None) and (
+        not suffix or suffix.startswith(("（", "("))
     )
 
 
@@ -1454,6 +1497,8 @@ def _statement_table_header_matches(
     statement_type: StatementType,
 ) -> bool:
     normalized = re.sub(r"\s+", "", line.strip())
+    normalized = normalized.replace("年年度", "年度")
+    normalized = normalized.removesuffix("（调整后）").removesuffix("(调整后)")
     if statement_type is StatementType.BALANCE_SHEET:
         period = descriptor.report_period
         current_date = rf"{period.year}年0?{period.month}月0?{period.day}日"
@@ -1495,6 +1540,7 @@ def _statement_table_header_matches(
         return normalized in {
             "项目本期发生额上期发生额",
             "项目本期发生额上年同期发生额",
+            "项目本期金额上期金额",
             f"项目{year}年第一季度{year - 1}年第一季度",
         }
     return False

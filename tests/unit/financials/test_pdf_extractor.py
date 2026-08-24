@@ -1743,6 +1743,62 @@ def test_repeated_statement_title_preserves_active_table_context(
     assert result.facts["total_assets"] == Decimal("20000000")
 
 
+def test_period_prefixed_statement_title_carries_inline_unit(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    replacements = (
+        (
+            1,
+            "合并资产负债表\n2025 年 12 月 31 日\n单位：人民币万元\n",
+            (
+                "2025年12月31日合并资产负债表"
+                "（除特别注明外，金额单位均为人民币万元）\n"
+                "项目 2025年12月31日 2024年12月31日\n"
+            ),
+        ),
+        (
+            2,
+            "合并利润表\n2025 年 1—12 月\n单位：人民币万元\n",
+            (
+                "2025年度合并利润表"
+                "（除特别注明外，金额单位均为人民币万元）\n"
+                "项目 本期金额 上期金额\n"
+            ),
+        ),
+        (
+            3,
+            "合并现金流量表\n2025 年 1—12 月\n单位：人民币万元\n",
+            (
+                "2025年度合并现金流量表"
+                "（除特别注明外，金额单位均为人民币万元）\n"
+                "项目 本期金额 上期金额\n"
+            ),
+        ),
+    )
+    for index, original, replacement in replacements:
+        page_payload[index]["text"] = page_payload[index]["text"].replace(
+            original,
+            replacement,
+        )
+    page_payload[2]["text"] += (
+        "\n2025年度母公司利润表"
+        "（除特别注明外，金额单位均为人民币万元）\n"
+        "项目 本期金额 上期金额\n"
+        "营业收入 999 888\n"
+        "净利润 777 666"
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
 def test_table_of_contents_end_heading_does_not_disable_later_statements(
     tmp_path: Path,
 ) -> None:
@@ -1797,6 +1853,44 @@ def test_parenthesized_capital_expenditure_is_normalized_as_cash_paid_magnitude(
 
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
+def test_capital_expenditure_accepts_cash_paid_wording(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "购建固定资产、无形资产和其他长期资产支付的现金 | 50",
+        "购建固定资产、无形资产和其他长期资产所支付的现金 | 50",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
+def test_cash_exchange_effect_accepts_cash_flow_net_wording(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "汇率变动对现金及现金等价物的影响 | 0",
+        "汇率变动对现金流量净额 | 0",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_exchange_effect"] == Decimal(0)
 
 
 def test_chinese_parenthesized_note_references_and_wrapped_labels(
@@ -1883,8 +1977,17 @@ def test_unsupported_or_ambiguous_pdf_never_becomes_valid(
     assert expected_issue in result.issues
 
 
+@pytest.mark.parametrize(
+    "statement_header",
+    (
+        "项目 本期发生额 上年同期发生额",
+        "项目 本期发生额 上期发生额（调整后）",
+        "项目 本期金额 上期金额",
+    ),
+)
 def test_q1_title_and_generic_statement_headers_identify_implicit_period(
     tmp_path: Path,
+    statement_header: str,
 ) -> None:
     """Some official Q1 statements omit the date but retain structural headers."""
     path, content_hash = write_pdf(tmp_path)
@@ -1895,7 +1998,7 @@ def test_q1_title_and_generic_statement_headers_identify_implicit_period(
         "2025\u5e74\u7b2c\u4e00\u5b63\u5ea6\u62a5\u544a"
     )
     page_payload[1]["text"] = (
-        "\u5408\u5e76\u8d44\u4ea7\u8d1f\u503a\u8868\n"
+        "\u5408\u5e76\u8d44\u4ea7\u8d1f\u503a\u8868\uff08\u672a\u7ecf\u5ba1\u8ba1\uff09\n"
         "\u7f16\u5236\u5355\u4f4d\uff1a\u865a\u6784\u516c\u53f8\n"
         "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143\n"
         "\u9879\u76ee \u671f\u672b\u4f59\u989d \u671f\u521d\u4f59\u989d\n"
@@ -1905,12 +2008,9 @@ def test_q1_title_and_generic_statement_headers_identify_implicit_period(
         lines = page_payload[index]["text"].splitlines()
         page_payload[index]["text"] = "\n".join(
             [
-                lines[0],
+                f"{lines[0]}\uff08\u672a\u7ecf\u5ba1\u8ba1\uff09",
                 "\u5355\u4f4d\uff1a\u4eba\u6c11\u5e01\u4e07\u5143",
-                (
-                    "\u9879\u76ee \u672c\u671f\u53d1\u751f\u989d "
-                    "\u4e0a\u5e74\u540c\u671f\u53d1\u751f\u989d"
-                ),
+                statement_header,
                 *lines[3:],
             ]
         )
@@ -2212,6 +2312,25 @@ def test_truncated_capital_expenditure_label_with_value_is_supported(
 
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.issues == ()
+    assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
+def test_capital_expenditure_value_before_cross_page_cash_suffix_is_supported(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "购建固定资产、无形资产和其他长期资产支付的现金 | 50",
+        "购建固定资产、无形资产和其他长期资产所支付的 | 50\n现金",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["capital_expenditure"] == Decimal("500000")
 
 
