@@ -18,7 +18,9 @@ _ACCOUNTING_NUMBER = r"(?:[-+]?[\d,]+(?:\.\d+)?|\(\s*[\d,]+(?:\.\d+)?\s*\))"
 _NUMBER = re.compile(rf"^{_ACCOUNTING_NUMBER}$")
 _CHINESE_NUMERAL = r"[一二三四五六七八九十]+"
 _NOTE_REFERENCE = (
-    rf"(?:注释\d+|{_CHINESE_NUMERAL}、\d+(?:[（(]\d+[）)])?[A-Za-z]?|"
+    rf"(?:注释\s*\d+|{_CHINESE_NUMERAL}(?:、|[-－—])\d+"
+    rf"(?:[（(]\d+[）)])?[A-Za-z]?|"
+    rf"{_CHINESE_NUMERAL}[（(]{_CHINESE_NUMERAL}[）)]\d+|"
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+|[A-Za-z])[）)])+)"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")

@@ -136,34 +136,26 @@ def test_cninfo_dividend_discovery_falls_back_to_profit_distribution_plan(
                 json={"stockList": [{"code": "000543", "orgId": "gssz0000543"}]},
             )
         form = parse_qs(request.content.decode(), keep_blank_values=True)
-        if form["searchkey"] != [""]:
+        if form["searchkey"] == ["权益分派实施公告"]:
             return httpx.Response(200, request=request, json={"announcements": []})
-        if form["pageNum"] == ["1"]:
+        if form["searchkey"] == ["利润分配"]:
             return httpx.Response(
                 200,
                 request=request,
                 json={
-                    "announcements": [],
-                    "hasMore": True,
-                    "totalpages": 1,
+                    "announcements": [
+                        {
+                            "announcementTitle": "关于利润分配方案的公告",
+                            "announcementTime": 1_651_094_400_000,
+                            "adjunctUrl": "no-dividend.PDF",
+                            "announcementId": "20",
+                        }
+                    ],
+                    "hasMore": False,
+                    "totalpages": 0,
                 },
             )
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "announcements": [
-                    {
-                        "announcementTitle": "关于2021年度利润分配预案的公告",
-                        "announcementTime": 1_651_094_400_000,
-                        "adjunctUrl": "no-dividend.PDF",
-                        "announcementId": "20",
-                    }
-                ],
-                "hasMore": False,
-                "totalpages": 1,
-            },
-        )
+        raise AssertionError("annual fallback should not run when a plan is found")
 
     guard = _Guard()
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
@@ -177,7 +169,7 @@ def test_cninfo_dividend_discovery_falls_back_to_profit_distribution_plan(
     assert [item.announcement_id for item in reports] == ["20"]
 
 
-def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_dividend(
+def test_cninfo_dividend_discovery_prefers_full_a_share_report_for_no_dividend(
     tmp_path: Path,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -190,19 +182,48 @@ def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_divide
         form = parse_qs(request.content.decode(), keep_blank_values=True)
         if form["searchkey"] != [""]:
             return httpx.Response(200, request=request, json={"announcements": []})
+        if form["pageNum"] == ["1"]:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "announcements": [
+                        {
+                            "announcementTitle": "赣能股份2021年度报告摘要",
+                            "announcementTime": 1_650_816_000_000,
+                            "adjunctUrl": "annual-summary.PDF",
+                            "announcementId": "21",
+                        },
+                        {
+                            "announcementTitle": "赣能股份H股2021年度报告",
+                            "announcementTime": 1_650_816_000_000,
+                            "adjunctUrl": "annual-h-share.PDF",
+                            "announcementId": "22",
+                        },
+                    ],
+                    "hasMore": True,
+                    "totalpages": 3,
+                },
+            )
         return httpx.Response(
             200,
             request=request,
             json={
                 "announcements": [
                     {
-                        "announcementTitle": "赣能股份2021年度报告摘要",
+                        "announcementTitle": "赣能股份2021年度报告",
                         "announcementTime": 1_650_816_000_000,
-                        "adjunctUrl": "annual-summary.PDF",
-                        "announcementId": "21",
-                    }
+                        "adjunctUrl": "annual-full.PDF",
+                        "announcementId": "20",
+                    },
+                    {
+                        "announcementTitle": "赣能股份关于利润分配方案的公告",
+                        "announcementTime": 1_650_816_000_000,
+                        "adjunctUrl": "distribution-plan.PDF",
+                        "announcementId": "19",
+                    },
                 ],
-                "hasMore": True,
+                "hasMore": False,
                 "totalpages": 3,
             },
         )
@@ -216,5 +237,5 @@ def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_divide
             clock=lambda: NOW,
         ).dividend_announcements("000899.SZ", 2021)
 
-    assert [item.announcement_id for item in reports] == ["21"]
-    assert reports[0].title == "赣能股份2021年度报告摘要"
+    assert [item.announcement_id for item in reports] == ["20", "19"]
+    assert reports[-1].title == "赣能股份关于利润分配方案的公告"

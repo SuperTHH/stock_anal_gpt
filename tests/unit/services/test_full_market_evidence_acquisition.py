@@ -1,12 +1,13 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from hengce.collectors.cninfo_reports import CninfoReport
-from hengce.contracts.enums import EvidenceCohort, EvidenceTaskStatus
+from hengce.contracts.enums import EvidenceCohort, EvidenceKind, EvidenceTaskStatus
 from hengce.raw_store.store import RawObjectStore
 from hengce.services.full_market_evidence import FullMarketEvidencePlanner
 from hengce.services.full_market_evidence_acquisition import (
@@ -139,13 +140,20 @@ def test_dividend_terms_parse_amount_before_cash_word(monkeypatch) -> None:
     assert ex_date == date(2022, 7, 11)
 
 
-def test_dividend_terms_accept_explicit_official_no_dividend(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "official_terms",
+    (
+        "公司计划不派发现金红利，不送红股。",
+        "公司2021年度拟不进行利润分配。",
+        "公司2021年度拟不进行现金分配和送股。",
+    ),
+)
+def test_dividend_terms_accept_explicit_official_no_dividend(
+    monkeypatch, official_terms: str
+) -> None:
     reader = _Reader()
     reader.pages = [
-        _Page(
-            "关于2021年度利润分配预案的公告\n"
-            "综合考虑公司经营情况，公司计划不派发现金红利，不送红股。"
-        )
+        _Page(f"关于2021年度利润分配预案的公告\n综合考虑公司经营情况，{official_terms}")
     ]
     monkeypatch.setattr(
         "hengce.services.full_market_evidence_acquisition.PdfReader",
@@ -157,9 +165,45 @@ def test_dividend_terms_accept_explicit_official_no_dividend(monkeypatch) -> Non
     )
 
     assert page == 1
-    assert "不派发现金红利" in excerpt
+    assert any(
+        marker in excerpt for marker in ("不派发现金红利", "不进行利润分配", "不进行现金分配")
+    )
     assert per_share is None
     assert ex_date is None
+
+
+def test_dividend_fallback_selects_matching_full_annual_report() -> None:
+    dividend = SimpleNamespace(
+        ts_code="688399.SH",
+        evidence_period="2025",
+        raw_object_hash="a" * 64,
+    )
+    wrong_period = SimpleNamespace(
+        task_id="wrong",
+        ts_code="688399.SH",
+        evidence_kind=EvidenceKind.PERIODIC_REPORT,
+        evidence_period="2024-12-31",
+        raw_object_hash="b" * 64,
+        source_url="https://static.cninfo.com.cn/2024.PDF",
+        published_at=datetime(2025, 3, 1, tzinfo=UTC),
+        collected_at=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    annual = SimpleNamespace(
+        task_id="annual",
+        ts_code="688399.SH",
+        evidence_kind=EvidenceKind.PERIODIC_REPORT,
+        evidence_period="2025-12-31",
+        raw_object_hash="c" * 64,
+        source_url="https://static.cninfo.com.cn/2025.PDF",
+        published_at=datetime(2026, 3, 1, tzinfo=UTC),
+        collected_at=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    selected = FullMarketEvidenceAcquisitionService._annual_dividend_fallback(
+        dividend, (wrong_period, annual)
+    )
+
+    assert selected is annual
 
 
 def test_report_match_prefers_latest_correction_before_frozen_cutoff() -> None:
@@ -184,6 +228,23 @@ def test_report_match_prefers_latest_correction_before_frozen_cutoff() -> None:
 
     assert matched is not None
     assert matched.announcement_id == "2"
+
+
+def test_report_match_ignores_whitespace_inside_official_title() -> None:
+    reports = (
+        CninfoReport(
+            ts_code="603113.SH",
+            title="金能科技股份有限公司2024 年年度报告",
+            published_at=datetime(2025, 3, 22, tzinfo=UTC),
+            attachment_url="https://static.cninfo.com.cn/2024.PDF",
+            announcement_id="3",
+        ),
+    )
+
+    matched = FullMarketEvidenceAcquisitionService._match("2024-12-31", reports, date(2026, 8, 21))
+
+    assert matched is not None
+    assert matched.announcement_id == "3"
 
 
 def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
@@ -220,6 +281,24 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
         observed_at=datetime(2026, 8, 22, tzinfo=UTC),
         updates={"error_code": "OFFICIAL_PERIODIC_REPORT_NOT_FOUND"},
     )
+    blocked_terms_source = next(
+        item
+        for item in tasks
+        if item.task_id not in {task.task_id, blocked_source.task_id}
+        and item.status is EvidenceTaskStatus.PLANNED
+    )
+    blocked_terms = repository.transition(
+        blocked_terms_source.task_id,
+        expected_version=blocked_terms_source.version,
+        status=EvidenceTaskStatus.BLOCKED,
+        observed_at=datetime(2026, 8, 22, tzinfo=UTC),
+        updates={
+            "source_id": "cninfo",
+            "source_url": "https://static.cninfo.com.cn/wrong-report.PDF",
+            "raw_object_hash": "a" * 64,
+            "error_code": "OFFICIAL_DIVIDEND_TERMS_MISSING",
+        },
+    )
     with httpx.Client() as client:
         service = FullMarketEvidenceAcquisitionService(
             repository=repository,
@@ -230,7 +309,7 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
             clock=lambda: datetime(2026, 8, 22, tzinfo=UTC),
         )
         assert service.retry_failed(high.run_id, max_tasks=1) == {"retried": 1}
-        assert service.retry_failed(high.run_id, max_tasks=10) == {"retried": 1}
+        assert service.retry_failed(high.run_id, max_tasks=10) == {"retried": 2}
         with pytest.raises(ValueError, match="^EVIDENCE_COHORT_GATE_BLOCKED$"):
             service.retry_failed(liquidity.run_id, max_tasks=1)
 
@@ -240,3 +319,8 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
     resumed_blocked = repository.get_task(blocked.task_id)
     assert resumed_blocked is not None
     assert resumed_blocked.status is EvidenceTaskStatus.PLANNED
+    resumed_terms = repository.get_task(blocked_terms.task_id)
+    assert resumed_terms is not None
+    assert resumed_terms.status is EvidenceTaskStatus.PLANNED
+    assert resumed_terms.source_url is None
+    assert resumed_terms.raw_object_hash is None

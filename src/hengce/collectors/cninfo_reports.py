@@ -148,10 +148,15 @@ class CninfoPeriodicReportCollector:
                 announcements.extend(page_announcements)
                 if not searchkey and any(
                     (
-                        "利润分配预案" in str(item.get("announcementTitle") or "")
-                        or any(
-                            marker in str(item.get("announcementTitle") or "")
-                            for marker in annual_report_markers
+                        "摘要" not in str(item.get("announcementTitle") or "")
+                        and "H股" not in str(item.get("announcementTitle") or "")
+                        and (
+                            "利润分配预案" in str(item.get("announcementTitle") or "")
+                            or "利润分配方案" in str(item.get("announcementTitle") or "")
+                            or any(
+                                marker in str(item.get("announcementTitle") or "")
+                                for marker in annual_report_markers
+                            )
                         )
                     )
                     for item in page_announcements
@@ -189,6 +194,29 @@ class CninfoPeriodicReportCollector:
                 )
             )
         if not results:
+            for item in query(
+                "利润分配",
+                se_date=f"{fiscal_year + 1}-01-01~{fiscal_year + 1}-05-31",
+            ):
+                title = str(item.get("announcementTitle") or "")
+                if (
+                    not any(marker in title for marker in ("利润分配预案", "利润分配方案"))
+                    or "取消" in title
+                ):
+                    continue
+                timestamp = int(item["announcementTime"]) / 1000
+                results.append(
+                    CninfoReport(
+                        ts_code=ts_code,
+                        title=title,
+                        published_at=datetime.fromtimestamp(timestamp, tz=_SHANGHAI),
+                        attachment_url=(
+                            "https://static.cninfo.com.cn/" + str(item["adjunctUrl"]).lstrip("/")
+                        ),
+                        announcement_id=str(item["announcementId"]),
+                    )
+                )
+        if not results:
             # CNINFO's title search can omit older proposals even for exact terms.
             # The bounded annual-report window is small enough to filter locally.
             for item in query(
@@ -196,10 +224,15 @@ class CninfoPeriodicReportCollector:
                 se_date=f"{fiscal_year + 1}-01-01~{fiscal_year + 1}-05-31",
             ):
                 title = str(item.get("announcementTitle") or "")
+                is_distribution_plan = any(
+                    marker in title for marker in ("利润分配预案", "利润分配方案")
+                )
                 if (
-                    year_marker not in title
+                    (year_marker not in title and not is_distribution_plan)
+                    or "摘要" in title
+                    or "H股" in title
                     or (
-                        "利润分配预案" not in title
+                        not is_distribution_plan
                         and not any(marker in title for marker in annual_report_markers)
                     )
                     or "取消" in title
@@ -217,7 +250,16 @@ class CninfoPeriodicReportCollector:
                         announcement_id=str(item["announcementId"]),
                     )
                 )
-        return tuple(sorted(results, key=lambda item: (item.published_at, item.announcement_id)))
+        return tuple(
+            sorted(
+                results,
+                key=lambda item: (
+                    any(marker in item.title for marker in ("利润分配预案", "利润分配方案")),
+                    item.published_at,
+                    item.announcement_id,
+                ),
+            )
+        )
 
     def _organization_map(self) -> dict[str, str]:
         if self._organizations is not None:

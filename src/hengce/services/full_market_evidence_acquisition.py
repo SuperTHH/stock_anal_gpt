@@ -422,7 +422,8 @@ class FullMarketEvidenceAcquisitionService:
         assert task.source_url is not None
         assert task.published_at is not None
         assert task.collected_at is not None
-        pdf_path = self.raw_store.validate_content_hash(task.raw_object_hash)
+        evidence_task = task
+        pdf_path = self.raw_store.validate_content_hash(evidence_task.raw_object_hash)
         try:
             page_number, excerpt, per_share, ex_date = self._dividend_terms(
                 pdf_path,
@@ -430,51 +431,73 @@ class FullMarketEvidenceAcquisitionService:
                 allow_positive="实施" in (task.source_title or ""),
             )
         except (OSError, ValueError):
-            intermediate = self.repository.transition(
-                task.task_id,
-                expected_version=task.version,
-                status=EvidenceTaskStatus.PARSED,
-                observed_at=self.clock(),
-                updates={"error_code": None},
+            _, run_tasks = self.repository.list_tasks(
+                run_id=task.run_id,
+                page_size=10000,
             )
-            self.repository.transition(
-                task.task_id,
-                expected_version=intermediate.version,
-                status=EvidenceTaskStatus.BLOCKED,
-                observed_at=self.clock(),
-                updates={"error_code": "OFFICIAL_DIVIDEND_TERMS_MISSING"},
-            )
-            return False
+            fallback = self._annual_dividend_fallback(task, run_tasks)
+            try:
+                if fallback is None:
+                    raise ValueError("ANNUAL_DIVIDEND_FALLBACK_MISSING")
+                assert fallback.raw_object_hash is not None
+                evidence_task = fallback
+                page_number, excerpt, per_share, ex_date = self._dividend_terms(
+                    self.raw_store.validate_content_hash(fallback.raw_object_hash),
+                    fiscal_year=int(task.evidence_period),
+                    allow_positive=False,
+                )
+            except (OSError, ValueError):
+                intermediate = self.repository.transition(
+                    task.task_id,
+                    expected_version=task.version,
+                    status=EvidenceTaskStatus.PARSED,
+                    observed_at=self.clock(),
+                    updates={"error_code": None},
+                )
+                self.repository.transition(
+                    task.task_id,
+                    expected_version=intermediate.version,
+                    status=EvidenceTaskStatus.BLOCKED,
+                    observed_at=self.clock(),
+                    updates={"error_code": "OFFICIAL_DIVIDEND_TERMS_MISSING"},
+                )
+                return False
+        assert evidence_task.raw_object_hash is not None
+        assert evidence_task.source_url is not None
+        assert evidence_task.published_at is not None
+        assert evidence_task.collected_at is not None
+        evidence_hash = evidence_task.raw_object_hash
+        evidence_source_ids = evidence_task.source_record_ids
         identity = json.dumps(
             {
                 "market_date": task.market_date.isoformat(),
                 "ts_code": task.ts_code,
                 "fiscal_year": int(task.evidence_period),
-                "raw_object_hash": task.raw_object_hash,
+                "raw_object_hash": evidence_hash,
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
         record_id = f"annual-dividend-{hashlib.sha256(identity).hexdigest()}"
         effective_at = (
-            datetime.combine(ex_date, time.min, tzinfo=task.published_at.tzinfo)
+            datetime.combine(ex_date, time.min, tzinfo=evidence_task.published_at.tzinfo)
             if ex_date is not None
-            else task.published_at
+            else evidence_task.published_at
         )
         repository.save_version(
             AnnualDividendRecord(
                 record_id=record_id,
-                source_id="cninfo",
-                source_url=task.source_url,
-                published_at=task.published_at,
+                source_id=evidence_task.source_id or "cninfo",
+                source_url=evidence_task.source_url,
+                published_at=evidence_task.published_at,
                 effective_at=effective_at,
-                collected_at=task.collected_at,
-                version=f"cninfo-dividend-{task.raw_object_hash}",
-                content_hash=task.raw_object_hash,
+                collected_at=evidence_task.collected_at,
+                version=f"cninfo-dividend-{evidence_hash}",
+                content_hash=evidence_hash,
                 license_policy="official-public-attachment-personal-research",
                 quality_status=QualityStatus.VALID,
                 supersedes_id=None,
-                valid_from=task.collected_at,
+                valid_from=evidence_task.collected_at,
                 ts_code=task.ts_code,
                 fiscal_year=int(task.evidence_period),
                 has_cash_dividend=per_share is not None,
@@ -489,6 +512,12 @@ class FullMarketEvidenceAcquisitionService:
             status=EvidenceTaskStatus.PARSED,
             observed_at=self.clock(),
             updates={
+                "source_id": evidence_task.source_id or "cninfo",
+                "source_url": evidence_task.source_url,
+                "source_title": evidence_task.source_title,
+                "published_at": evidence_task.published_at,
+                "collected_at": evidence_task.collected_at,
+                "raw_object_hash": evidence_hash,
                 "source_page": page_number,
                 "excerpt": excerpt,
                 "prefilled_values": {
@@ -496,7 +525,7 @@ class FullMarketEvidenceAcquisitionService:
                     "cash_dividend_per_share": (str(per_share) if per_share is not None else None),
                     "ex_date": ex_date.isoformat() if ex_date is not None else None,
                 },
-                "source_record_ids": tuple(dict.fromkeys((*task.source_record_ids, record_id))),
+                "source_record_ids": tuple(dict.fromkeys((*evidence_source_ids, record_id))),
                 "error_code": None,
             },
         )
@@ -507,6 +536,30 @@ class FullMarketEvidenceAcquisitionService:
             observed_at=self.clock(),
         )
         return True
+
+    @staticmethod
+    def _annual_dividend_fallback(
+        task: FullMarketEvidenceTask,
+        candidates: tuple[FullMarketEvidenceTask, ...],
+    ) -> FullMarketEvidenceTask | None:
+        target_period = f"{task.evidence_period}-12-31"
+        matches = [
+            candidate
+            for candidate in candidates
+            if candidate.ts_code == task.ts_code
+            and candidate.evidence_kind is EvidenceKind.PERIODIC_REPORT
+            and candidate.evidence_period == target_period
+            and candidate.raw_object_hash is not None
+            and candidate.raw_object_hash != task.raw_object_hash
+            and candidate.source_url is not None
+            and candidate.published_at is not None
+            and candidate.collected_at is not None
+        ]
+        return (
+            max(matches, key=lambda candidate: (candidate.published_at, candidate.task_id))
+            if matches
+            else None
+        )
 
     @staticmethod
     def _dividend_terms(
@@ -541,7 +594,10 @@ class FullMarketEvidenceAcquisitionService:
                 no_dividend is None
                 and (
                     match := re.search(
-                        year_pattern + r"[^。；]{0,160}?(?:不派发现金红利|不进行现金分红)",
+                        year_pattern + r"[^。；]{0,160}?(?:"
+                        r"不派发现金红利|不发放现金红利|不进行现金分红|"
+                        r"不进行利润分配|不进行现金分配(?:和送股)?"
+                        r")",
                         text,
                     )
                 )
@@ -598,6 +654,7 @@ class FullMarketEvidenceAcquisitionService:
                     or task.error_code
                     in {
                         "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND",
+                        "OFFICIAL_DIVIDEND_TERMS_MISSING",
                         "OFFICIAL_PERIODIC_REPORT_NOT_FOUND",
                     }
                 ),
@@ -611,19 +668,38 @@ class FullMarketEvidenceAcquisitionService:
         )
         retried = 0
         for task in tasks[:max_tasks]:
+            rediscover_dividend = task.error_code == "OFFICIAL_DIVIDEND_TERMS_MISSING"
             target = (
-                EvidenceTaskStatus.DOWNLOADED
+                EvidenceTaskStatus.PLANNED
+                if rediscover_dividend
+                else EvidenceTaskStatus.DOWNLOADED
                 if task.raw_object_hash is not None
                 else EvidenceTaskStatus.DISCOVERED
                 if task.source_url is not None
                 else EvidenceTaskStatus.PLANNED
             )
+            updates: dict[str, object] = {"error_code": None}
+            if rediscover_dividend:
+                updates.update(
+                    {
+                        "source_id": None,
+                        "source_url": None,
+                        "source_title": None,
+                        "source_record_ids": (),
+                        "published_at": None,
+                        "collected_at": None,
+                        "raw_object_hash": None,
+                        "source_page": None,
+                        "excerpt": None,
+                        "prefilled_values": {},
+                    }
+                )
             self.repository.transition(
                 task.task_id,
                 expected_version=task.version,
                 status=target,
                 observed_at=self.clock(),
-                updates={"error_code": None},
+                updates=updates,
             )
             retried += 1
         return {"retried": retried}
@@ -727,7 +803,8 @@ class FullMarketEvidenceAcquisitionService:
         matches = [
             report
             for report in reports
-            if report.published_at <= cutoff and any(marker in report.title for marker in markers)
+            if report.published_at <= cutoff
+            and any(marker in re.sub(r"\s+", "", report.title) for marker in markers)
         ]
         return (
             max(matches, key=lambda item: (item.published_at, item.announcement_id))

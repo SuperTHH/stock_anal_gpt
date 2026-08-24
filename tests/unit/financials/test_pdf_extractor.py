@@ -2233,6 +2233,57 @@ def test_numeric_note_column_uses_current_statement_value(
     assert result.facts["operating_cash_flow"] == Decimal("2200000")
 
 
+def test_chinese_hyphen_note_reference_precedes_statement_value(
+    tmp_path: Path,
+) -> None:
+    """SSE statements commonly format note references as `七-1`."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "货币资金 | 300",
+        "货币资金 七-1 300 250",
+    )
+    page_payload[2]["text"] = page_payload[2]["text"].replace(
+        "营业成本 | 600",
+        "营业成本 七-46 600 500",
+    )
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "实收资本（或股本） | 10,000",
+        "实收资本（或股本） 七-40 10,000 9,000",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+    assert result.facts["operating_cost"] == Decimal("6000000")
+    assert result.facts["total_shares"] == Decimal("100000000")
+
+
+@pytest.mark.parametrize("note_reference", ["注释 1", "八（七）1"])
+def test_additional_cninfo_note_reference_formats_precede_statement_value(
+    tmp_path: Path,
+    note_reference: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "货币资金 | 300",
+        f"货币资金 {note_reference} 300 250",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+
+
 def test_cashflow_use_and_net_change_aliases_reconcile(
     tmp_path: Path,
 ) -> None:
