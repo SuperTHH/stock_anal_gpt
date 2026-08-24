@@ -285,9 +285,11 @@ def seed_pilot_financial_inputs(
 
     taxonomy_hash = "a" * 64
     try:
-        taxonomy_hash = FinancialFilingRepository(state.path).get_taxonomies(
-            ("test-gaap-2025",)
-        )[0].raw_object_hash
+        taxonomy_hash = (
+            FinancialFilingRepository(state.path)
+            .get_taxonomies(("test-gaap-2025",))[0]
+            .raw_object_hash
+        )
     except ValueError:
         pass
     statement_by_name = {
@@ -316,19 +318,12 @@ def seed_pilot_financial_inputs(
                 "canonical_fact_set": sorted(CANONICAL_PILOT_FACTS),
                 "mappings": [
                     {
-                        "raw_qname": (
-                            f"{{urn:hengce:pilot-cli}}"
-                            f"{name.title().replace('_', '')}"
-                        ),
+                        "raw_qname": (f"{{urn:hengce:pilot-cli}}{name.title().replace('_', '')}"),
                         "canonical_fact_name": name,
                         "statement_type": statement_by_name[name],
-                        "expected_unit_kind": (
-                            "SHARES" if name == "total_shares" else "MONETARY"
-                        ),
+                        "expected_unit_kind": ("SHARES" if name == "total_shares" else "MONETARY"),
                         "taxonomy_hash": taxonomy_hash,
-                        "evidence_url": (
-                            "https://www.sse.com.cn/fixture/pilot-cli.xsd"
-                        ),
+                        "evidence_url": ("https://www.sse.com.cn/fixture/pilot-cli.xsd"),
                         "reviewed_at": "2026-07-30T09:00:00+08:00",
                     }
                     for name in sorted(CANONICAL_PILOT_FACTS)
@@ -491,6 +486,24 @@ def test_init_state_seeds_approved_policies(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "state initialized" in result.stdout
+
+
+def test_ingest_exchange_dividends_rejects_unknown_exchange(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "ingest-exchange-dividends",
+            "--market-date",
+            "2026-08-21",
+            "--exchange",
+            "unknown",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "exchange must be all, sse, or szse" in result.output
 
 
 def test_default_seed_is_packaged_and_matches_operator_copy() -> None:
@@ -1687,9 +1700,7 @@ def test_rebuild_pilot_report_emits_only_aggregate_json(
     class FakeRunner:
         def run(self, **kwargs: object) -> cli.PilotRunSummary:
             assert kwargs["acquisition_mode"] == "manual-only"
-            assert kwargs["event_cutoff_at"] == datetime(
-                2026, 7, 22, 13, 30, tzinfo=UTC
-            )
+            assert kwargs["event_cutoff_at"] == datetime(2026, 7, 22, 13, 30, tzinfo=UTC)
             return cli.PilotRunSummary(
                 market_date=date(2026, 7, 22),
                 report_cutoff_at=datetime(
@@ -1710,10 +1721,7 @@ def test_rebuild_pilot_report_emits_only_aggregate_json(
                 ),
                 known_at=datetime(2026, 7, 30, tzinfo=UTC),
                 acquisition_mode="manual-only",
-                stage_statuses={
-                    stage: "SUCCEEDED"
-                    for stage in cli.HistoricalPilotRunner.STAGES
-                },
+                stage_statuses={stage: "SUCCEEDED" for stage in cli.HistoricalPilotRunner.STAGES},
                 stage_output_hashes={},
                 failed_stage=None,
                 error_code=None,
@@ -1911,9 +1919,7 @@ def test_validate_pilot_report_emits_aggregate_json_and_passes_arguments(
                 22,
                 21,
                 30,
-                tzinfo=datetime.fromisoformat(
-                    "2026-07-22T21:30:00+08:00"
-                ).tzinfo,
+                tzinfo=datetime.fromisoformat("2026-07-22T21:30:00+08:00").tzinfo,
             ),
         }
     ]

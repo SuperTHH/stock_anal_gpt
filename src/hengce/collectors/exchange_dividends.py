@@ -17,9 +17,10 @@ from hengce.policy.guard import PolicyGuard
 from hengce.raw_store.store import RawObjectStore
 
 _SSE_QUERY_URL = "https://query.sse.com.cn/commonQuery.do"
-_SSE_SOURCE_PAGE = (
-    "https://www.sse.com.cn/market/stockdata/dividends/dividend/index_his.shtml"
-)
+_SSE_SOURCE_PAGE = "https://www.sse.com.cn/market/stockdata/dividends/dividend/"
+_SSE_SQL_ID = "COMMON_SSE_SJ_GPSJ_FHSG_SSGSFHQK_L"
+_SSE_HISTORY_YEARS = 5
+_SSE_FRESHNESS_DAYS = 370
 _SZSE_INDEX_URL = "https://www.szse.cn/market/periodical/month/index.html"
 _TAG = re.compile(r"<[^>]+>")
 
@@ -61,86 +62,94 @@ class SseImplementedDividendCollector:
         self.page_size = page_size
 
     def fetch(self, market_date: date) -> list[ImplementedDividend]:
-        page = 1
-        page_count = 1
         records: dict[tuple[str, date, date, Decimal], ImplementedDividend] = {}
-        while page <= page_count:
-            self.guard.authorize(
-                "sse", _SSE_QUERY_URL, "corporate_action", "collectors.exchange_dividends"
-            )
-            response = self.client.get(
-                _SSE_QUERY_URL,
-                params={
-                    "isPagination": "true",
-                    "sqlId": "COMMON_SSE_GP_SJTJ_FHSG_AGFH_L_NEW",
-                    "pageHelp.pageSize": self.page_size,
-                    "pageHelp.pageNo": page,
-                    "pageHelp.beginPage": page,
-                    "pageHelp.endPage": page + 1,
-                    "pageHelp.cacheSize": 1,
-                    "record_date_a": "",
-                    "security_code_a": "",
-                },
-                headers={"Referer": _SSE_SOURCE_PAGE},
-                timeout=30,
-            )
-            response.raise_for_status()
-            collected_at = self.clock()
-            raw_ref = self.raw_store.put(
-                source_id="sse",
-                source_url=str(response.request.url),
-                collected_at=collected_at,
-                content_type=response.headers.get("content-type", "application/json"),
-                payload=response.content,
-            )
-            try:
-                payload = response.json()
-                page_help = payload["pageHelp"]
-                rows = payload.get("result") or page_help.get("data") or []
-                page_count = max(1, int(page_help.get("pageCount") or 1))
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-                raise ValueError("SSE_DIVIDEND_RESPONSE_INVALID") from error
-            if not isinstance(rows, list):
-                raise ValueError("SSE_DIVIDEND_RESPONSE_INVALID")
-            for row in rows:
-                try:
-                    code = str(row["SECURITY_CODE_A"]).strip()
-                    dps = Decimal(str(row["DIVIDEND_PER_SHARE2_A"]).strip())
-                    record_date = _parse_date(row["RECORD_DATE_A"])
-                    ex_date = _parse_date(row["EX_DIVIDEND_DATE_A"])
-                except (KeyError, TypeError, ValueError, InvalidOperation):
-                    continue
-                if (
-                    not re.fullmatch(r"(?:6\d{5})", code)
-                    or dps <= 0
-                    or ex_date > market_date
-                    or record_date > ex_date
-                ):
-                    continue
-                identity = (code, record_date, ex_date, dps)
-                record_id = hashlib.sha256(
-                    f"sse|{code}|{record_date}|{ex_date}|{dps}".encode()
-                ).hexdigest()
-                records[identity] = ImplementedDividend(
-                    record_id=f"implemented-dividend-{record_id}",
-                    source_id="sse",
-                    source_url=_SSE_SOURCE_PAGE,
-                    published_at=None,
-                    effective_at=datetime.combine(
-                        ex_date, datetime.min.time(), tzinfo=collected_at.tzinfo
-                    ),
-                    collected_at=collected_at,
-                    valid_from=collected_at,
-                    version=f"sse-implemented-{market_date.isoformat()}",
-                    content_hash=raw_ref.content_hash,
-                    license_policy="personal-non-commercial-research",
-                    quality_status=QualityStatus.VALID,
-                    ts_code=f"{code}.SH",
-                    record_date=record_date,
-                    ex_date=ex_date,
-                    cash_dividend_per_share=dps,
+        for record_year in range(market_date.year - _SSE_HISTORY_YEARS, market_date.year + 1):
+            page = 1
+            page_count = 1
+            while page <= page_count:
+                self.guard.authorize(
+                    "sse",
+                    _SSE_QUERY_URL,
+                    "corporate_action",
+                    "collectors.exchange_dividends",
                 )
-            page += 1
+                response = self.client.get(
+                    _SSE_QUERY_URL,
+                    params={
+                        "isPagination": "true",
+                        "sqlId": _SSE_SQL_ID,
+                        "pageHelp.pageSize": self.page_size,
+                        "pageHelp.pageNo": page,
+                        "pageHelp.beginPage": page,
+                        "pageHelp.endPage": page,
+                        "pageHelp.cacheSize": 1,
+                        "CONDITION_AG": 1,
+                        "A_REG_DATE": str(record_year),
+                    },
+                    headers={"Referer": _SSE_SOURCE_PAGE},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                collected_at = self.clock()
+                raw_ref = self.raw_store.put(
+                    source_id="sse",
+                    source_url=str(response.request.url),
+                    collected_at=collected_at,
+                    content_type=response.headers.get("content-type", "application/json"),
+                    payload=response.content,
+                )
+                try:
+                    payload = response.json()
+                    page_help = payload["pageHelp"]
+                    rows = payload.get("result") or page_help.get("data") or []
+                    page_count = max(1, int(page_help.get("pageCount") or 1))
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise ValueError("SSE_DIVIDEND_RESPONSE_INVALID") from error
+                if not isinstance(rows, list):
+                    raise ValueError("SSE_DIVIDEND_RESPONSE_INVALID")
+                for row in rows:
+                    try:
+                        code = str(row["A_STOCK_CODE"]).strip()
+                        dps = Decimal(str(row["A_BEFR_TAX_DIV"]).strip())
+                        record_date = _parse_date(row["A_REG_DATE"])
+                        ex_date = _parse_date(row["A_DIV_DATE"])
+                    except (KeyError, TypeError, ValueError, InvalidOperation):
+                        continue
+                    if (
+                        not re.fullmatch(r"(?:6\d{5})", code)
+                        or dps <= 0
+                        or ex_date > market_date
+                        or record_date > ex_date
+                    ):
+                        continue
+                    identity = (code, record_date, ex_date, dps)
+                    record_id = hashlib.sha256(
+                        f"sse|{code}|{record_date}|{ex_date}|{dps}".encode()
+                    ).hexdigest()
+                    records[identity] = ImplementedDividend(
+                        record_id=f"implemented-dividend-{record_id}",
+                        source_id="sse",
+                        source_url=_SSE_SOURCE_PAGE,
+                        published_at=None,
+                        effective_at=datetime.combine(
+                            ex_date, datetime.min.time(), tzinfo=collected_at.tzinfo
+                        ),
+                        collected_at=collected_at,
+                        valid_from=collected_at,
+                        version=f"sse-implemented-{market_date.isoformat()}",
+                        content_hash=raw_ref.content_hash,
+                        license_policy="personal-non-commercial-research",
+                        quality_status=QualityStatus.VALID,
+                        ts_code=f"{code}.SH",
+                        record_date=record_date,
+                        ex_date=ex_date,
+                        cash_dividend_per_share=dps,
+                    )
+                page += 1
+        if not records or max(item.ex_date for item in records.values()) < (
+            market_date - timedelta(days=_SSE_FRESHNESS_DAYS)
+        ):
+            raise ValueError("SSE_DIVIDEND_DATA_STALE")
         return sorted(
             records.values(), key=lambda item: (item.ts_code, item.ex_date, item.record_id)
         )
@@ -227,9 +236,7 @@ class SzseImplementedDividendCollector:
         )
 
     def _get(self, url: str) -> httpx.Response:
-        self.guard.authorize(
-            "szse", url, "corporate_action", "collectors.exchange_dividends"
-        )
+        self.guard.authorize("szse", url, "corporate_action", "collectors.exchange_dividends")
         response = self.client.get(
             url, headers={"User-Agent": "Hengce personal research"}, timeout=30
         )
@@ -257,9 +264,10 @@ class SzseImplementedDividendCollector:
     def _rows(text: str) -> list[list[str]]:
         parsed: list[list[str]] = []
         for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", text, re.IGNORECASE | re.DOTALL):
-            cells = [_text(cell) for cell in re.findall(
-                r"<td\b[^>]*>(.*?)</td>", row, re.IGNORECASE | re.DOTALL
-            )]
+            cells = [
+                _text(cell)
+                for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.IGNORECASE | re.DOTALL)
+            ]
             if cells:
                 parsed.append(cells)
         return parsed

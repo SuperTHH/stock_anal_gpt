@@ -196,7 +196,7 @@ def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_divide
             json={
                 "announcements": [
                     {
-                        "announcementTitle": "2021年年度报告摘要",
+                        "announcementTitle": "赣能股份2021年度报告摘要",
                         "announcementTime": 1_650_816_000_000,
                         "adjunctUrl": "annual-summary.PDF",
                         "announcementId": "21",
@@ -217,4 +217,4 @@ def test_cninfo_dividend_discovery_accepts_official_annual_summary_for_no_divide
         ).dividend_announcements("000899.SZ", 2021)
 
     assert [item.announcement_id for item in reports] == ["21"]
-    assert reports[0].title == "2021年年度报告摘要"
+    assert reports[0].title == "赣能股份2021年度报告摘要"

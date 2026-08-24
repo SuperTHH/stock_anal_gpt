@@ -18,6 +18,7 @@ class ImplementedDividendWarehouse:
 
     def __init__(self, root: Path) -> None:
         self.dataset = root / "implemented_dividends"
+        self.archive = root / "implemented_dividends_archive"
 
     def write_records(
         self,
@@ -44,6 +45,26 @@ class ImplementedDividendWarehouse:
                 pass
         finally:
             temporary.unlink(missing_ok=True)
+        return target
+
+    def replace_records(
+        self,
+        market_date: date,
+        records: list[ImplementedDividend],
+    ) -> Path:
+        """Publish one corrected snapshot while retaining prior artifacts privately."""
+        target = self.write_records(market_date, records)
+        partition = self.dataset / f"market_date={market_date.isoformat()}"
+        prior = sorted(path for path in partition.glob("part-*.parquet") if path != target)
+        if not prior:
+            return target
+        archive_partition = self.archive / f"market_date={market_date.isoformat()}"
+        archive_partition.mkdir(parents=True, exist_ok=True)
+        for path in prior:
+            archived = archive_partition / path.name
+            if archived.exists():
+                archived = archive_partition / f"{path.stem}-{uuid4().hex}.parquet"
+            os.replace(path, archived)
         return target
 
     def read_records(self, market_date: date) -> list[ImplementedDividend]:

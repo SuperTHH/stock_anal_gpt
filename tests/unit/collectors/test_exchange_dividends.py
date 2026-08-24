@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
+import pytest
 
 from hengce.collectors.exchange_dividends import (
     SseImplementedDividendCollector,
@@ -29,7 +30,9 @@ def policy(source_id: str, domains: list[str]) -> SourcePolicy:
             "attachment_rule": "none",
             "rate_limit_per_minute": 60,
             "robots_policy": "respect",
-            "terms_url": "https://www.sse.com.cn/" if source_id == "sse" else "https://www.szse.cn/",
+            "terms_url": "https://www.sse.com.cn/"
+            if source_id == "sse"
+            else "https://www.szse.cn/",
             "terms_reviewed_at": NOW,
             "review_status": "APPROVED",
             "connection_status": "UNKNOWN",
@@ -45,47 +48,58 @@ def guard(tmp_path: Path, source_id: str, domains: list[str]) -> PolicyGuard:
     return PolicyGuard(state, clock=lambda: NOW, sleeper=lambda _: None)
 
 
-def test_sse_collector_paginates_filters_cutoff_and_deduplicates(tmp_path: Path) -> None:
+def test_sse_collector_queries_current_year_api_paginates_and_deduplicates(
+    tmp_path: Path,
+) -> None:
     payloads = {
-        1: {
+        (2026, 1): {
             "pageHelp": {"pageCount": 2, "pageNo": 1},
             "result": [
                 {
-                    "SECURITY_CODE_A": "600000",
-                    "DIVIDEND_PER_SHARE2_A": "0.30",
-                    "RECORD_DATE_A": "2026-06-29",
-                    "EX_DIVIDEND_DATE_A": "2026-06-30",
+                    "A_STOCK_CODE": "600000",
+                    "A_BEFR_TAX_DIV": "0.30",
+                    "A_REG_DATE": "20260629",
+                    "A_DIV_DATE": "20260630",
                 },
                 {
-                    "SECURITY_CODE_A": "600001",
-                    "DIVIDEND_PER_SHARE2_A": "0.20",
-                    "RECORD_DATE_A": "2026-07-30",
-                    "EX_DIVIDEND_DATE_A": "2026-07-31",
+                    "A_STOCK_CODE": "600001",
+                    "A_BEFR_TAX_DIV": "0.20",
+                    "A_REG_DATE": "20260730",
+                    "A_DIV_DATE": "20260731",
                 },
                 {
-                    "SECURITY_CODE_A": "600002",
-                    "DIVIDEND_PER_SHARE2_A": "0.10",
-                    "RECORD_DATE_A": "2026-06-30",
-                    "EX_DIVIDEND_DATE_A": "2026-06-29",
+                    "A_STOCK_CODE": "600002",
+                    "A_BEFR_TAX_DIV": "0.10",
+                    "A_REG_DATE": "20260630",
+                    "A_DIV_DATE": "20260629",
                 },
             ],
         },
-        2: {
+        (2026, 2): {
             "pageHelp": {"pageCount": 2, "pageNo": 2},
             "result": [
                 {
-                    "SECURITY_CODE_A": "600000",
-                    "DIVIDEND_PER_SHARE2_A": "0.30",
-                    "RECORD_DATE_A": "2026-06-29",
-                    "EX_DIVIDEND_DATE_A": "2026-06-30",
+                    "A_STOCK_CODE": "600000",
+                    "A_BEFR_TAX_DIV": "0.30",
+                    "A_REG_DATE": "20260629",
+                    "A_DIV_DATE": "20260630",
                 }
             ],
         },
     }
+    requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["sqlId"] == "COMMON_SSE_SJ_GPSJ_FHSG_SSGSFHQK_L"
+        assert request.url.params["CONDITION_AG"] == "1"
+        year = int(request.url.params["A_REG_DATE"])
         page = int(request.url.params["pageHelp.pageNo"])
-        return httpx.Response(200, json=payloads[page], request=request)
+        payload = payloads.get(
+            (year, page),
+            {"pageHelp": {"pageCount": 1, "pageNo": 1}, "result": []},
+        )
+        return httpx.Response(200, json=payload, request=request)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         records = SseImplementedDividendCollector(
@@ -100,6 +114,37 @@ def test_sse_collector_paginates_filters_cutoff_and_deduplicates(tmp_path: Path)
     assert records[0].ts_code == "600000.SH"
     assert records[0].cash_dividend_per_share == Decimal("0.30")
     assert records[0].ex_date == date(2026, 6, 30)
+    assert {int(request.url.params["A_REG_DATE"]) for request in requests} == set(range(2021, 2027))
+
+
+def test_sse_collector_rejects_an_official_dataset_that_is_stale(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        year = int(request.url.params["A_REG_DATE"])
+        rows = []
+        if year == 2021:
+            rows = [
+                {
+                    "A_STOCK_CODE": "600000",
+                    "A_BEFR_TAX_DIV": "0.30",
+                    "A_REG_DATE": "20211229",
+                    "A_DIV_DATE": "20211230",
+                }
+            ]
+        return httpx.Response(
+            200,
+            json={"pageHelp": {"pageCount": 1, "pageNo": 1}, "result": rows},
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        collector = SseImplementedDividendCollector(
+            client=client,
+            guard=guard(tmp_path, "sse", ["query.sse.com.cn"]),
+            raw_store=RawObjectStore(tmp_path / "raw"),
+            clock=lambda: NOW,
+        )
+        with pytest.raises(ValueError, match="SSE_DIVIDEND_DATA_STALE"):
+            collector.fetch(date(2026, 7, 22))
 
 
 def test_szse_collector_discovers_monthly_official_table_and_parses_dps(
@@ -108,8 +153,7 @@ def test_szse_collector_discovers_monthly_official_table_and_parses_dps(
     index_url = "https://www.szse.cn/market/periodical/month/index.html"
     report_url = "https://www.szse.cn/market/periodical/month/t20260806_622028.html"
     table_url = (
-        "https://docs.static.szse.cn/www/market/periodical/month/"
-        "W020260806123456789012.html"
+        "https://docs.static.szse.cn/www/market/periodical/month/W020260806123456789012.html"
     )
     index = """
         value:'./t20260806_622028.html', text:'2026-07'

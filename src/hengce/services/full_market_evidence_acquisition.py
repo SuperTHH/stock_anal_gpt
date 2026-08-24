@@ -493,9 +493,7 @@ class FullMarketEvidenceAcquisitionService:
                 "excerpt": excerpt,
                 "prefilled_values": {
                     "has_cash_dividend": per_share is not None,
-                    "cash_dividend_per_share": (
-                        str(per_share) if per_share is not None else None
-                    ),
+                    "cash_dividend_per_share": (str(per_share) if per_share is not None else None),
                     "ex_date": ex_date.isoformat() if ex_date is not None else None,
                 },
                 "source_record_ids": tuple(dict.fromkeys((*task.source_record_ids, record_id))),
@@ -539,13 +537,16 @@ class FullMarketEvidenceAcquisitionService:
                 if fiscal_year
                 else r"(?:本年度|20\d{2}年度|公司(?:计划|拟)(?:年度)?)"
             )
-            if no_dividend is None and (
-                match := re.search(
-                    year_pattern
-                    + r"[^。；]{0,160}?(?:不派发现金红利|不进行现金分红)",
-                    text,
+            if (
+                no_dividend is None
+                and (
+                    match := re.search(
+                        year_pattern + r"[^。；]{0,160}?(?:不派发现金红利|不进行现金分红)",
+                        text,
+                    )
                 )
-            ) is not None:
+                is not None
+            ):
                 no_dividend = (page_number, match.group(0)[:160])
             if (
                 allow_positive
@@ -594,7 +595,11 @@ class FullMarketEvidenceAcquisitionService:
                     task
                     for task in tasks
                     if task.status is EvidenceTaskStatus.RETRYABLE_FAILED
-                    or task.error_code == "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"
+                    or task.error_code
+                    in {
+                        "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND",
+                        "OFFICIAL_PERIODIC_REPORT_NOT_FOUND",
+                    }
                 ),
                 key=lambda task: (
                     task.status is not EvidenceTaskStatus.RETRYABLE_FAILED,
@@ -675,23 +680,33 @@ class FullMarketEvidenceAcquisitionService:
     ) -> tuple[int | None, str | None, bool | None]:
         negative_markers = ("否定意见", "无法表示意见")
         modified_markers = ("强调事项段", "持续经营重大不确定性")
+        conditional_markers = (
+            "最近一年审计报告为",
+            "是否为",
+            "是否存在",
+            "触及",
+        )
         for page_number, page in enumerate(PdfReader(pdf_path).pages, start=1):
             text = page.extract_text() or ""
             if "审计意见" not in text and "无保留意见" not in text:
                 continue
             lines = [line.strip() for line in text.splitlines() if line.strip()]
-            relevant = next(
-                (line for line in lines if "审计意见" in line or "保留意见" in line),
-                lines[0] if lines else "",
-            )
-            excerpt = relevant[:500] or None
-            if any(marker in text for marker in negative_markers) or "保留意见" in (
-                text.replace("无保留意见", "")
-            ):
-                return page_number, excerpt, False
-            if "无保留意见" in text and not any(marker in text for marker in modified_markers):
-                return page_number, excerpt, True
-            return page_number, excerpt, None
+            for index, line in enumerate(lines):
+                if "审计意见" not in line and "审计报告意见" not in line and "保留意见" not in line:
+                    continue
+                window = " ".join(lines[index : index + 2])[:500]
+                compact = re.sub(r"\s+", "", window)
+                if any(marker in compact for marker in conditional_markers):
+                    continue
+                without_unmodified = compact.replace("无保留意见", "")
+                if any(marker in compact for marker in negative_markers) or (
+                    "保留意见" in without_unmodified
+                ):
+                    return page_number, window or None, False
+                if "无保留意见" in compact and not any(
+                    marker in compact for marker in modified_markers
+                ):
+                    return page_number, window or None, True
         return None, None, None
 
     @staticmethod
@@ -702,15 +717,17 @@ class FullMarketEvidenceAcquisitionService:
     ) -> CninfoReport | None:
         period = date.fromisoformat(evidence_period)
         if period.month == 12:
-            markers = (f"{period.year}年年度报告",)
+            markers = (
+                f"{period.year}年年度报告",
+                f"{period.year}年度报告",
+            )
         else:
             markers = (f"{period.year}年一季度报告", f"{period.year}年第一季度报告")
         cutoff = datetime.combine(market_date, time(21, 30), tzinfo=_SHANGHAI)
         matches = [
             report
             for report in reports
-            if report.published_at <= cutoff
-            and any(report.title.startswith(marker) for marker in markers)
+            if report.published_at <= cutoff and any(marker in report.title for marker in markers)
         ]
         return (
             max(matches, key=lambda item: (item.published_at, item.announcement_id))

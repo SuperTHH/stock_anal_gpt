@@ -39,17 +39,58 @@ def test_risk_prefill_uses_audited_pdf_page_without_inventing_other_risks(
         lambda _path: _Reader(),
     )
 
-    page, excerpt, standard = (
-        FullMarketEvidenceAcquisitionService._audit_opinion_prefill(
-            Path("ignored.pdf")
-        )
+    page, excerpt, standard = FullMarketEvidenceAcquisitionService._audit_opinion_prefill(
+        Path("ignored.pdf")
     )
 
     assert page == 2
-    assert excerpt == "一、审计意见"
+    assert excerpt == "一、审计意见 我们审计了财务报表，并出具无保留意见。"
     assert standard is True
     assert FullMarketEvidenceAcquisitionService._st_status("平安银行") is None
     assert FullMarketEvidenceAcquisitionService._st_status("*ST示例") == "*ST"
+
+
+def test_risk_prefill_ignores_conditional_non_standard_opinion_language(
+    monkeypatch,
+) -> None:
+    reader = _Reader()
+    reader.pages = [
+        _Page(
+            "风险条件核对\n"
+            "最近一年审计报告为非无保留意见或带与持续经营相关的重大不确定性段落的无保留意见"
+        )
+    ]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    page, excerpt, standard = FullMarketEvidenceAcquisitionService._audit_opinion_prefill(
+        Path("ignored.pdf")
+    )
+
+    assert page is None
+    assert excerpt is None
+    assert standard is None
+
+
+def test_risk_prefill_accepts_explicit_internal_control_opinion_type(
+    monkeypatch,
+) -> None:
+    reader = _Reader()
+    reader.pages = [_Page("内控审计报告意见类型\n标准无保留意见")]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    page, excerpt, standard = FullMarketEvidenceAcquisitionService._audit_opinion_prefill(
+        Path("ignored.pdf")
+    )
+
+    assert page == 1
+    assert excerpt == "内控审计报告意见类型 标准无保留意见"
+    assert standard is True
 
 
 def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
@@ -66,8 +107,8 @@ def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
         lambda _path: reader,
     )
 
-    page, excerpt, per_share, ex_date = (
-        FullMarketEvidenceAcquisitionService._dividend_terms(Path("ignored.pdf"))
+    page, excerpt, per_share, ex_date = FullMarketEvidenceAcquisitionService._dividend_terms(
+        Path("ignored.pdf")
     )
 
     assert page == 1
@@ -90,8 +131,8 @@ def test_dividend_terms_parse_amount_before_cash_word(monkeypatch) -> None:
         lambda _path: reader,
     )
 
-    _, _, per_share, ex_date = (
-        FullMarketEvidenceAcquisitionService._dividend_terms(Path("ignored.pdf"))
+    _, _, per_share, ex_date = FullMarketEvidenceAcquisitionService._dividend_terms(
+        Path("ignored.pdf")
     )
 
     assert per_share == Decimal("0.33")
@@ -111,10 +152,8 @@ def test_dividend_terms_accept_explicit_official_no_dividend(monkeypatch) -> Non
         lambda _path: reader,
     )
 
-    page, excerpt, per_share, ex_date = (
-        FullMarketEvidenceAcquisitionService._dividend_terms(
-            Path("ignored.pdf"), fiscal_year=2021
-        )
+    page, excerpt, per_share, ex_date = FullMarketEvidenceAcquisitionService._dividend_terms(
+        Path("ignored.pdf"), fiscal_year=2021
     )
 
     assert page == 1
@@ -134,16 +173,14 @@ def test_report_match_prefers_latest_correction_before_frozen_cutoff() -> None:
         ),
         CninfoReport(
             ts_code="000001.SZ",
-            title="2025年年度报告（更正后）",
+            title="平安银行2025年度报告（更正后）",
             published_at=datetime(2026, 3, 2, tzinfo=UTC),
             attachment_url="https://static.cninfo.com.cn/corrected.PDF",
             announcement_id="2",
         ),
     )
 
-    matched = FullMarketEvidenceAcquisitionService._match(
-        "2025-12-31", reports, date(2026, 8, 21)
-    )
+    matched = FullMarketEvidenceAcquisitionService._match("2025-12-31", reports, date(2026, 8, 21))
 
     assert matched is not None
     assert matched.announcement_id == "2"
@@ -161,9 +198,7 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
     )
     runs = planner.plan_all(snapshot)
     high = next(run for run in runs if run.cohort is EvidenceCohort.YIELD_GE_5)
-    liquidity = next(
-        run for run in runs if run.cohort is EvidenceCohort.LIQUIDITY_FILL
-    )
+    liquidity = next(run for run in runs if run.cohort is EvidenceCohort.LIQUIDITY_FILL)
     _, tasks = repository.list_tasks(run_id=high.run_id, page_size=100)
     task = next(item for item in tasks if item.status is EvidenceTaskStatus.PLANNED)
     failed = repository.transition(
@@ -176,15 +211,14 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
     blocked_source = next(
         item
         for item in tasks
-        if item.task_id != task.task_id
-        and item.status is EvidenceTaskStatus.PLANNED
+        if item.task_id != task.task_id and item.status is EvidenceTaskStatus.PLANNED
     )
     blocked = repository.transition(
         blocked_source.task_id,
         expected_version=blocked_source.version,
         status=EvidenceTaskStatus.BLOCKED,
         observed_at=datetime(2026, 8, 22, tzinfo=UTC),
-        updates={"error_code": "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND"},
+        updates={"error_code": "OFFICIAL_PERIODIC_REPORT_NOT_FOUND"},
     )
     with httpx.Client() as client:
         service = FullMarketEvidenceAcquisitionService(
@@ -196,12 +230,13 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
             clock=lambda: datetime(2026, 8, 22, tzinfo=UTC),
         )
         assert service.retry_failed(high.run_id, max_tasks=1) == {"retried": 1}
+        assert service.retry_failed(high.run_id, max_tasks=10) == {"retried": 1}
         with pytest.raises(ValueError, match="^EVIDENCE_COHORT_GATE_BLOCKED$"):
             service.retry_failed(liquidity.run_id, max_tasks=1)
 
     resumed = repository.get_task(failed.task_id)
     assert resumed is not None
     assert resumed.status is EvidenceTaskStatus.DISCOVERED
-    still_blocked = repository.get_task(blocked.task_id)
-    assert still_blocked is not None
-    assert still_blocked.status is EvidenceTaskStatus.BLOCKED
+    resumed_blocked = repository.get_task(blocked.task_id)
+    assert resumed_blocked is not None
+    assert resumed_blocked.status is EvidenceTaskStatus.PLANNED

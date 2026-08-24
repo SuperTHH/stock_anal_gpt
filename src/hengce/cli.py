@@ -127,9 +127,7 @@ def parse_decimal_option(
         parsed = Decimal(value)
     except InvalidOperation as error:
         raise typer.BadParameter(f"{option_name} must be a decimal") from error
-    if not parsed.is_finite() or parsed < minimum or (
-        maximum is not None and parsed > maximum
-    ):
+    if not parsed.is_finite() or parsed < minimum or (maximum is not None and parsed > maximum):
         raise typer.BadParameter(f"{option_name} is out of range")
     return parsed
 
@@ -320,11 +318,15 @@ def ingest_market(
 @app.command("ingest-exchange-dividends")
 def ingest_exchange_dividends(
     market_date: Annotated[str, typer.Option()],
+    exchange: Annotated[str, typer.Option()] = "all",
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
     policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Collect implemented cash dividends from official SSE/SZSE public tables."""
     parsed_market_date = parse_trade_date(market_date)
+    normalized_exchange = exchange.strip().lower()
+    if normalized_exchange not in {"all", "sse", "szse"}:
+        raise typer.BadParameter("exchange must be all, sse, or szse")
     settings = Settings.model_construct(
         data_dir=data_dir,
         tushare_token=None,
@@ -337,36 +339,45 @@ def ingest_exchange_dividends(
     def clock() -> datetime:
         return datetime.now(ZoneInfo(settings.timezone))
 
+    warehouse = ImplementedDividendWarehouse(settings.data_dir / "normalized")
+    existing = warehouse.read_records(parsed_market_date)
     with httpx.Client(follow_redirects=True) as client:
-        sse = SseImplementedDividendCollector(
-            client=client,
-            guard=guard,
-            raw_store=raw_store,
-            clock=clock,
-        ).fetch(parsed_market_date)
-        szse = SzseImplementedDividendCollector(
-            client=client,
-            guard=guard,
-            raw_store=raw_store,
-            clock=clock,
-        ).fetch(parsed_market_date)
+        sse = (
+            SseImplementedDividendCollector(
+                client=client,
+                guard=guard,
+                raw_store=raw_store,
+                clock=clock,
+            ).fetch(parsed_market_date)
+            if normalized_exchange in {"all", "sse"}
+            else [item for item in existing if item.source_id == "sse"]
+        )
+        szse = (
+            SzseImplementedDividendCollector(
+                client=client,
+                guard=guard,
+                raw_store=raw_store,
+                clock=clock,
+            ).fetch(parsed_market_date)
+            if normalized_exchange in {"all", "szse"}
+            else [item for item in existing if item.source_id == "szse"]
+        )
     records = sse + szse
-    path = ImplementedDividendWarehouse(settings.data_dir / "normalized").write_records(
-        parsed_market_date,
-        records,
+    path = warehouse.replace_records(parsed_market_date, records)
+    typer.echo(
+        json.dumps(
+            {
+                "market_date": parsed_market_date.isoformat(),
+                "record_count": len(records),
+                "security_count": len({item.ts_code for item in records}),
+                "sse_record_count": len(sse),
+                "szse_record_count": len(szse),
+                "artifact_path": str(path),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     )
-    typer.echo(json.dumps(
-        {
-            "market_date": parsed_market_date.isoformat(),
-            "record_count": len(records),
-            "security_count": len({item.ts_code for item in records}),
-            "sse_record_count": len(sse),
-            "szse_record_count": len(szse),
-            "artifact_path": str(path),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    ))
 
 
 @app.command("build-full-market-research")
@@ -403,26 +414,27 @@ def build_full_market_research(
             maximum=Decimal(1),
         ),
     )
-    typer.echo(json.dumps(
-        {
-            "snapshot_id": snapshot.snapshot_id,
-            "market_date": snapshot.market_date.isoformat(),
-            "market_universe_count": snapshot.market_universe_count,
-            "low_cost_eligible_count": snapshot.low_cost_eligible_count,
-            "funnel_count": snapshot.funnel_count,
-            "high_dividend_funnel_count": snapshot.high_dividend_funnel_count,
-            "depth_ready_count": snapshot.depth_ready_count,
-            "evidence_completed_count": snapshot.evidence_completed_count,
-            "evidence_item_count": snapshot.evidence_item_count,
-            "pool_statuses": {
-                strategy.value: pool.status.value
-                for strategy, pool in snapshot.pools.items()
+    typer.echo(
+        json.dumps(
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "market_date": snapshot.market_date.isoformat(),
+                "market_universe_count": snapshot.market_universe_count,
+                "low_cost_eligible_count": snapshot.low_cost_eligible_count,
+                "funnel_count": snapshot.funnel_count,
+                "high_dividend_funnel_count": snapshot.high_dividend_funnel_count,
+                "depth_ready_count": snapshot.depth_ready_count,
+                "evidence_completed_count": snapshot.evidence_completed_count,
+                "evidence_item_count": snapshot.evidence_item_count,
+                "pool_statuses": {
+                    strategy.value: pool.status.value for strategy, pool in snapshot.pools.items()
+                },
+                "manifest_hash": snapshot.manifest_hash,
             },
-            "manifest_hash": snapshot.manifest_hash,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    ))
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("plan-full-market-evidence")
@@ -439,9 +451,7 @@ def plan_full_market_evidence(
         timezone="Asia/Shanghai",
     )
     state = bootstrap_state(settings)
-    snapshot = FullMarketResearchWarehouse(data_dir / "normalized").read(
-        parsed_market_date
-    )
+    snapshot = FullMarketResearchWarehouse(data_dir / "normalized").read(parsed_market_date)
     if snapshot is None:
         raise typer.BadParameter("full-market research snapshot is missing")
     planner = FullMarketEvidencePlanner(
@@ -449,23 +459,25 @@ def plan_full_market_evidence(
         clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
     )
     runs = (planner.plan(snapshot, cohort),) if cohort is not None else planner.plan_all(snapshot)
-    typer.echo(json.dumps(
-        {
-            "market_date": parsed_market_date.isoformat(),
-            "snapshot_id": snapshot.snapshot_id,
-            "runs": [
-                {
-                    "run_id": run.run_id,
-                    "cohort": run.cohort.value,
-                    "member_count": len(run.member_codes),
-                    "task_count": run.task_count,
-                }
-                for run in runs
-            ],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    ))
+    typer.echo(
+        json.dumps(
+            {
+                "market_date": parsed_market_date.isoformat(),
+                "snapshot_id": snapshot.snapshot_id,
+                "runs": [
+                    {
+                        "run_id": run.run_id,
+                        "cohort": run.cohort.value,
+                        "member_count": len(run.member_codes),
+                        "task_count": run.task_count,
+                    }
+                    for run in runs
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("run-full-market-evidence")
@@ -503,8 +515,10 @@ def run_full_market_evidence(
         raise typer.BadParameter("evidence run is missing")
     guard = PolicyGuard(state)
     raw_store = RawObjectStore(data_dir / "raw")
+
     def clock() -> datetime:
         return datetime.now(ZoneInfo(settings.timezone))
+
     with httpx.Client() as client:
         collector = CninfoPeriodicReportCollector(
             client=client,
@@ -823,9 +837,7 @@ def rebuild_pilot_report(
         else parsed_cutoff
     )
     if acquisition_mode not in {"manual-only", "approved-public"}:
-        raise typer.BadParameter(
-            "acquisition-mode must be manual-only or approved-public"
-        )
+        raise typer.BadParameter("acquisition-mode must be manual-only or approved-public")
     settings = Settings.model_construct(
         data_dir=data_dir,
         tushare_token=None,

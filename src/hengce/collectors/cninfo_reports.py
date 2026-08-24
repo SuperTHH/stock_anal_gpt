@@ -98,12 +98,17 @@ class CninfoPeriodicReportCollector:
         fiscal_year: int,
     ) -> tuple[CninfoReport, ...]:
         """Discover official implementation notices for one dividend fiscal year."""
+        annual_report_markers = (
+            f"{fiscal_year}年年度报告",
+            f"{fiscal_year}年度报告",
+        )
         organizations = self._organization_map()
         symbol = ts_code[:6]
         org_id = organizations.get(symbol)
         if org_id is None:
             raise ValueError("CNINFO_ORGANIZATION_NOT_FOUND")
         exchange = "szse" if ts_code.endswith(".SZ") else "sse"
+
         def query(
             searchkey: str,
             *,
@@ -113,9 +118,7 @@ class CninfoPeriodicReportCollector:
             page_num = 1
             last_page = 20
             while page_num <= last_page:
-                self.guard.authorize(
-                    "cninfo", _QUERY_URL, "filing", "cninfo.dividend_query"
-                )
+                self.guard.authorize("cninfo", _QUERY_URL, "filing", "cninfo.dividend_query")
                 response = self.client.post(
                     _QUERY_URL,
                     data={
@@ -126,8 +129,7 @@ class CninfoPeriodicReportCollector:
                         "plate": "sz" if exchange == "szse" else "sh",
                         "stock": f"{symbol},{org_id}",
                         "category": "",
-                        "seDate": se_date
-                        or f"{fiscal_year + 1}-01-01~{fiscal_year + 2}-12-31",
+                        "seDate": se_date or f"{fiscal_year + 1}-01-01~{fiscal_year + 2}-12-31",
                         "searchkey": searchkey,
                     },
                     headers={"Referer": "https://www.cninfo.com.cn/"},
@@ -147,8 +149,9 @@ class CninfoPeriodicReportCollector:
                 if not searchkey and any(
                     (
                         "利润分配预案" in str(item.get("announcementTitle") or "")
-                        or str(item.get("announcementTitle") or "").startswith(
-                            f"{fiscal_year}年年度报告"
+                        or any(
+                            marker in str(item.get("announcementTitle") or "")
+                            for marker in annual_report_markers
                         )
                     )
                     for item in page_announcements
@@ -197,7 +200,7 @@ class CninfoPeriodicReportCollector:
                     year_marker not in title
                     or (
                         "利润分配预案" not in title
-                        and not title.startswith(f"{fiscal_year}年年度报告")
+                        and not any(marker in title for marker in annual_report_markers)
                     )
                     or "取消" in title
                 ):
@@ -209,8 +212,7 @@ class CninfoPeriodicReportCollector:
                         title=title,
                         published_at=datetime.fromtimestamp(timestamp, tz=_SHANGHAI),
                         attachment_url=(
-                            "https://static.cninfo.com.cn/"
-                            + str(item["adjunctUrl"]).lstrip("/")
+                            "https://static.cninfo.com.cn/" + str(item["adjunctUrl"]).lstrip("/")
                         ),
                         announcement_id=str(item["announcementId"]),
                     )
