@@ -26,7 +26,7 @@ _NOTE_REFERENCE = (
     rf"(?:[（(]\d+[）)])?[A-Za-z]?|"
     rf"{_CHINESE_NUMERAL}、\s*[（(]{_CHINESE_NUMERAL}[）)]|"
     rf"{_CHINESE_NUMERAL}[（(]{_CHINESE_NUMERAL}[）)]\d+|"
-    rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+|[A-Za-z])[）)])+|"
+    rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+(?:\.\d+)?|[A-Za-z])[）)])+|"
     r"\d{1,3}[（(]\d+[）)])"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
@@ -178,6 +178,9 @@ _ALIASES = {
     "归属于母公司股东的扣除非经常性损益后的净利润": "adjusted_net_profit",
     "归属于母公司股东扣除非经常性损益后的净利润": "adjusted_net_profit",
     "归属于母公司股东的扣除非经常性损益的净利润": "adjusted_net_profit",
+    "归属于母公司股东扣除非经常性损益的净利润": "adjusted_net_profit",
+    "归属于本行股东的扣除非经常性损益的净利润": "adjusted_net_profit",
+    "归属于上市公司股东的扣除非经常性损益的净利": "adjusted_net_profit",
     "利息费用": "interest_expense",
     "利息支出": "interest_expense",
     "经营活动产生的现金流量净额": "operating_cash_flow",
@@ -207,6 +210,7 @@ _ALIASES = {
     "投资活动产生（使用）的现金流量净额": "investing_cash_flow",
     "投资活动产生(使用)的现金流量净额": "investing_cash_flow",
     "投资活动使用的现金流量净额": "investing_cash_flow",
+    "投资活动所用的现金流量净额": "investing_cash_flow",
     "投资活动产生/(所用)的现金流量净额": "investing_cash_flow",
     "投资活动产生/（所用）的现金流量净额": "investing_cash_flow",
     "投资活动（使用）/产生的现金流量净额": "investing_cash_flow",
@@ -228,6 +232,8 @@ _ALIASES = {
     "汇率变动对现金流量净额": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
     "现金及现金等价物净减少额": "net_cash_change",
+    "现金及现金等价物净增加": "net_cash_change",
+    "现金及现金等价物净减少": "net_cash_change",
     "现金及现金等价物净增加/(减少)": "net_cash_change",
     "现金及现金等价物净增加/（减少）": "net_cash_change",
     "现金及现金等价物净增加/(减少)额": "net_cash_change",
@@ -260,19 +266,20 @@ _CASH_FLOW_RECONCILIATION = (
     "cash_exchange_effect",
     "net_cash_change",
 )
+_NEGATIVE_VALUE_SENTINEL = "<<NEGATIVE_VALUE>>"
 _BANK_REQUIRED_FACTS = frozenset(
     {
         "revenue",
         "net_profit",
         "adjusted_net_profit",
         "operating_cash_flow",
-        "capital_expenditure",
         "total_assets",
         "total_liabilities",
         "equity",
         "total_shares",
     }
 )
+_Q1_REQUIRED_FACTS = CANONICAL_PILOT_FACTS - {"interest_expense"}
 _FLATTENED_FACTS_BY_STATEMENT = {
     StatementType.BALANCE_SHEET: frozenset(
         {
@@ -380,11 +387,63 @@ class CninfoPdfExtractor:
             ]
         except Exception as error:
             raise ValueError("CNINFO_PDF_PARSE_FAILED") from error
-        return self._parse_pages(
+        primary = self._parse_pages(
             pages,
             descriptor=descriptor,
             pdf_content_hash=pdf_content_hash,
         )
+        if (
+            primary.quality_status is QualityStatus.VALID
+            or "PDF_CASH_FLOW_EQUATION_FAILED" not in primary.issues
+        ):
+            return primary
+        cash_markers = (
+            "现金流量表",
+            *(
+                alias
+                for alias, canonical_name in _ALIASES.items()
+                if canonical_name in _CASH_FLOW_RECONCILIATION
+            ),
+        )
+        layout_indexes: set[int] = set()
+        for index, (_page_number, text) in enumerate(pages):
+            normalized_text = re.sub(r"\s+", "", text or "")
+            if any(marker in normalized_text for marker in cash_markers):
+                layout_indexes.update(
+                    candidate_index
+                    for candidate_index in (index - 1, index, index + 1)
+                    if 0 <= candidate_index < len(pages)
+                )
+        if not layout_indexes:
+            return primary
+        try:
+            layout_pages = list(pages)
+            for index in sorted(layout_indexes):
+                page = reader.pages[index]
+                layout_pages[index] = (
+                    _physical_page_number(page, index + 1),
+                    page.extract_text(extraction_mode="layout"),
+                )
+        except (AttributeError, TypeError, ValueError):
+            return primary
+        if layout_pages == pages:
+            return primary
+        layout = self._parse_pages(
+            layout_pages,
+            descriptor=descriptor,
+            pdf_content_hash=pdf_content_hash,
+        )
+        primary_score = (
+            primary.quality_status is QualityStatus.VALID,
+            -len(primary.issues),
+            len(primary.facts),
+        )
+        layout_score = (
+            layout.quality_status is QualityStatus.VALID,
+            -len(layout.issues),
+            len(layout.facts),
+        )
+        return layout if layout_score > primary_score else primary
 
     def _parse_pages(
         self,
@@ -396,7 +455,8 @@ class CninfoPdfExtractor:
         issues: set[str] = set()
         visible_text = [text for _page_number, text in pages if text and text.strip()]
         if not visible_text:
-            return self._result((), {"PDF_LAYOUT_UNSUPPORTED"}, pdf_content_hash)
+            return self._result((), {"PDF_IMAGE_ONLY"}, pdf_content_hash)
+        image_only_statement_block = _has_image_only_statement_block(pages)
         joined = "\n".join(visible_text)
         exchange_suffix = descriptor.ts_code.rpartition(".")[2]
         cover_labeled_codes = _a_share_labeled_codes(visible_text[0], exchange_suffix)
@@ -442,6 +502,8 @@ class CninfoPdfExtractor:
 
         candidates: list[PdfFactCandidate] = []
         candidates.extend(_cross_page_split_fact_candidates(pages))
+        if descriptor.report_type is ReportType.ANNUAL:
+            candidates.extend(_finance_note_interest_expense_candidates(pages))
         fact_names_without_supported_unit: set[str] = set()
         statement_type: StatementType | None = None
         statement_title: str | None = None
@@ -455,7 +517,7 @@ class CninfoPdfExtractor:
         noncurrent_liability_section_markers: list[tuple[int, str]] = []
         seen_debt_component_labels: set[str] = set()
         cash_flow_component_markers: dict[str, tuple[int, str]] = {}
-        single_value_cash_exchange_hashes: set[str] = set()
+        single_value_cash_component_hashes: set[str] = set()
         flattened_state: _FlattenedStatementState | None = None
         flattened_complete = False
         formal_statements_complete = False
@@ -465,6 +527,27 @@ class CninfoPdfExtractor:
             if not text:
                 continue
             raw_lines = text.splitlines()
+            split_value_statement = next(
+                (
+                    title
+                    for raw_line in raw_lines
+                    if (title := _formal_statement_title(_normalized_heading(raw_line)))
+                    is not None
+                    and title[0]
+                    in {*_CONSOLIDATED_STATEMENT_TITLES, *_COMBINED_STATEMENT_TITLES}
+                ),
+                None,
+            )
+            split_value_unit = _page_unit(raw_lines)
+            if split_value_statement is not None and split_value_unit is not None:
+                candidates.extend(
+                    _split_decimal_value_candidates(
+                        raw_lines,
+                        page_number=page_number,
+                        statement_type=split_value_statement[1],
+                        unit=split_value_unit,
+                    )
+                )
             (
                 flattened_candidates,
                 flattened_state,
@@ -638,10 +721,17 @@ class CninfoPdfExtractor:
                     else:
                         statement_title = title[0]
                         statement_type = title[1]
-                        formal_cash_flow_started = (
-                            formal_cash_flow_started
-                            or statement_type is StatementType.CASH_FLOW
-                        )
+                        if title[0] not in {
+                            "主要财务数据",
+                            "主要会计数据",
+                            "主要会计数据和财务指标",
+                            "主要会计数据及财务指标",
+                        }:
+                            formal_statements_started = True
+                            formal_cash_flow_started = (
+                                formal_cash_flow_started
+                                or statement_type is StatementType.CASH_FLOW
+                            )
                         pending_statement = None
                         pending_statement_lines = 0
                         pending_statement_unit = None
@@ -736,13 +826,29 @@ class CninfoPdfExtractor:
                     pending_label = ""
                     continue
                 unit_match = _UNIT.search(line)
-                if unit_match is not None:
-                    unit = _UNIT_DEFINITIONS[unit_match.group(1)]
+                bare_unit_match = (
+                    _BARE_CNY_UNIT.search(line)
+                    if unit_match is None and formal_statements_started
+                    else None
+                )
+                if unit_match is not None or bare_unit_match is not None:
+                    unit_name = (
+                        unit_match.group(1)
+                        if unit_match is not None
+                        else bare_unit_match.group(1)
+                    )
+                    unit = _UNIT_DEFINITIONS[unit_name]
                     if formal_statements_started:
                         last_formal_unit = unit
                     if not pending_label or re.search(
                         _ACCOUNTING_NUMBER,
-                        line[unit_match.end() :],
+                        line[
+                            (
+                                unit_match.end()
+                                if unit_match is not None
+                                else bare_unit_match.end()
+                            ) :
+                        ],
                     ) is None:
                         pending_label = ""
                         continue
@@ -822,6 +928,12 @@ class CninfoPdfExtractor:
                     pending_label = ""
                     continue
 
+                negative_value_pending = pending_label.endswith(
+                    _NEGATIVE_VALUE_SENTINEL
+                )
+                effective_pending_label = pending_label.removesuffix(
+                    _NEGATIVE_VALUE_SENTINEL
+                )
                 fact_source_line = line
                 parsed_line = (
                     _parse_combined_bank_group_fact(line)
@@ -829,7 +941,11 @@ class CninfoPdfExtractor:
                     else None
                 )
                 if pending_label:
-                    fact_source_line = f"{pending_label} {line}"
+                    fact_source_line = (
+                        f"{effective_pending_label} -{line.lstrip()}"
+                        if negative_value_pending
+                        else f"{effective_pending_label} {line}"
+                    )
                     parsed_line = (
                         _parse_combined_bank_group_fact(fact_source_line)
                         if statement_title in _COMBINED_STATEMENT_TITLES
@@ -877,6 +993,31 @@ class CninfoPdfExtractor:
                         pending_label = ""
                         continue
                 if parsed_line is None:
+                    if (
+                        pending_label
+                        and not negative_value_pending
+                        and line in {"-", "−", "–", "—"}
+                        and _ALIASES.get(_normalize_label(pending_label))
+                        in _CASH_FLOW_RECONCILIATION
+                    ):
+                        pending_label = f"{pending_label}{_NEGATIVE_VALUE_SENTINEL}"
+                        continue
+                    trailing_negative = re.fullmatch(
+                        r"(?P<label>.+?)\s+[-−–—]",
+                        line,
+                    )
+                    if (
+                        trailing_negative is not None
+                        and _ALIASES.get(
+                            _normalize_label(trailing_negative.group("label"))
+                        )
+                        in _CASH_FLOW_RECONCILIATION
+                    ):
+                        pending_label = (
+                            f"{trailing_negative.group('label')}"
+                            f"{_NEGATIVE_VALUE_SENTINEL}"
+                        )
+                        continue
                     combined = _normalize_label(f"{pending_label}{line}")
                     combined_blank_cash = _blank_cash_flow_component(combined)
                     if (
@@ -971,10 +1112,11 @@ class CninfoPdfExtractor:
                     )
                 candidates.append(candidate)
                 if (
-                    canonical_name == "cash_exchange_effect"
+                    canonical_name in _CASH_FLOW_RECONCILIATION
+                    and canonical_name != "net_cash_change"
                     and len(re.findall(_ACCOUNTING_NUMBER, fact_source_line)) == 1
                 ):
-                    single_value_cash_exchange_hashes.add(candidate.source_text_hash)
+                    single_value_cash_component_hashes.add(candidate.source_text_hash)
                 if annual_summary_spillover and canonical_name == "adjusted_net_profit":
                     annual_summary_spillover = False
         facts: dict[str, Decimal] = {}
@@ -997,6 +1139,7 @@ class CninfoPdfExtractor:
             if name in {
                 "interest_expense",
                 "net_profit",
+                "capital_expenditure",
                 *_CASH_FLOW_RECONCILIATION,
             }:
                 earliest_page = min(candidate.page_number for candidate in name_candidates)
@@ -1149,48 +1292,47 @@ class CninfoPdfExtractor:
                 )
 
         if set(_CASH_FLOW_RECONCILIATION).issubset(facts):
-            cash_exchange_candidates = grouped.get("cash_exchange_effect", [])
-            selected_cash_exchange = next(
-                (
-                    candidate
-                    for candidate in cash_exchange_candidates
-                    if candidate.value == facts["cash_exchange_effect"]
-                    and candidate.source_text_hash in single_value_cash_exchange_hashes
-                ),
-                None,
-            )
-            flows_without_exchange = sum(
-                (
-                    facts["operating_cash_flow"],
-                    facts["investing_cash_flow"],
-                    facts["financing_cash_flow"],
-                ),
-                Decimal(0),
-            )
-            if (
-                selected_cash_exchange is not None
-                and facts["cash_exchange_effect"] != 0
-                and _cash_flow_values_reconcile(
-                    flows_without_exchange,
-                    facts["net_cash_change"],
+            flow_components = _CASH_FLOW_RECONCILIATION[:-1]
+            calculated = sum((facts[name] for name in flow_components), Decimal(0))
+            comparative_only = []
+            for name in flow_components:
+                selected = next(
+                    (
+                        candidate
+                        for candidate in grouped.get(name, [])
+                        if candidate.value == facts[name]
+                        and candidate.source_text_hash
+                        in single_value_cash_component_hashes
+                    ),
+                    None,
                 )
-            ):
+                if (
+                    selected is not None
+                    and facts[name] != 0
+                    and _cash_flow_values_reconcile(
+                        calculated - facts[name],
+                        facts["net_cash_change"],
+                    )
+                ):
+                    comparative_only.append((name, selected))
+            if len(comparative_only) == 1:
+                name, selected = comparative_only[0]
                 zero_candidate = PdfFactCandidate(
-                    canonical_fact_name="cash_exchange_effect",
+                    canonical_fact_name=name,
                     value=Decimal(0),
-                    unit_multiplier=selected_cash_exchange.unit_multiplier,
+                    unit_multiplier=selected.unit_multiplier,
                     currency="CNY",
-                    page_number=selected_cash_exchange.page_number,
+                    page_number=selected.page_number,
                     statement_type=StatementType.CASH_FLOW,
-                    source_text_hash=selected_cash_exchange.source_text_hash,
-                    source_priority=selected_cash_exchange.source_priority + 1,
+                    source_text_hash=selected.source_text_hash,
+                    source_priority=selected.source_priority + 1,
                 )
                 candidates.append(zero_candidate)
-                grouped["cash_exchange_effect"] = [zero_candidate]
-                facts["cash_exchange_effect"] = Decimal(0)
+                grouped[name] = [zero_candidate]
+                facts[name] = Decimal(0)
                 derivations.append(
                     (
-                        "cash_exchange_effect",
+                        name,
                         ("comparative_only_value", "cash_flow_equation"),
                     )
                 )
@@ -1200,12 +1342,18 @@ class CninfoPdfExtractor:
         required_facts = (
             _BANK_REQUIRED_FACTS
             if _is_financial_institution_report(joined)
-            else CANONICAL_PILOT_FACTS
+            else (
+                _Q1_REQUIRED_FACTS
+                if descriptor.report_type is ReportType.Q1
+                else CANONICAL_PILOT_FACTS
+            )
         )
         if not required_facts.issubset(facts):
             issues.add("PDF_REQUIRED_FACTS_MISSING")
         self._validate_balance(facts, issues)
         self._validate_cash_flow(facts, issues)
+        if image_only_statement_block and not required_facts.issubset(facts):
+            issues = {"PDF_IMAGE_ONLY"}
         return self._result(
             tuple(candidates),
             issues,
@@ -1380,14 +1528,30 @@ def _parse_combined_bank_group_fact(line: str) -> tuple[str, Decimal] | None:
     if len(value_matches) < 4:
         return None
     label = _normalize_label(line[: value_matches[0].start()])
+    note_prefix_stripped = False
     canonical_name = _canonical_name(label)
+    if canonical_name is None:
+        stripped_label = re.sub(
+            rf"{_CHINESE_NUMERAL}(?:、|[-－—]|[（(])?$",
+            "",
+            label,
+        )
+        note_prefix_stripped = stripped_label != label
+        label = stripped_label
+        canonical_name = _canonical_name(label)
     if canonical_name is None:
         return None
     value_index = (
         1
         if len(value_matches) >= 5
-        and re.fullmatch(r"\d{1,3}(?:\.\d+)?", value_matches[0].group(0).strip())
-        is not None
+        and (
+            note_prefix_stripped
+            or re.fullmatch(
+                r"\d{1,3}(?:\.\d+)?",
+                value_matches[0].group(0).strip(),
+            )
+            is not None
+        )
         else 0
     )
     value = _accounting_decimal(value_matches[value_index].group(0))
@@ -1508,7 +1672,25 @@ def _flattened_summary_candidates(
     if not raw_lines:
         return []
     text = re.sub(r"\s+", " ", " ".join(raw_lines)).strip()
-    has_summary_heading = "主要会计数据" in text or "主要财务数据" in text
+    change_reason_boundaries = (
+        "主要会计数据、财务指标发生变动的情况、原因",
+        "主要会计数据、财务指标发生变动的情况及原因",
+    )
+    boundary_indexes = [
+        index
+        for boundary in change_reason_boundaries
+        if (index := text.find(boundary)) >= 0
+    ]
+    if boundary_indexes:
+        text = text[: min(boundary_indexes)]
+    summary_heading_indexes = [
+        index
+        for heading in ("主要会计数据", "主要财务数据")
+        if (index := text.find(heading)) >= 0
+    ]
+    has_summary_heading = bool(summary_heading_indexes)
+    if summary_heading_indexes:
+        text = text[min(summary_heading_indexes) :]
     aliases = tuple(
         alias
         for alias, canonical_name in _ALIASES.items()
@@ -1547,6 +1729,107 @@ def _flattened_summary_candidates(
             )
         ]
     return []
+
+
+def _finance_note_interest_expense_candidates(
+    pages: list[tuple[int, str | None]],
+) -> list[PdfFactCandidate]:
+    """Recover annual interest expense from the audited finance-cost note."""
+    labels = (
+        "贷款及应付款项的利息支出",
+        "贷款及应付款项利息支出",
+    )
+    active_unit: tuple[str, Decimal] | None = None
+    for page_number, text in pages:
+        if not text:
+            continue
+        raw_lines = text.splitlines()
+        active_unit = _page_unit(raw_lines) or active_unit
+        normalized_page = "".join(_normalized_heading(line) for line in raw_lines)
+        if (
+            active_unit is None
+            or active_unit[0] != "CNY"
+            or "财务费用" not in normalized_page
+        ):
+            continue
+        for raw_line in raw_lines:
+            normalized_line = _normalize_label(raw_line)
+            label = next(
+                (candidate for candidate in labels if normalized_line.startswith(candidate)),
+                None,
+            )
+            if label is None:
+                continue
+            match = _flattened_alias_match(raw_line, label)
+            if match is None:
+                continue
+            value = _accounting_decimal(match.group("value"))
+            if value is None:
+                continue
+            currency, multiplier = active_unit
+            return [
+                PdfFactCandidate(
+                    canonical_fact_name="interest_expense",
+                    value=abs(value) * multiplier,
+                    unit_multiplier=multiplier,
+                    currency=currency,
+                    page_number=page_number,
+                    statement_type=StatementType.INCOME_STATEMENT,
+                    source_text_hash=hashlib.sha256(
+                        raw_line.strip().encode("utf-8")
+                    ).hexdigest(),
+                    source_priority=-20,
+                )
+            ]
+    return []
+
+
+def _split_decimal_value_candidates(
+    raw_lines: list[str],
+    *,
+    page_number: int,
+    statement_type: StatementType,
+    unit: tuple[str, Decimal],
+) -> list[PdfFactCandidate]:
+    """Rejoin a current-period decimal split onto the following PDF text line."""
+    currency, multiplier = unit
+    if currency != "CNY":
+        return []
+    candidates: list[PdfFactCandidate] = []
+    for index, raw_line in enumerate(raw_lines[:-1]):
+        match = re.fullmatch(
+            rf"(?P<prefix>.+?\s)(?P<whole>{_GROUPED_INTEGER})\.",
+            raw_line.strip(),
+        )
+        decimal_match = re.fullmatch(r"(?P<decimal>\d{1,4})", raw_lines[index + 1].strip())
+        if match is None or decimal_match is None:
+            continue
+        reconstructed = (
+            f"{match.group('prefix')}{match.group('whole')}."
+            f"{decimal_match.group('decimal')}"
+        )
+        parsed = _parse_fact_line(reconstructed)
+        if parsed is None:
+            continue
+        canonical_name, value = parsed
+        if canonical_name not in _FLATTENED_FACTS_BY_STATEMENT[statement_type]:
+            continue
+        candidates.append(
+            PdfFactCandidate(
+                canonical_fact_name=canonical_name,
+                value=(abs(value) if canonical_name == "capital_expenditure" else value)
+                * multiplier,
+                unit_multiplier=multiplier,
+                currency="SHARES" if canonical_name == "total_shares" else currency,
+                page_number=page_number,
+                statement_type=statement_type,
+                source_text_hash=hashlib.sha256(
+                    "\n".join(raw_lines[index : index + 2]).encode("utf-8")
+                ).hexdigest(),
+                source_priority=35,
+            )
+        )
+    return candidates
 
 
 def _cross_page_split_fact_candidates(
@@ -1786,6 +2069,36 @@ def _normalize_label(label: str) -> str:
     return normalized
 
 
+def _has_image_only_statement_block(
+    pages: list[tuple[int, str | None]],
+) -> bool:
+    """Detect image-only statements between a text audit report and its notes."""
+    run_start: int | None = None
+    for index in range(len(pages) + 1):
+        text = pages[index][1] if index < len(pages) else "end"
+        if index < len(pages) and not (text or "").strip():
+            if run_start is None:
+                run_start = index
+            continue
+        if run_start is None:
+            continue
+        run_length = index - run_start
+        before = "\n".join(
+            page_text or "" for _page_number, page_text in pages[max(0, run_start - 3) : run_start]
+        )
+        after = "\n".join(
+            page_text or "" for _page_number, page_text in pages[index : index + 3]
+        )
+        if (
+            run_length >= 4
+            and "审计报告" in before
+            and "财务报表附注" in re.sub(r"\s+", "", after)
+        ):
+            return True
+        run_start = None
+    return False
+
+
 def _formal_fact_priority(
     canonical_name: str,
     source_line: str,
@@ -1855,7 +2168,7 @@ def _statement_heading_matches(normalized_heading: str, title: str) -> bool:
     suffix = normalized_heading[index + len(title):]
     period_prefix = re.compile(
         r"^(?:\d{4}年度|\d{4}年\d{1,2}月\d{1,2}日|"
-        r"\d{4}年\d{1,2}(?:—|－|-)\d{1,2}月)?$"
+        r"\d{4}年\d{1,2}(?:—|–|－|-)\d{1,2}月)?$"
     )
     return (not prefix or period_prefix.fullmatch(prefix) is not None) and (
         not suffix or suffix.startswith(("（", "("))
@@ -2374,7 +2687,7 @@ def _statement_period_heading_matches(
             is not None
         ):
             return True
-    q1_pattern = rf"{period.year}年0?1(?:—|－|-|至)0?{period.month}月"
+    q1_pattern = rf"{period.year}年0?1(?:—|–|－|-|至)0?{period.month}月"
     if descriptor.report_type is ReportType.Q1 and re.search(
         q1_pattern,
         normalized,
@@ -2402,13 +2715,13 @@ def _statement_table_header_matches(
         return (
             re.fullmatch(
                 r"(?:项目|资产|负债和所有者权益)"
-                rf"(?:附注{_CHINESE_NUMERAL})?"
+                rf"(?:附注(?:{_CHINESE_NUMERAL})?)?"
                 r"期末余额(?:期初余额|年初余额|上年年末余额)",
                 normalized,
             )
             is not None
             or re.fullmatch(
-                rf"项目(?:附注{_CHINESE_NUMERAL})?"
+                rf"项目(?:附注(?:{_CHINESE_NUMERAL})?)?"
                 rf"{current_date}{comparative_date}",
                 normalized,
             )
@@ -2418,12 +2731,12 @@ def _statement_table_header_matches(
     if descriptor.report_type is ReportType.ANNUAL:
         return (
             re.fullmatch(
-                rf"项目(?:附注{_CHINESE_NUMERAL})?{year}年度{year - 1}年度",
+                rf"项目(?:附注(?:{_CHINESE_NUMERAL})?)?{year}年度{year - 1}年度",
                 normalized,
             )
             is not None
             or re.fullmatch(
-                rf"项目(?:附注{_CHINESE_NUMERAL})?"
+                rf"项目(?:附注(?:{_CHINESE_NUMERAL})?)?"
                 r"(?:本期金额|本期发生额)(?:上期金额|上期发生额)",
                 normalized,
             )
@@ -2608,9 +2921,12 @@ def _issuer_name_matches(cover_text: str, issuer_name: str | None) -> bool:
 
 def _is_secondary_share_class_code(ts_code: str) -> bool:
     symbol, _, exchange = ts_code.partition(".")
-    return (exchange == "SZ" and symbol.startswith("2")) or (
-        exchange == "SH" and symbol.startswith("9")
-    )
+    common_a_share_prefixes = {
+        "SH": ("600", "601", "603", "605", "688", "689"),
+        "SZ": ("000", "001", "002", "003", "300", "301"),
+    }
+    prefixes = common_a_share_prefixes.get(exchange)
+    return prefixes is not None and not symbol.startswith(prefixes)
 
 
 def _physical_page_number(page: object, enumeration_index: int) -> int:

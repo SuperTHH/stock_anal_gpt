@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from hengce.contracts.enums import PoolReadinessStatus, QualityStatus, StrategyType
 from hengce.contracts.market_research import (
+    DepthExclusion,
     DynamicPoolStatus,
     EvidenceCoverage,
     FullMarketResearchSnapshot,
@@ -134,13 +135,23 @@ class FullMarketResearchService:
             raise ValueError("FULL_MARKET_RESEARCH_MARKET_MISSING")
         bar_by_code = {str(row["ts_code"]): row for row in bars}
         yields = self._dividend_yields(market_date, bar_by_code)
-        eligible: list[tuple[object, dict[str, object], Decimal | None]] = []
+        low_cost_eligible: list[tuple[object, dict[str, object], Decimal | None]] = []
         for security in universe.securities:
             bar = bar_by_code.get(security.ts_code)
             if not self._low_cost_eligible(security, bar, market_date, config):
                 continue
             assert bar is not None
-            eligible.append((security, bar, yields.get(security.ts_code)))
+            low_cost_eligible.append((security, bar, yields.get(security.ts_code)))
+
+        depth_exclusion_reasons = self._depth_exclusion_reasons(market_date)
+        eligible = [
+            row for row in low_cost_eligible if row[0].ts_code not in depth_exclusion_reasons
+        ]
+        depth_exclusions = tuple(
+            DepthExclusion(ts_code=code, reasons=reasons)
+            for code, reasons in sorted(depth_exclusion_reasons.items())
+            if any(row[0].ts_code == code for row in low_cost_eligible)
+        )
 
         high_dividend = sorted(
             (row for row in eligible if row[2] is not None and row[2] >= high_dividend_yield),
@@ -214,7 +225,10 @@ class FullMarketResearchService:
             "generated_at": generated_at.isoformat(),
             "config": config.model_dump(mode="json"),
             "market_universe_count": len(universe.securities),
-            "low_cost_eligible_count": len(eligible),
+            "low_cost_eligible_count": len(low_cost_eligible),
+            "depth_exclusions": [
+                item.model_dump(mode="json") for item in depth_exclusions
+            ],
             "funnel": [item.model_dump(mode="json") for item in funnel],
             "pools": {
                 strategy.value: pool.model_dump(mode="json")
@@ -236,13 +250,15 @@ class FullMarketResearchService:
             generated_at=generated_at,
             config=config,
             market_universe_count=len(universe.securities),
-            low_cost_eligible_count=len(eligible),
+            low_cost_eligible_count=len(low_cost_eligible),
             funnel_count=len(funnel),
             high_dividend_funnel_count=sum(
                 item.dividend_yield is not None
                 and item.dividend_yield >= high_dividend_yield
                 for item in funnel
             ),
+            depth_excluded_count=len(depth_exclusions),
+            depth_exclusions=depth_exclusions,
             depth_ready_count=complete,
             evidence_item_count=len(funnel) * 12,
             evidence_completed_count=sum(
@@ -257,6 +273,41 @@ class FullMarketResearchService:
         )
         self.snapshots.write(snapshot)
         return snapshot
+
+    def _depth_exclusion_reasons(self, market_date: date) -> dict[str, tuple[str, ...]]:
+        """Return unresolved periodic-report blocks from each latest cohort run."""
+        if not self.state.path.is_file():
+            return {}
+        with sqlite3.connect(self.state.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT task.ts_code, task.evidence_period,
+                       COALESCE(json_extract(task.payload_json, '$.error_code'),
+                                'OFFICIAL_PDF_PARSE_FAILED')
+                FROM full_market_evidence_tasks AS task
+                JOIN full_market_evidence_runs AS run ON run.run_id=task.run_id
+                WHERE run.market_date=?
+                  AND task.evidence_kind='PERIODIC_REPORT'
+                  AND task.status='BLOCKED'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM full_market_evidence_tasks AS satisfied
+                      JOIN full_market_evidence_runs AS satisfied_run
+                        ON satisfied_run.run_id=satisfied.run_id
+                      WHERE satisfied_run.market_date=run.market_date
+                        AND satisfied.ts_code=task.ts_code
+                        AND satisfied.evidence_kind=task.evidence_kind
+                        AND satisfied.evidence_period=task.evidence_period
+                        AND satisfied.status='SATISFIED'
+                  )
+                ORDER BY task.ts_code, task.evidence_period
+                """,
+                (market_date.isoformat(),),
+            ).fetchall()
+        grouped: dict[str, list[str]] = {}
+        for code, period, error_code in rows:
+            grouped.setdefault(str(code), []).append(f"{period}:{error_code}")
+        return {code: tuple(reasons) for code, reasons in grouped.items()}
 
     def _source_records(
         self,

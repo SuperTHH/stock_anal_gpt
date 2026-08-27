@@ -70,6 +70,13 @@ class FunnelSecurity(BaseModel):
     evidence: EvidenceCoverage
 
 
+class DepthExclusion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ts_code: str
+    reasons: tuple[str, ...]
+
+
 class DynamicPoolStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,6 +117,8 @@ class FullMarketResearchSnapshot(BaseModel):
     low_cost_eligible_count: int = Field(ge=0)
     funnel_count: int = Field(ge=0)
     high_dividend_funnel_count: int = Field(ge=0)
+    depth_excluded_count: int = Field(default=0, ge=0)
+    depth_exclusions: tuple[DepthExclusion, ...] = ()
     depth_ready_count: int = Field(ge=0)
     evidence_item_count: int = Field(ge=0)
     evidence_completed_count: int = Field(ge=0)
@@ -131,6 +140,8 @@ class FullMarketResearchSnapshot(BaseModel):
     def validate_snapshot(self) -> FullMarketResearchSnapshot:
         if self.funnel_count != len(self.funnel):
             raise ValueError("funnel count does not reconcile")
+        if self.depth_excluded_count != len(self.depth_exclusions):
+            raise ValueError("depth exclusion count does not reconcile")
         if set(self.pools) != set(StrategyType) or set(self.candidate_pools) != set(
             StrategyType
         ):
@@ -151,6 +162,7 @@ class FullMarketResearchSnapshot(BaseModel):
 
 
 __all__ = [
+    "DepthExclusion",
     "DynamicPoolStatus",
     "EvidenceCoverage",
     "FullMarketResearchSnapshot",

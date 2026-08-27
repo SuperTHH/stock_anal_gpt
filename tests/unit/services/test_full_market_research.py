@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -118,6 +120,61 @@ def test_funnel_prefers_high_dividend_then_liquidity_and_excludes_recent_listing
     assert [item.ts_code for item in snapshot.funnel] == ["600000.SH", "600001.SH"]
     assert snapshot.funnel[0].entry_reasons == ("股息率达到初筛门槛",)
     assert snapshot.high_dividend_funnel_count == 1
+
+
+def test_funnel_replaces_latest_unresolved_periodic_report_blocks(
+    tmp_path: Path,
+) -> None:
+    service = seed(tmp_path)
+    now = NOW.isoformat()
+    with sqlite3.connect(service.state.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO full_market_evidence_runs(
+                run_id, snapshot_id, market_date, cohort, config_hash,
+                payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "blocked-run",
+                "snapshot-before-replacement",
+                MARKET_DATE.isoformat(),
+                "YIELD_GE_5",
+                "f" * 64,
+                "{}",
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO full_market_evidence_tasks(
+                task_id, run_id, ts_code, evidence_kind, evidence_period,
+                status, version, payload_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "blocked-task",
+                "blocked-run",
+                "600000.SH",
+                "PERIODIC_REPORT",
+                "2025-12-31",
+                "BLOCKED",
+                1,
+                json.dumps({"error_code": "PDF_IMAGE_ONLY"}),
+                now,
+            ),
+        )
+
+    snapshot = service.build(MARKET_DATE, target_size=2)
+
+    assert snapshot.low_cost_eligible_count == 3
+    assert [item.ts_code for item in snapshot.funnel] == ["600001.SH", "000001.SZ"]
+    assert snapshot.depth_excluded_count == 1
+    assert snapshot.depth_exclusions[0].ts_code == "600000.SH"
+    assert snapshot.depth_exclusions[0].reasons == (
+        "2025-12-31:PDF_IMAGE_ONLY",
+    )
 
 
 def test_funnel_requires_listing_history_for_the_oldest_dividend_year(
