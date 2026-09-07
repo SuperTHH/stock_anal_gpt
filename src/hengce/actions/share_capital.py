@@ -19,8 +19,8 @@ _ACTION_ORDER = {
     ActionType.SPLIT: 1,
     ActionType.RIGHTS_ISSUE: 2,
     ActionType.BUYBACK_CANCELLATION: 3,
-    ActionType.CASH_DIVIDEND: 4,
 }
+_SHARE_CHANGING_ACTIONS = frozenset(_ACTION_ORDER)
 _USABLE_QUALITY = frozenset({QualityStatus.VALID, QualityStatus.DERIVED})
 
 
@@ -90,7 +90,8 @@ class ShareCapitalResolver:
         relevant = [
             action
             for action in actions
-            if self._is_visible_after_date(
+            if action.action_type in _SHARE_CHANGING_ACTIONS
+            and self._is_visible_after_date(
                 action,
                 baseline_date,
                 as_of,

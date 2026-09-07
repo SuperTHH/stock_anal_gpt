@@ -556,6 +556,7 @@ class FullMarketResearchService:
             dividend_repository=AnnualDividendRepository(self.state.path),
             metric_calculator=PilotMetricCalculator("full-market-financial-metrics-v1"),
             market_warehouse=self.market,
+            implemented_dividend_warehouse=self.dividends,
         )
         metrics = analyzer.calculate(
             universe=dynamic_universe,  # type: ignore[arg-type]

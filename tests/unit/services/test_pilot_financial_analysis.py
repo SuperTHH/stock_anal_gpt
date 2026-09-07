@@ -9,6 +9,7 @@ from hengce.contracts.enums import (
     QualityStatus,
 )
 from hengce.contracts.market import CorporateAction
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.financials.assembler import (
     AssembledFinancialFact,
     FinancialPeriodSnapshot,
@@ -139,3 +140,73 @@ def test_analyzer_prefers_annual_share_baseline_and_applies_later_actions() -> N
         date(2026, 3, 31),
     )
     assert calculator.total_shares == Decimal("200")
+
+
+def test_analyzer_bridges_exchange_implemented_dividends_into_strategy_actions() -> None:
+    series = FinancialSeriesResult(
+        ts_code="600001.SH",
+        periods={},
+        blocked_reasons=(),
+        report_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    class Calculator:
+        dividends: list[CorporateAction] = []
+
+        def calculate(self, **kwargs: object) -> PilotMetricResult:
+            self.dividends = kwargs["dividends"]  # type: ignore[assignment]
+            return PilotMetricResult(
+                metrics={},
+                blocked_reasons=(),
+                report_cutoff_at=CUTOFF,
+                known_at=CUTOFF,
+                tax_rate_proxy=Decimal("0.25"),
+            )
+
+    implemented = ImplementedDividend(
+        record_id="implemented-dividend-1",
+        source_id="sse",
+        source_url="https://www.sse.com.cn/dividend",
+        published_at=None,
+        effective_at=CUTOFF - timedelta(days=30),
+        collected_at=CUTOFF - timedelta(days=20),
+        version="sse-implemented-v1",
+        content_hash="d" * 64,
+        license_policy="personal-non-commercial-research",
+        quality_status=QualityStatus.VALID,
+        valid_from=CUTOFF - timedelta(days=20),
+        ts_code="600001.SH",
+        record_date=(CUTOFF - timedelta(days=31)).date(),
+        ex_date=(CUTOFF - timedelta(days=30)).date(),
+        cash_dividend_per_share=Decimal("0.80"),
+    )
+    calculator = Calculator()
+    analyzer = PilotFinancialAnalyzer(
+        assembler=SimpleNamespace(assemble=lambda **_kwargs: series),
+        action_repository=SimpleNamespace(visible_actions=lambda *_args: ()),
+        implemented_dividend_warehouse=SimpleNamespace(
+            read_records=lambda _date: [implemented]
+        ),
+        metric_calculator=calculator,
+        market_warehouse=SimpleNamespace(
+            read_bars=lambda _date: [
+                SimpleNamespace(ts_code="600001.SH", close=Decimal("10"))
+            ]
+        ),
+    )
+
+    analyzer.calculate(
+        universe=SimpleNamespace(members=[SimpleNamespace(ts_code="600001.SH")]),
+        market_date=date(2026, 7, 22),
+        report_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert len(calculator.dividends) == 1
+    bridged = calculator.dividends[0]
+    assert bridged.record_id == implemented.record_id
+    assert bridged.cash_dividend_per_share == Decimal("0.80")
+    assert bridged.cash_dividend_total is None
+    assert bridged.fiscal_year == implemented.ex_date.year - 1
+    assert bridged.published_at == implemented.effective_at

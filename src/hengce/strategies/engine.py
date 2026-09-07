@@ -112,8 +112,12 @@ class StrategyEngine:
             raise ValueError("STRATEGY_CUTOFF_INVALID")
         if known_at.tzinfo is None or known_at.utcoffset() is None:
             raise ValueError("STRATEGY_KNOWN_AT_INVALID")
-        excluded = [item for item in inputs if self._excluded(item)]
-        remaining = [item for item in inputs if not self._excluded(item)]
+        excluded = [
+            item
+            for item in inputs
+            if self._excluded(item) or self._below_candidate_minimum(item)
+        ]
+        remaining = [item for item in inputs if item not in excluded]
         insufficient = [
             item
             for item in remaining
@@ -159,13 +163,6 @@ class StrategyEngine:
                 and not item.cycle_position_available
             ):
                 status = CandidateStatus.WATCH
-            if any(
-                (factor := item.factors.get(name)) is None
-                or factor.value is None
-                or factor.value < minimum
-                for name, minimum in self.definition.minimum_candidate_values
-            ):
-                status = CandidateStatus.WATCH
             candidates.append(
                 StrategyCandidate(
                     report_date=report_date,
@@ -209,6 +206,14 @@ class StrategyEngine:
         ):
             return True
         return False
+
+    def _below_candidate_minimum(self, item: SecurityStrategyInput) -> bool:
+        return any(
+            (factor := item.factors.get(name)) is None
+            or factor.value is None
+            or factor.value < minimum
+            for name, minimum in self.definition.minimum_candidate_values
+        )
 
     def _critical_data_insufficient(
         self,

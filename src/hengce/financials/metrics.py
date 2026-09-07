@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from hengce.actions.share_capital import ShareCapitalResult
@@ -703,6 +703,35 @@ class PilotMetricCalculator:
             report_cutoff_at,
             known_at,
         )
+        ttm_start = report_cutoff_at.date() - timedelta(days=365)
+        implemented_ttm = tuple(
+            action
+            for action in visible_dividends
+            if action.action_status is ActionStatus.IMPLEMENTED
+            and ttm_start < action.ex_date <= report_cutoff_at.date()
+            and action.cash_dividend_per_share is not None
+            and action.cash_dividend_per_share > 0
+        )
+        implemented_ttm_ids = tuple(
+            sorted(action.record_id for action in implemented_ttm)
+        )
+        if not implemented_ttm or closing_price <= 0:
+            metrics["implemented_dividend_yield_ttm"] = missing(
+                implemented_ttm_ids,
+                "INPUT_MISSING",
+            )
+        else:
+            metrics["implemented_dividend_yield_ttm"] = derived(
+                sum(
+                    (
+                        action.cash_dividend_per_share or Decimal(0)
+                        for action in implemented_ttm
+                    ),
+                    Decimal(0),
+                )
+                / closing_price,
+                implemented_ttm_ids,
+            )
         by_year: dict[int, list[CorporateAction]] = {}
         for action in visible_dividends:
             if action.fiscal_year is not None:
@@ -812,7 +841,15 @@ class PilotMetricCalculator:
                 and not action.has_cash_dividend
             ):
                 return Decimal(0)
-            return action.cash_dividend_total
+            if action.cash_dividend_total is not None:
+                return action.cash_dividend_total
+            if (
+                action.cash_dividend_per_share is not None
+                and share_capital.total_shares is not None
+                and not share_capital.blocked_reasons
+            ):
+                return action.cash_dividend_per_share * share_capital.total_shares
+            return None
 
         totals_available = bool(current) and all(
             annual_cash_total(action) is not None for action in current
@@ -828,7 +865,24 @@ class PilotMetricCalculator:
             if totals_available
             else None
         )
-        payout_ids = (*current_ids, *ids(net_profit_2025))
+        total_uses_share_capital = bool(current) and any(
+            action.cash_dividend_total is None
+            and action.cash_dividend_per_share is not None
+            for action in current
+        )
+        share_capital_ids = (
+            (
+                share_capital.baseline_fact_id,
+                *share_capital.action_record_ids,
+            )
+            if total_uses_share_capital
+            and share_capital.total_shares is not None
+            and not share_capital.blocked_reasons
+            else ()
+        )
+        payout_ids = tuple(
+            sorted({*current_ids, *ids(net_profit_2025), *share_capital_ids})
+        )
         if total_dividend is None or net_profit_2025 is None:
             metrics["payout_ratio"] = missing(payout_ids, "INPUT_MISSING")
         elif total_dividend == 0:
@@ -846,7 +900,9 @@ class PilotMetricCalculator:
                 total_dividend / net_profit_2025.value,
                 payout_ids,
             )
-        coverage_ids = (*current_ids, *free_cash_flow.input_fact_ids)
+        coverage_ids = tuple(
+            sorted({*current_ids, *free_cash_flow.input_fact_ids, *share_capital_ids})
+        )
         if total_dividend == 0 and free_cash_flow.value is not None:
             metrics["fcf_coverage"] = derived(
                 Decimal(0),

@@ -216,6 +216,36 @@ def test_negative_pe_and_missing_announced_dividend_are_not_rewarded() -> None:
     assert dividend.announced_dividend_only is False
 
 
+def test_stable_dividend_prefers_implemented_ttm_yield() -> None:
+    snapshot = universe()
+    results = {
+        member.ts_code: pilot_metrics(member.ts_code, index)
+        for index, member in enumerate(snapshot.members, start=1)
+    }
+    target = snapshot.members[0].ts_code
+    results[target].metrics["announced_dividend_yield"] = metric(
+        "announced_dividend_yield", "0.01", target
+    )
+    results[target].metrics["implemented_dividend_yield_ttm"] = metric(
+        "implemented_dividend_yield_ttm", "0.06", target
+    )
+
+    built = PilotStrategyInputBuilder().build(
+        snapshot,
+        results,
+        filters(snapshot),
+        CUTOFF,
+        CUTOFF,
+    )
+
+    dividend = built[StrategyType.STABLE_DIVIDEND][0]
+    assert dividend.factors["dividend_yield"].value == Decimal("0.06")
+    assert dividend.factors["dividend_yield"].source_record_ids == (
+        f"{target}:implemented_dividend_yield_ttm",
+    )
+    assert dividend.announced_dividend_only is True
+
+
 def test_non_positive_earnings_receives_a_lineaged_valuation_penalty() -> None:
     """An observed loss is adverse evidence, not an unknown valuation input."""
     snapshot = universe()

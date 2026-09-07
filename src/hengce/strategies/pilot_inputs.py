@@ -158,9 +158,12 @@ class PilotStrategyInputBuilder:
                 ),
             }
             dividend_factors = {
-                "dividend_yield": self._direct(
+                "dividend_yield": self._preferred_direct(
                     metric_map,
-                    "announced_dividend_yield",
+                    (
+                        "implemented_dividend_yield_ttm",
+                        "announced_dividend_yield",
+                    ),
                 ),
                 "dividend_continuity": self._dividend_continuity(metric_map),
                 "payout_sustainability": self._payout_sustainability(
@@ -350,6 +353,18 @@ class PilotStrategyInputBuilder:
             return self._missing(metric_map, (name,))
         assert metric is not None and metric.value is not None
         return self._factor(metric.value, metric.input_fact_ids)
+
+    def _preferred_direct(
+        self,
+        metric_map: Mapping[str, MetricValue],
+        names: tuple[str, ...],
+    ) -> FactorInput:
+        for name in names:
+            metric = metric_map.get(name)
+            if self._usable(metric):
+                assert metric is not None and metric.value is not None
+                return self._factor(metric.value, metric.input_fact_ids)
+        return self._missing(metric_map, names)
 
     def _cycle_position(
         self,

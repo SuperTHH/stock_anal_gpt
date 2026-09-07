@@ -118,16 +118,25 @@ def test_dynamic_normalization_falls_back_to_full_market() -> None:
     assert all(detail.used_market_fallback for detail in result[0].factor_details)
 
 
-def test_stable_dividend_below_five_percent_can_only_be_watch() -> None:
-    values = {spec.name: "1" for spec in STABLE_DIVIDEND_FULL_MARKET_V1.factors}
-    values["dividend_yield"] = "0.0499"
-    item = security_input("600000.SH", values)
+def test_stable_dividend_below_five_percent_is_not_published() -> None:
+    below = {spec.name: "1" for spec in STABLE_DIVIDEND_FULL_MARKET_V1.factors}
+    below["dividend_yield"] = "0.0499"
+    above = {spec.name: "1" for spec in STABLE_DIVIDEND_FULL_MARKET_V1.factors}
+    above["dividend_yield"] = "0.05"
 
-    candidate = StrategyEngine(STABLE_DIVIDEND_FULL_MARKET_V1).rank(
-        [item], report_date=date(2026, 7, 29), data_cutoff_at=CUTOFF, known_at=CUTOFF
-    )[0]
+    evaluation = StrategyEngine(STABLE_DIVIDEND_FULL_MARKET_V1).evaluate(
+        [
+            security_input("600000.SH", below),
+            security_input("600001.SH", above),
+        ],
+        report_date=date(2026, 7, 29),
+        data_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
 
-    assert candidate.candidate_status is CandidateStatus.WATCH
+    assert [item.ts_code for item in evaluation.candidates] == ["600001.SH"]
+    assert evaluation.evidence.excluded_count == 1
+    assert evaluation.evidence.qualified_count == 1
 
 
 def test_equal_scores_use_ts_code_ascending_tie_break() -> None:

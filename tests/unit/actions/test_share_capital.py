@@ -160,9 +160,35 @@ def test_resolves_stock_split_rights_buyback_and_ignores_cash_dividend() -> None
         "split",
         "rights",
         "buyback",
-        "cash",
     )
     assert result.algorithm_version == "share-capital-v1"
+
+
+def test_ignores_same_day_cash_dividends_in_share_capital_chain() -> None:
+    same_day = CUTOFF - timedelta(days=2)
+    cash_one = action(
+        ActionType.CASH_DIVIDEND,
+        "cash-one",
+        effective_at=same_day,
+        cash_dividend_per_share=Decimal("0.5"),
+    )
+    cash_two = action(
+        ActionType.CASH_DIVIDEND,
+        "cash-two",
+        effective_at=same_day,
+        cash_dividend_per_share=Decimal("0.2"),
+    )
+
+    result = ShareCapitalResolver("share-capital-v1").resolve(
+        baseline_fact=baseline(),
+        actions=[cash_one, cash_two],
+        as_of=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert result.blocked_reasons == ()
+    assert result.total_shares == Decimal("1000.25")
+    assert result.action_record_ids == ()
 
 
 def test_announced_share_action_does_not_change_point_in_time_capital() -> None:

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from hengce.actions.share_capital import (
     ShareCapitalResolver,
     ShareCapitalResult,
 )
+from hengce.contracts.enums import ActionStatus, ActionType
+from hengce.contracts.market import CorporateAction
+from hengce.contracts.market_screen import ImplementedDividend
 from hengce.contracts.pilot import PilotUniverseSnapshot
 from hengce.financials.assembler import PointInTimeFinancialAssembler
 from hengce.financials.metrics import PilotMetricCalculator, PilotMetricResult
 from hengce.state.action_repository import CorporateActionRepository
 from hengce.state.dividend_repository import AnnualDividendRepository
+from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.market import MarketWarehouse
 
 PILOT_FINANCIAL_PERIODS = (
@@ -36,6 +40,7 @@ class PilotFinancialAnalyzer:
         metric_calculator: PilotMetricCalculator,
         market_warehouse: MarketWarehouse,
         share_capital_resolver: ShareCapitalResolver | None = None,
+        implemented_dividend_warehouse: ImplementedDividendWarehouse | None = None,
     ) -> None:
         self.assembler = assembler
         self.action_repository = action_repository
@@ -47,6 +52,7 @@ class PilotFinancialAnalyzer:
         )
         self.metric_calculator = metric_calculator
         self.market_warehouse = market_warehouse
+        self.implemented_dividend_warehouse = implemented_dividend_warehouse
         self.share_capital_resolver = (
             share_capital_resolver
             or ShareCapitalResolver("pilot-share-capital-v1")
@@ -64,6 +70,10 @@ class PilotFinancialAnalyzer:
             str(bar["ts_code"] if isinstance(bar, Mapping) else bar.ts_code): bar
             for bar in self.market_warehouse.read_bars(market_date)
         }
+        implemented_by_code: dict[str, list[ImplementedDividend]] = {}
+        if self.implemented_dividend_warehouse is not None:
+            for record in self.implemented_dividend_warehouse.read_records(market_date):
+                implemented_by_code.setdefault(record.ts_code, []).append(record)
         results: dict[str, PilotMetricResult] = {}
         for member in universe.members:
             series = self.assembler.assemble(
@@ -78,6 +88,10 @@ class PilotFinancialAnalyzer:
                     report_cutoff_at,
                     known_at,
                 )
+            )
+            actions = self._merge_implemented_dividends(
+                actions,
+                implemented_by_code.get(member.ts_code, ()),
             )
             dividend_history = (
                 list(
@@ -119,6 +133,66 @@ class PilotFinancialAnalyzer:
                 known_at=known_at,
             )
         return results
+
+    @staticmethod
+    def _merge_implemented_dividends(
+        actions: list[CorporateAction],
+        implemented: list[ImplementedDividend] | tuple[ImplementedDividend, ...],
+    ) -> list[CorporateAction]:
+        """Bridge exchange implementation facts without duplicating PDF actions."""
+        existing_terms = {
+            (action.record_date, action.ex_date, action.cash_dividend_per_share)
+            for action in actions
+            if action.action_type is ActionType.CASH_DIVIDEND
+        }
+        merged = list(actions)
+        for record in implemented:
+            terms = (
+                record.record_date,
+                record.ex_date,
+                record.cash_dividend_per_share,
+            )
+            if terms in existing_terms:
+                continue
+            effective_at = record.effective_at or datetime.combine(
+                record.ex_date,
+                time.min,
+                tzinfo=record.collected_at.tzinfo,
+            )
+            merged.append(
+                CorporateAction(
+                    record_id=record.record_id,
+                    source_id=record.source_id,
+                    source_url=record.source_url,
+                    # The exchange implementation table does not expose an
+                    # announcement timestamp.  The ex-date is a conservative
+                    # point-in-time publication proxy: never earlier than the
+                    # actual announcement and never later than implementation.
+                    published_at=record.published_at or effective_at,
+                    effective_at=effective_at,
+                    collected_at=record.collected_at,
+                    version=f"{record.version}:implemented-dividend-bridge-v1",
+                    content_hash=record.content_hash,
+                    license_policy=record.license_policy,
+                    quality_status=record.quality_status,
+                    supersedes_id=record.supersedes_id,
+                    valid_from=record.valid_from,
+                    ts_code=record.ts_code,
+                    action_type=ActionType.CASH_DIVIDEND,
+                    record_date=record.record_date,
+                    ex_date=record.ex_date,
+                    cash_dividend_per_share=record.cash_dividend_per_share,
+                    cash_dividend_total=None,
+                    # The current exchange implementation tables have no fiscal
+                    # year field.  Annual cash distributions are conservatively
+                    # mapped to the preceding fiscal year; explicit annual-report
+                    # records remain authoritative when available.
+                    fiscal_year=record.ex_date.year - 1,
+                    action_status=ActionStatus.IMPLEMENTED,
+                )
+            )
+            existing_terms.add(terms)
+        return merged
 
     def _share_capital(
         self,

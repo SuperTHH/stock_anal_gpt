@@ -376,6 +376,30 @@ def test_signed_capex_outflow_is_normalized_for_fcf_metrics() -> None:
     assert result.metrics["fcf_coverage"].value == Decimal("1.5")
 
 
+def test_implemented_dividend_derives_ttm_yield_and_total_with_share_lineage() -> None:
+    implemented = dividend(
+        2025, "0.8", "80", record_id="implemented-dividend-1"
+    ).model_copy(
+        update={"cash_dividend_total": None},
+    )
+    result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
+        series=financial_series(),
+        closing_price=Decimal("24"),
+        share_capital=share_capital("100"),
+        dividends=[implemented],
+        report_cutoff_at=AS_OF,
+        known_at=AS_OF,
+    )
+
+    assert result.metrics["implemented_dividend_yield_ttm"].value == (
+        Decimal("0.8") / Decimal("24")
+    )
+    assert result.metrics["payout_ratio"].value == Decimal("2") / Decimal("3")
+    assert result.metrics["fcf_coverage"].value == Decimal("1.5")
+    assert "implemented-dividend-1" in result.metrics["payout_ratio"].input_fact_ids
+    assert "shares-baseline" in result.metrics["payout_ratio"].input_fact_ids
+
+
 def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:
     """Catches formula drift, Q1 annualization, float rounding, and lost evidence IDs."""
     result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
