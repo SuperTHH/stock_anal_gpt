@@ -122,7 +122,7 @@ def test_funnel_prefers_high_dividend_then_liquidity_and_excludes_recent_listing
     assert snapshot.high_dividend_funnel_count == 1
 
 
-def test_funnel_replaces_latest_unresolved_periodic_report_blocks(
+def test_funnel_replaces_unresolved_required_evidence_failures(
     tmp_path: Path,
 ) -> None:
     service = seed(tmp_path)
@@ -146,24 +146,37 @@ def test_funnel_replaces_latest_unresolved_periodic_report_blocks(
                 now,
             ),
         )
-        connection.execute(
+        connection.executemany(
             """
             INSERT INTO full_market_evidence_tasks(
                 task_id, run_id, ts_code, evidence_kind, evidence_period,
                 status, version, payload_json, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                "blocked-task",
-                "blocked-run",
-                "600000.SH",
-                "PERIODIC_REPORT",
-                "2025-12-31",
-                "BLOCKED",
-                1,
-                json.dumps({"error_code": "PDF_IMAGE_ONLY"}),
-                now,
-            ),
+            [
+                (
+                    "blocked-task",
+                    "blocked-run",
+                    "600000.SH",
+                    "PERIODIC_REPORT",
+                    "2025-12-31",
+                    "RETRYABLE_FAILED",
+                    1,
+                    json.dumps({"error_code": "OFFICIAL_PDF_DOWNLOAD_FAILED"}),
+                    now,
+                ),
+                (
+                    "blocked-dividend-task",
+                    "blocked-run",
+                    "600000.SH",
+                    "DIVIDEND_YEAR",
+                    "2021",
+                    "BLOCKED",
+                    1,
+                    json.dumps({"error_code": "OFFICIAL_DIVIDEND_TERMS_MISSING"}),
+                    now,
+                ),
+            ],
         )
 
     snapshot = service.build(MARKET_DATE, target_size=2)
@@ -173,7 +186,8 @@ def test_funnel_replaces_latest_unresolved_periodic_report_blocks(
     assert snapshot.depth_excluded_count == 1
     assert snapshot.depth_exclusions[0].ts_code == "600000.SH"
     assert snapshot.depth_exclusions[0].reasons == (
-        "2025-12-31:PDF_IMAGE_ONLY",
+        "DIVIDEND_YEAR:2021:OFFICIAL_DIVIDEND_TERMS_MISSING",
+        "PERIODIC_REPORT:2025-12-31:OFFICIAL_PDF_DOWNLOAD_FAILED",
     )
 
 

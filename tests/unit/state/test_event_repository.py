@@ -1,11 +1,11 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from hengce.contracts.enums import QualityStatus, StrategyType
-from hengce.contracts.official_event import OfficialEvent
+from hengce.contracts.official_event import OfficialEvent, OfficialEventSourceScan
 from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.repository import StateRepository
 
@@ -68,6 +68,32 @@ def test_event_visibility_respects_event_cutoff_and_known_at(tmp_path: Path) -> 
         as_of=NOW, known_at=event.valid_from - timedelta(seconds=1)
     ) == ()
     assert repository.visible_events(as_of=NOW, known_at=NOW) == (event,)
+
+
+def test_latest_source_scans_distinguish_valid_empty_from_failed_scan(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    scan_date = date(2026, 7, 22)
+    old = OfficialEventSourceScan(
+        scan_id="scan-sse-old", source_id="sse", market_date=scan_date,
+        listing_url="https://www.sse.com.cn/events/", status="FAILED",
+        event_count=0, content_hash="a" * 64, scanned_at=NOW - timedelta(hours=1),
+        error_code="TIMEOUT",
+    )
+    current = old.model_copy(update={
+        "scan_id": "scan-sse-current", "status": "SUCCESS",
+        "content_hash": "b" * 64, "scanned_at": NOW, "error_code": None,
+    })
+    repository.save_source_scan(old)
+    repository.save_source_scan(current)
+
+    assert repository.latest_source_scans(
+        market_date=scan_date, known_at=NOW - timedelta(minutes=30)
+    ) == (old,)
+    assert repository.latest_source_scans(
+        market_date=scan_date, known_at=NOW
+    ) == (current,)
 
 
 def test_event_correction_is_append_only_and_idempotent(tmp_path: Path) -> None:

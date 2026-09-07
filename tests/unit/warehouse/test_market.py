@@ -7,7 +7,7 @@ import pytest
 
 import hengce.warehouse.market as market_module
 from hengce.contracts.enums import QualityStatus
-from hengce.contracts.market import MarketBar
+from hengce.contracts.market import MarketBar, OfficialTradingStatus
 from hengce.warehouse.market import MarketWarehouse
 
 
@@ -31,6 +31,28 @@ def bar(code: str, trade_date: date = date(2026, 7, 24)) -> MarketBar:
         pre_close=Decimal("10"),
         volume=Decimal("1000"),
         amount=Decimal("10500"),
+    )
+
+
+def suspended(code: str, trade_date: date = date(2026, 7, 24)) -> OfficialTradingStatus:
+    return OfficialTradingStatus(
+        record_id=f"suspended-{code}-{trade_date}",
+        source_id="szse",
+        source_url="https://www.szse.cn/disclosure/suspension.html",
+        collected_at=datetime(2026, 7, 24, 21, 31, tzinfo=UTC),
+        published_at=datetime(2026, 7, 24, 8, 0, tzinfo=UTC),
+        effective_at=datetime(2026, 7, 24, 1, 30, tzinfo=UTC),
+        version=f"trading-status-{trade_date}",
+        content_hash="b" * 64,
+        license_policy="official-public-disclosure",
+        quality_status=QualityStatus.VALID,
+        valid_from=datetime(2026, 7, 24, 8, 0, tzinfo=UTC),
+        ts_code=code,
+        trade_date=trade_date,
+        is_trading=False,
+        is_suspended=True,
+        reason="筹划重大事项停牌",
+        evidence_title="关于筹划重大事项的停牌公告",
     )
 
 
@@ -93,6 +115,18 @@ def test_absent_dataset_or_date_is_empty(tmp_path: Path) -> None:
     warehouse.write_bars([bar("000001.SZ")])
     assert warehouse.count_bars(date(2026, 7, 23)) == 0
     assert warehouse.read_bars(date(2026, 7, 23)) == []
+
+
+def test_official_trading_status_round_trips_as_content_addressed_evidence(
+    tmp_path: Path,
+) -> None:
+    warehouse = MarketWarehouse(tmp_path)
+    first = warehouse.write_trading_statuses([suspended("002084.SZ")])
+    second = warehouse.write_trading_statuses([suspended("002084.SZ")])
+
+    assert first == second
+    assert warehouse.read_trading_statuses(date(2026, 7, 24))[0]["ts_code"] == "002084.SZ"
+    assert warehouse.read_trading_statuses(date(2026, 7, 23)) == []
 
 
 def test_validate_artifact_rejects_missing_corrupt_and_mismatched_contents(tmp_path: Path) -> None:

@@ -27,7 +27,8 @@ from hengce.collectors.tushare import TushareDailyCollector
 from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, EvidenceCohort, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
-from hengce.contracts.official_event import OfficialEvent
+from hengce.contracts.official_event import OfficialEvent, OfficialEventSourceScan
+from hengce.contracts.xbrl_discovery import ExchangeXbrlDiscoveryScan
 from hengce.financials.mapping import (
     FinancialFactNormalizer,
 )
@@ -63,6 +64,7 @@ from hengce.state.evidence_repository import FullMarketEvidenceRepository
 from hengce.state.financial_repository import FinancialFilingRepository
 from hengce.state.pilot_repository import PilotRepository
 from hengce.state.repository import StateRepository
+from hengce.state.xbrl_discovery_repository import ExchangeXbrlDiscoveryRepository
 from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.financial import FinancialFactWarehouse
 from hengce.warehouse.market import MarketWarehouse
@@ -902,6 +904,160 @@ def import_official_events(
             sort_keys=True,
         )
     )
+
+
+@app.command("record-official-event-scan")
+def record_official_event_scan(
+    source_id: Annotated[str, typer.Option()],
+    market_date: Annotated[str, typer.Option()],
+    listing_url: Annotated[str, typer.Option()],
+    content_hash: Annotated[str | None, typer.Option()] = None,
+    snapshot_file: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False)
+    ] = None,
+    content_type: Annotated[str, typer.Option()] = "text/html",
+    event_count: Annotated[int, typer.Option(min=0)] = 0,
+    status: Annotated[str, typer.Option()] = "SUCCESS",
+    error_code: Annotated[str | None, typer.Option()] = None,
+    scanned_at: Annotated[str | None, typer.Option()] = None,
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Record an auditable official-source scan, including a valid empty result."""
+    if source_id not in {"csrc", "sse", "stats", "szse"}:
+        raise typer.BadParameter("unsupported official event scan source")
+    normalized_status = status.upper()
+    if normalized_status not in {"SUCCESS", "FAILED"}:
+        raise typer.BadParameter("status must be SUCCESS or FAILED")
+    if (content_hash is None) == (snapshot_file is None):
+        raise typer.BadParameter("provide exactly one of content-hash or snapshot-file")
+    parsed_market_date = parse_trade_date(market_date)
+    zone = ZoneInfo("Asia/Shanghai")
+    parsed_scanned_at = (
+        datetime.fromisoformat(scanned_at) if scanned_at is not None else datetime.now(zone)
+    )
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings, policy_file)
+    PolicyGuard(state).validate(
+        source_id,
+        listing_url,
+        _EVENT_PURPOSES[source_id],
+        "official_event_scan",
+    )
+    resolved_hash = content_hash
+    if snapshot_file is not None:
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=listing_url,
+            collected_at=parsed_scanned_at,
+            content_type=content_type,
+            payload=snapshot_file.read_bytes(),
+        )
+        resolved_hash = raw_ref.content_hash
+    assert resolved_hash is not None
+    identity = "|".join(
+        (
+            source_id,
+            parsed_market_date.isoformat(),
+            listing_url,
+            resolved_hash,
+            parsed_scanned_at.isoformat(),
+        )
+    )
+    scan = OfficialEventSourceScan(
+        scan_id=f"official-event-scan-{hashlib.sha256(identity.encode()).hexdigest()}",
+        source_id=source_id,
+        market_date=parsed_market_date,
+        listing_url=listing_url,
+        status=normalized_status,
+        event_count=event_count,
+        content_hash=resolved_hash,
+        scanned_at=parsed_scanned_at,
+        error_code=error_code,
+    )
+    OfficialEventRepository(state.path).save_source_scan(scan)
+    typer.echo(scan.model_dump_json())
+
+
+@app.command("record-exchange-xbrl-scan")
+def record_exchange_xbrl_scan(
+    source_id: Annotated[str, typer.Option()],
+    market_date: Annotated[str, typer.Option()],
+    listing_url: Annotated[str, typer.Option()],
+    status: Annotated[str, typer.Option()],
+    reason_code: Annotated[str | None, typer.Option()] = None,
+    instance_count: Annotated[int, typer.Option(min=0)] = 0,
+    content_hash: Annotated[str | None, typer.Option()] = None,
+    snapshot_file: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False)
+    ] = None,
+    content_type: Annotated[str, typer.Option()] = "text/html",
+    scanned_at: Annotated[str | None, typer.Option()] = None,
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Record exchange public-XBRL availability without inventing instances."""
+    if source_id not in {"sse", "szse"}:
+        raise typer.BadParameter("source-id must be sse or szse")
+    normalized_status = status.upper()
+    if normalized_status not in {"AVAILABLE", "UNAVAILABLE", "FAILED"}:
+        raise typer.BadParameter("unsupported XBRL scan status")
+    if (content_hash is None) == (snapshot_file is None):
+        raise typer.BadParameter("provide exactly one of content-hash or snapshot-file")
+    parsed_market_date = parse_trade_date(market_date)
+    zone = ZoneInfo("Asia/Shanghai")
+    parsed_scanned_at = (
+        datetime.fromisoformat(scanned_at) if scanned_at is not None else datetime.now(zone)
+    )
+    settings = Settings.model_construct(
+        data_dir=data_dir,
+        tushare_token=None,
+        timezone="Asia/Shanghai",
+    )
+    state = bootstrap_state(settings, policy_file)
+    PolicyGuard(state).validate(
+        source_id,
+        listing_url,
+        "xbrl",
+        "exchange_xbrl_scan",
+    )
+    resolved_hash = content_hash
+    if snapshot_file is not None:
+        raw_ref = RawObjectStore(settings.data_dir / "raw").put(
+            source_id=source_id,
+            source_url=listing_url,
+            collected_at=parsed_scanned_at,
+            content_type=content_type,
+            payload=snapshot_file.read_bytes(),
+        )
+        resolved_hash = raw_ref.content_hash
+    assert resolved_hash is not None
+    identity = "|".join(
+        (
+            source_id,
+            parsed_market_date.isoformat(),
+            listing_url,
+            resolved_hash,
+            parsed_scanned_at.isoformat(),
+        )
+    )
+    scan = ExchangeXbrlDiscoveryScan(
+        scan_id=f"exchange-xbrl-scan-{hashlib.sha256(identity.encode()).hexdigest()}",
+        source_id=source_id,
+        market_date=parsed_market_date,
+        listing_url=listing_url,
+        status=normalized_status,
+        instance_count=instance_count,
+        content_hash=resolved_hash,
+        scanned_at=parsed_scanned_at,
+        reason_code=reason_code,
+    )
+    ExchangeXbrlDiscoveryRepository(state.path).save(scan)
+    typer.echo(scan.model_dump_json())
 
 
 @app.command("validate-pilot-report")

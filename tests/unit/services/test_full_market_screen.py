@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from hengce.contracts.market import MarketBar, SecurityMaster
+from hengce.contracts.market import MarketBar, OfficialTradingStatus, SecurityMaster
 from hengce.contracts.market_screen import ImplementedDividend
 from hengce.services.full_market_screen import FullMarketScreenService
 from hengce.state.repository import StateRepository
@@ -70,6 +70,7 @@ def service(
     tmp_path: Path,
     *,
     missing_bar_codes: frozenset[str] = frozenset(),
+    official_suspension_codes: frozenset[str] = frozenset(),
 ) -> FullMarketScreenService:
     state = StateRepository(tmp_path / "state.sqlite3")
     state.migrate()
@@ -90,7 +91,8 @@ def service(
         source_id="szse", source_url="https://www.szse.cn/master.csv",
         collected_at=NOW, content_hash="d" * 64, version="szse-v1", quality_lineage={},
     )
-    MarketWarehouse(tmp_path / "normalized").write_bars(
+    market = MarketWarehouse(tmp_path / "normalized")
+    market.write_bars(
         [
             item
             for item in (
@@ -101,6 +103,23 @@ def service(
             if item.ts_code not in missing_bar_codes
         ]
     )
+    if official_suspension_codes:
+        market.write_trading_statuses(
+            [
+                OfficialTradingStatus(
+                    record_id=f"status-{code}", source_id="szse",
+                    source_url="https://www.szse.cn/disclosure/suspension.html",
+                    collected_at=NOW, published_at=NOW, effective_at=NOW,
+                    version="status-v1", content_hash="e" * 64,
+                    license_policy="official-public-disclosure",
+                    quality_status="VALID", valid_from=NOW,
+                    ts_code=code, trade_date=date(2026, 7, 22),
+                    is_trading=False, is_suspended=True,
+                    reason="重大事项停牌", evidence_title="停牌公告",
+                )
+                for code in official_suspension_codes
+            ]
+        )
     ImplementedDividendWarehouse(tmp_path / "normalized").write_records(
         date(2026, 7, 22),
         [
@@ -152,6 +171,26 @@ def test_missing_daily_bar_is_collection_failure_not_zero_or_valid_empty(
     assert result["summary"]["market_collection_failed_count"] == 1
     assert result["items"][0]["close"] is None
     assert result["items"][0]["market_data_status"] == "COLLECTION_FAILED"
+
+
+def test_missing_daily_bar_with_official_suspension_is_valid_empty(
+    tmp_path: Path,
+) -> None:
+    result = service(
+        tmp_path,
+        missing_bar_codes=frozenset({"300001.SZ"}),
+        official_suspension_codes=frozenset({"300001.SZ"}),
+    ).query(
+        market_date=date(2026, 7, 22), page=1, page_size=20,
+        search="300001", board=None, minimum_dividend_yield=Decimal("0"),
+        dividend_data="ALL", sort_by="TS_CODE", descending=False,
+    )
+
+    assert result["summary"]["official_no_trading_count"] == 1
+    assert result["summary"]["market_collection_failed_count"] == 0
+    assert result["items"][0]["market_data_status"] == "OFFICIAL_NO_TRADING"
+    assert result["items"][0]["market_data_issue"] == "OFFICIAL_SUSPENSION"
+    assert result["items"][0]["trading_status_source_url"].startswith("https://")
 
 
 def test_screen_filters_search_board_and_yield_then_paginates(tmp_path: Path) -> None:

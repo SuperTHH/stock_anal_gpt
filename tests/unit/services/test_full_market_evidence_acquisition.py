@@ -94,6 +94,38 @@ def test_risk_prefill_accepts_explicit_internal_control_opinion_type(
     assert standard is True
 
 
+def test_risk_prefill_prefers_current_explicit_opinion_over_historical_narrative(
+    monkeypatch,
+) -> None:
+    reader = _Reader()
+    reader.pages = [
+        _Page(
+            "历史整改情况\n"
+            "2024年度财务审计报告为标准无保留意见。\n"
+            "2023年度内部控制审计报告为否定意见，相关缺陷已经整改。"
+        ),
+        _Page(
+            "第八节 财务报告\n"
+            "审计意见类型\n"
+            "标准的无保留意见\n"
+            "一、审计意见\n"
+            "我们审计了公司2025年度财务报表。"
+        ),
+    ]
+    monkeypatch.setattr(
+        "hengce.services.full_market_evidence_acquisition.PdfReader",
+        lambda _path: reader,
+    )
+
+    page, excerpt, standard = FullMarketEvidenceAcquisitionService._audit_opinion_prefill(
+        Path("ignored.pdf")
+    )
+
+    assert page == 2
+    assert excerpt == "审计意见类型 标准的无保留意见"
+    assert standard is True
+
+
 def test_dividend_terms_parse_per_ten_shares_and_ex_date(monkeypatch) -> None:
     reader = _Reader()
     reader.pages = [

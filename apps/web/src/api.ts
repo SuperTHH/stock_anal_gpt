@@ -1,8 +1,10 @@
 import type {
   EvidenceStatusPayload,
   EvidenceTask,
+  ExchangeXbrlStatusPayload,
   FullMarketPayload,
   FullMarketResearchPayload,
+  LiveOfficialEventsPayload,
   ReportPayload,
 } from "./types";
 
@@ -57,6 +59,26 @@ export async function loadFullMarketResearch(): Promise<FullMarketResearchPayloa
     throw new Error(body.detail ?? "FULL_MARKET_RESEARCH_LOAD_FAILED");
   }
   return (await response.json()) as FullMarketResearchPayload;
+}
+
+export async function loadLiveOfficialEvents(): Promise<LiveOfficialEventsPayload> {
+  const response = await fetch("/api/market/events", {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("OFFICIAL_EVENTS_LOAD_FAILED");
+  const payload = (await response.json()) as LiveOfficialEventsPayload;
+  if (!Array.isArray(payload.events)) throw new Error("OFFICIAL_EVENTS_LOAD_FAILED");
+  return payload;
+}
+
+export async function loadExchangeXbrlStatus(): Promise<ExchangeXbrlStatusPayload> {
+  const response = await fetch("/api/market/xbrl-status", {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("EXCHANGE_XBRL_STATUS_LOAD_FAILED");
+  const payload = (await response.json()) as ExchangeXbrlStatusPayload;
+  if (!Array.isArray(payload.scans)) throw new Error("EXCHANGE_XBRL_STATUS_LOAD_FAILED");
+  return payload;
 }
 
 export async function loadEvidenceStatus(status = ""): Promise<EvidenceStatusPayload> {

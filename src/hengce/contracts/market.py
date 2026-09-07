@@ -35,6 +35,25 @@ class TradingStatus(BaseModel):
     special_treatment_reason: str | None = None
 
 
+class OfficialTradingStatus(FactBase):
+    """Official evidence explaining whether a security traded on one market date."""
+
+    ts_code: str
+    trade_date: date
+    is_trading: bool
+    is_suspended: bool
+    reason: str
+    evidence_title: str
+
+    @model_validator(mode="after")
+    def status_is_consistent(self) -> "OfficialTradingStatus":
+        if self.is_trading == self.is_suspended:
+            raise ValueError("trading and suspension flags are inconsistent")
+        if not self.reason.strip() or not self.evidence_title.strip():
+            raise ValueError("official trading status evidence is incomplete")
+        return self
+
+
 class MarketBar(FactBase):
     ts_code: str
     trade_date: date

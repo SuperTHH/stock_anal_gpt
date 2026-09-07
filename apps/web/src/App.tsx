@@ -2,17 +2,21 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   decideEvidenceReview,
+  loadExchangeXbrlStatus,
   loadEvidenceStatus,
   loadFullMarket,
   loadFullMarketResearch,
   loadLatestReport,
+  loadLiveOfficialEvents,
 } from "./api";
 import type {
   Candidate,
   EvidenceTask,
+  ExchangeXbrlStatusPayload,
   FactorDetail,
   FullMarketPayload,
   FullMarketResearchPayload,
+  LiveOfficialEventsPayload,
   PoolReadiness,
   ReportPayload,
   ReportSource,
@@ -648,11 +652,18 @@ function FullMarket() {
                       <td className="numeric mono">{fixedNumber(row.trailing_12m_cash_dividend_per_share, 3)}</td>
                       <td className="numeric mono">{row.dividend_yield === null ? "数据不足" : `${(Number(row.dividend_yield) * 100).toFixed(2)}%`}</td>
                       <td>{row.dividend_event_count ? `${row.dividend_event_count} 次` : "无官方记录"}</td>
-                      <td>{row.dividend_source_urls.length ? groupedOfficialDividendSources(row.dividend_source_urls).map((source) => (
-                        <a href={source.url} target="_blank" rel="noreferrer" key={source.label} aria-label="官方分红来源">
-                          {source.label}{source.count > 1 ? `（${source.count}份）` : ""}
-                        </a>
-                      )) : "数据不足"}</td>
+                      <td>
+                        {row.trading_status_source_url && (
+                          <a href={row.trading_status_source_url} target="_blank" rel="noreferrer" aria-label="官方停牌来源">
+                            官方停牌来源
+                          </a>
+                        )}
+                        {row.dividend_source_urls.length ? groupedOfficialDividendSources(row.dividend_source_urls).map((source) => (
+                          <a href={source.url} target="_blank" rel="noreferrer" key={source.label} aria-label="官方分红来源">
+                            {source.label}{source.count > 1 ? `（${source.count}份）` : ""}
+                          </a>
+                        )) : !row.trading_status_source_url && "数据不足"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -869,12 +880,17 @@ function LegacyEvents({ report }: { report: ReportPayload }) {
 function Events({ report }: { report: ReportPayload }) {
   const events = report.official_events ?? [];
   const eventDomainStatus = report.data_domain_statuses.events;
+  const scans = report.official_event_source_scans ?? [];
   return (
     <>
       <header className="page-header">
         <div><p className="eyebrow">仅官方来源</p><h1>官方事件流</h1></div>
         <span>事件截止 {formatDateTime(report.snapshot.event_cutoff_at ?? report.event_cutoff_at)}</span>
       </header>
+      <p className="quality-note">
+        官方来源扫描 {scans.filter((scan) => scan.status === "SUCCESS").length}/4；
+        只有四个配置来源均成功扫描后，空事件流才会视为有效空集。
+      </p>
       {events.length ? events.map((event, index) => (
         <article className="event-row" key={event.record_id ?? event.event_id ?? index}>
           <p className="eyebrow">{event.institution ?? "官方机构"}</p>
@@ -1122,7 +1138,20 @@ function Quality({
           <span>年度分红 {report.quality_summary?.annual_dividend_record_count ?? 0} 条</span>
           <span>风险证据 {report.quality_summary?.official_risk_screen_count ?? 0} 条</span>
           <span>官方事件 {report.quality_summary?.official_event_count ?? report.official_events?.length ?? 0} 条</span>
+          <span>
+            事件来源扫描 {(report.official_event_source_scans ?? []).filter((scan) => scan.status === "SUCCESS").length}/4
+          </span>
         </div>
+        {(report.official_event_source_scans ?? []).length > 0 && (
+          <div className="quality-list quality-domain-list">
+            {(report.official_event_source_scans ?? []).map((scan) => (
+              <div key={scan.scan_id}>
+                <a href={scan.listing_url} target="_blank" rel="noreferrer">{scan.source_id.toUpperCase()} 官方列表</a>
+                <strong>{scan.status === "SUCCESS" ? `已扫描 · ${scan.event_count} 条` : `失败 · ${scan.error_code ?? "未知原因"}`}</strong>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
       {report.pool_readiness && (
         <section className="section-block">
@@ -1145,9 +1174,25 @@ function Quality({
           </p>
           {fallbackCount > 0 && (
             <p className="quality-callout">
-              本批文件尚未进入 XBRL 解析链路，使用交易所/巨潮官方 PDF 回退；
+              {report.exchange_xbrl_status?.availability_status === "PDF_FALLBACK"
+                ? "上交所、深交所公开定期报告列表未提供可验证的 XBRL 实例附件，当前使用交易所/巨潮官方 PDF 回退；"
+                : "本批文件尚未进入 XBRL 解析链路，使用交易所/巨潮官方 PDF 回退；"}
               本报告涉及 {fallbackCount} 份，不代表来源为非官方。
             </p>
+          )}
+          {report.exchange_xbrl_status && (
+            <div className="quality-list quality-domain-list">
+              {report.exchange_xbrl_status.scans.map((scan) => (
+                <div key={scan.scan_id}>
+                  <a href={scan.listing_url} target="_blank" rel="noreferrer">
+                    {scan.source_id === "sse" ? "上交所" : "深交所"} XBRL 发现页
+                  </a>
+                  <strong>
+                    {scan.status === "AVAILABLE" ? `可用 · ${scan.instance_count} 份` : `PDF 回退 · ${scan.reason_code ?? "未提供公开实例"}`}
+                  </strong>
+                </div>
+              ))}
+            </div>
           )}
         </section>
       )}
@@ -1351,6 +1396,8 @@ export default function App() {
   const [page, setPage] = useState<Page>("每日研究总览");
   const [selected, setSelected] = useState<SecuritySelection | null>(null);
   const [fullMarketResearch, setFullMarketResearch] = useState<FullMarketResearchPayload | null>(null);
+  const [liveOfficialEvents, setLiveOfficialEvents] = useState<LiveOfficialEventsPayload | null>(null);
+  const [exchangeXbrlStatus, setExchangeXbrlStatus] = useState<ExchangeXbrlStatusPayload | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1382,12 +1429,51 @@ export default function App() {
     return () => { cancelled = true; };
   }, [demoMode]);
 
+  useEffect(() => {
+    if (demoMode) return;
+    let cancelled = false;
+    loadLiveOfficialEvents()
+      .then((payload) => { if (!cancelled) setLiveOfficialEvents(payload); })
+      .catch(() => { if (!cancelled) setLiveOfficialEvents(null); });
+    loadExchangeXbrlStatus()
+      .then((payload) => { if (!cancelled) setExchangeXbrlStatus(payload); })
+      .catch(() => { if (!cancelled) setExchangeXbrlStatus(null); });
+    return () => { cancelled = true; };
+  }, [demoMode]);
+
+  const effectiveReport = useMemo<ReportPayload | null>(() => {
+    if (!report) return report;
+    if (!liveOfficialEvents && !exchangeXbrlStatus) return report;
+    return {
+      ...report,
+      exchange_xbrl_status: exchangeXbrlStatus ?? report.exchange_xbrl_status,
+      snapshot: {
+        ...report.snapshot,
+        event_cutoff_at: liveOfficialEvents?.event_cutoff_at ?? report.snapshot.event_cutoff_at,
+      },
+      event_cutoff_at: liveOfficialEvents?.event_cutoff_at ?? report.event_cutoff_at,
+      official_events: liveOfficialEvents?.events ?? report.official_events,
+      official_event_source_scans: liveOfficialEvents?.source_scans ?? report.official_event_source_scans,
+      data_domain_statuses: {
+        ...report.data_domain_statuses,
+        events: liveOfficialEvents
+          ? (liveOfficialEvents.source_coverage_status === "COMPLETE" ? "VALID" : "PARTIAL")
+          : report.data_domain_statuses.events,
+      },
+      quality_summary: {
+        ...report.quality_summary,
+        official_event_count: liveOfficialEvents?.events.length ?? report.quality_summary?.official_event_count,
+        official_event_source_coverage: liveOfficialEvents?.source_coverage_status,
+      },
+    };
+  }, [exchangeXbrlStatus, liveOfficialEvents, report]);
+
   const content = useMemo(() => {
-    if (!report) return null;
+    if (!effectiveReport) return null;
     if (page === "策略候选池") {
       return (
         <StrategyPools
-          report={report}
+          report={effectiveReport}
           research={fullMarketResearch}
           openSecurity={(candidate, strategy) => {
             setSelected({ tsCode: candidate.ts_code, strategy });
@@ -1402,7 +1488,7 @@ export default function App() {
     if (page === "个股研究") {
       return (
         <SecurityResearch
-          report={report}
+          report={effectiveReport}
           research={fullMarketResearch}
           selected={selected}
           onSelect={setSelected}
@@ -1410,12 +1496,12 @@ export default function App() {
       );
     }
     if (page === "证据审核队列") return <EvidenceReviewQueue />;
-    if (page === "官方事件流") return <Events report={report} />;
+    if (page === "官方事件流") return <Events report={effectiveReport} />;
     if (page === "数据质量与来源") {
-      return <Quality report={report} research={fullMarketResearch} />;
+      return <Quality report={effectiveReport} research={fullMarketResearch} />;
     }
-    return <Overview report={report} goTo={setPage} />;
-  }, [fullMarketResearch, page, report, selected]);
+    return <Overview report={effectiveReport} goTo={setPage} />;
+  }, [effectiveReport, fullMarketResearch, page, selected]);
 
   return (
     <div className="app-shell">

@@ -38,6 +38,10 @@ class FullMarketScreenService:
         securities = {item.ts_code: item for item in universe.securities}
         bars = self.market_warehouse.read_bars(market_date)
         bar_by_code = {str(item["ts_code"]): item for item in bars}
+        trading_status_by_code = {
+            str(item["ts_code"]): item
+            for item in self.market_warehouse.read_trading_statuses(market_date)
+        }
         window_start = market_date - timedelta(days=365)
         dividends = [
             item for item in self.dividend_warehouse.read_records(market_date)
@@ -55,6 +59,14 @@ class FullMarketScreenService:
             if security.industry_l1:
                 industry_security_count += 1
             bar = bar_by_code.get(ts_code)
+            trading_status = trading_status_by_code.get(ts_code)
+            official_no_trading = (
+                bar is None
+                and trading_status is not None
+                and trading_status.get("quality_status") == "VALID"
+                and trading_status.get("is_trading") is False
+                and trading_status.get("is_suspended") is True
+            )
             events = by_code.get(ts_code, [])
             dps = sum(
                 (item.cash_dividend_per_share for item in events),
@@ -77,10 +89,17 @@ class FullMarketScreenService:
                     "board": security.board,
                     "industry_l1": security.industry_l1,
                     "market_data_status": (
-                        "AVAILABLE" if bar is not None else "COLLECTION_FAILED"
+                        "AVAILABLE" if bar is not None else
+                        "OFFICIAL_NO_TRADING" if official_no_trading else
+                        "COLLECTION_FAILED"
                     ),
                     "market_data_issue": (
-                        None if bar is not None else "DAILY_BAR_NOT_RETURNED"
+                        None if bar is not None else
+                        "OFFICIAL_SUSPENSION" if official_no_trading else
+                        "DAILY_BAR_NOT_RETURNED"
+                    ),
+                    "trading_status_source_url": (
+                        trading_status.get("source_url") if official_no_trading else None
                     ),
                     "trade_date": market_date.isoformat() if bar is not None else None,
                     "close": str(close) if close is not None else None,
@@ -127,8 +146,12 @@ class FullMarketScreenService:
             "summary": {
                 "universe_count": len(securities),
                 "market_bar_count": len(bar_by_code),
-                "official_no_trading_count": 0,
-                "market_collection_failed_count": len(securities) - len(bar_by_code),
+                "official_no_trading_count": sum(
+                    row["market_data_status"] == "OFFICIAL_NO_TRADING" for row in rows
+                ),
+                "market_collection_failed_count": sum(
+                    row["market_data_status"] == "COLLECTION_FAILED" for row in rows
+                ),
                 "dividend_security_count": dividend_security_count,
                 "industry_security_count": industry_security_count,
                 "industry_coverage_ratio": str(

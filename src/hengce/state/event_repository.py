@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from hengce.contracts.official_event import OfficialEvent
+from hengce.contracts.official_event import OfficialEvent, OfficialEventSourceScan
 from hengce.state.db import connect
 
 
@@ -116,6 +116,68 @@ class OfficialEventRepository:
 
     def count_visible_events(self, *, as_of: datetime, known_at: datetime) -> int:
         return len(self.visible_events(as_of=as_of, known_at=known_at))
+
+    def save_source_scan(self, scan: OfficialEventSourceScan) -> OfficialEventSourceScan:
+        validated = OfficialEventSourceScan.model_validate(scan.model_dump())
+        with connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM official_event_source_scans WHERE scan_id=?",
+                (validated.scan_id,),
+            ).fetchone()
+            if existing is not None:
+                stored = OfficialEventSourceScan.model_validate_json(
+                    str(existing["payload_json"])
+                )
+                if stored != validated:
+                    raise ValueError("OFFICIAL_EVENT_SCAN_CONFLICT")
+                return stored
+            connection.execute(
+                """
+                INSERT INTO official_event_source_scans(
+                    scan_id, source_id, market_date, status, scanned_at,
+                    content_hash, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    validated.scan_id,
+                    validated.source_id,
+                    validated.market_date.isoformat(),
+                    validated.status,
+                    validated.scanned_at.isoformat(),
+                    validated.content_hash,
+                    validated.model_dump_json(),
+                ),
+            )
+        return validated
+
+    def latest_source_scans(
+        self,
+        *,
+        market_date: date,
+        known_at: datetime,
+    ) -> tuple[OfficialEventSourceScan, ...]:
+        self._require_aware(known_at)
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM (
+                    SELECT payload_json, source_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY source_id
+                               ORDER BY scanned_at DESC, scan_id DESC
+                           ) AS rank
+                    FROM official_event_source_scans
+                    WHERE market_date=? AND scanned_at <= ?
+                ) WHERE rank=1
+                ORDER BY source_id
+                """,
+                (market_date.isoformat(), known_at.isoformat()),
+            ).fetchall()
+        return tuple(
+            OfficialEventSourceScan.model_validate_json(str(row["payload_json"]))
+            for row in rows
+        )
 
     @classmethod
     def _validate_times(cls, event: OfficialEvent) -> None:

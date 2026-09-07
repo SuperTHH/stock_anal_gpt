@@ -8,11 +8,15 @@ from hengce.api.app import create_app
 from hengce.contracts.enums import EvidenceCohort, EvidenceTaskStatus
 from hengce.contracts.market import MarketBar, SecurityMaster
 from hengce.contracts.market_screen import ImplementedDividend
+from hengce.contracts.official_event import OfficialEvent, OfficialEventSourceScan
+from hengce.contracts.xbrl_discovery import ExchangeXbrlDiscoveryScan
 from hengce.services.full_market_evidence import FullMarketEvidencePlanner
 from hengce.services.full_market_research import FullMarketResearchService
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.evidence_repository import FullMarketEvidenceRepository
 from hengce.state.report_repository import ReportRepository
 from hengce.state.repository import StateRepository
+from hengce.state.xbrl_discovery_repository import ExchangeXbrlDiscoveryRepository
 from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.market import MarketWarehouse
 from tests.unit.state.test_repository import exchange_policy
@@ -117,6 +121,81 @@ def test_full_market_endpoints_default_to_latest_persisted_snapshots(tmp_path: P
     assert market.json()["market_date"] == "2026-07-22"
     assert research.status_code == 200
     assert research.json()["market_date"] == "2026-07-22"
+
+
+def test_full_market_events_use_the_live_repository_and_frozen_market_cutoff(
+    tmp_path: Path,
+) -> None:
+    repository, report_root, normalized = seed(tmp_path)
+    OfficialEventRepository(repository.path).save_version(
+        OfficialEvent(
+            record_id="event-stats-20260721", source_id="stats",
+            source_url="https://www.stats.gov.cn/event.html",
+            published_at=datetime(2026, 7, 21, 9, 30, tzinfo=UTC),
+            effective_at=datetime(2026, 7, 21, 9, 30, tzinfo=UTC),
+            collected_at=NOW, valid_from=NOW, version="v1",
+            content_hash="f" * 64,
+            license_policy="official-facts-summary-link-personal-research",
+            quality_status="VALID", institution="国家统计局",
+            event_type="MACRO_DATA", title="宏观数据公告",
+            factual_summary="官方发布宏观数据。",
+            affected_ts_codes=(), impact_horizon="3_TO_6_MONTHS",
+            confidence=Decimal("0.9"),
+        )
+    )
+    event_repository = OfficialEventRepository(repository.path)
+    for source_id in ("csrc", "sse", "stats", "szse"):
+        event_repository.save_source_scan(
+            OfficialEventSourceScan(
+                scan_id=f"scan-{source_id}", source_id=source_id,
+                market_date=date(2026, 7, 22),
+                listing_url=f"https://www.{source_id}.gov.cn/events/"
+                if source_id in {"csrc", "stats"}
+                else f"https://www.{source_id}.com.cn/events/",
+                status="SUCCESS", event_count=1 if source_id == "stats" else 0,
+                content_hash="e" * 64, scanned_at=NOW,
+            )
+        )
+
+    response = TestClient(create_app(repository, report_root, normalized)).get(
+        "/api/market/events", params={"market_date": "2026-07-22"}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["event_cutoff_at"] == "2026-07-22T23:59:59+08:00"
+    assert [item["record_id"] for item in payload["events"]] == [
+        "event-stats-20260721"
+    ]
+    assert payload["source_coverage_status"] == "COMPLETE"
+    assert payload["successful_scan_source_ids"] == ["csrc", "sse", "stats", "szse"]
+
+
+def test_xbrl_status_reports_valid_pdf_fallback_only_after_both_exchange_scans(
+    tmp_path: Path,
+) -> None:
+    repository, report_root, normalized = seed(tmp_path)
+    FullMarketResearchService(
+        state=StateRepository(repository.path), data_dir=tmp_path, clock=lambda: NOW
+    ).build(date(2026, 7, 22), target_size=2, minimum_amount=Decimal("1"))
+    scans = ExchangeXbrlDiscoveryRepository(repository.path)
+    for source_id in ("sse", "szse"):
+        scans.save(
+            ExchangeXbrlDiscoveryScan(
+                scan_id=f"xbrl-{source_id}", source_id=source_id,
+                market_date=date(2026, 7, 22),
+                listing_url=f"https://www.{source_id}.com.cn/disclosure/regular/",
+                status="UNAVAILABLE", instance_count=0, content_hash="f" * 64,
+                scanned_at=NOW, reason_code="PUBLIC_INSTANCE_NOT_EXPOSED",
+            )
+        )
+
+    payload = TestClient(create_app(repository, report_root, normalized)).get(
+        "/api/market/xbrl-status"
+    ).json()
+
+    assert payload["availability_status"] == "PDF_FALLBACK"
+    assert [item["source_id"] for item in payload["scans"]] == ["sse", "szse"]
 
 
 def test_full_market_research_endpoint_exposes_funnel_and_depth_quality(tmp_path: Path) -> None:

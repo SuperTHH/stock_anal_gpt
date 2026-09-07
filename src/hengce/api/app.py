@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
@@ -12,9 +12,11 @@ from hengce.contracts.evidence import EvidenceReviewRequest
 from hengce.reports.integrity import compute_artifact_hash
 from hengce.services.full_market_evidence import FullMarketEvidenceStatusService
 from hengce.services.full_market_screen import FullMarketScreenService
+from hengce.state.event_repository import OfficialEventRepository
 from hengce.state.evidence_repository import FullMarketEvidenceRepository
 from hengce.state.report_repository import ReportRepository, StoredReport
 from hengce.state.repository import StateRepository
+from hengce.state.xbrl_discovery_repository import ExchangeXbrlDiscoveryRepository
 from hengce.warehouse.dividends import ImplementedDividendWarehouse
 from hengce.warehouse.market import MarketWarehouse
 from hengce.warehouse.market_research import FullMarketResearchWarehouse
@@ -84,6 +86,8 @@ def create_app(
     )
     evidence_repository = FullMarketEvidenceRepository(repository.path)
     evidence_status = FullMarketEvidenceStatusService(evidence_repository)
+    event_repository = OfficialEventRepository(repository.path)
+    xbrl_discovery_repository = ExchangeXbrlDiscoveryRepository(repository.path)
 
     @app.get("/api/market/securities")
     def full_market_securities(
@@ -140,6 +144,75 @@ def create_app(
         if snapshot is None:
             raise HTTPException(status_code=404, detail="FULL_MARKET_RESEARCH_NOT_FOUND")
         return snapshot.model_dump(mode="json")
+
+    @app.get("/api/market/events")
+    def full_market_events(market_date: date | None = None) -> dict[str, object]:
+        resolved_date = market_date
+        if resolved_date is None and research_warehouse is not None:
+            snapshot = research_warehouse.latest()
+            resolved_date = snapshot.market_date if snapshot is not None else None
+        if resolved_date is None and market_screen is not None:
+            resolved_date = market_screen.market_warehouse.latest_trade_date()
+        if resolved_date is None:
+            raise HTTPException(status_code=404, detail="MARKET_SNAPSHOT_NOT_FOUND")
+        zone = ZoneInfo("Asia/Shanghai")
+        cutoff = datetime.combine(resolved_date, time(23, 59, 59), tzinfo=zone)
+        known_at = datetime.now(zone)
+        events = event_repository.visible_events(as_of=cutoff, known_at=known_at)
+        event_source_ids = sorted({event.source_id for event in events})
+        configured_sources = ("csrc", "sse", "stats", "szse")
+        source_scans = event_repository.latest_source_scans(
+            market_date=resolved_date,
+            known_at=known_at,
+        )
+        successful_scan_ids = sorted(
+            scan.source_id for scan in source_scans if scan.status == "SUCCESS"
+        )
+        return {
+            "market_date": resolved_date.isoformat(),
+            "event_cutoff_at": cutoff.isoformat(),
+            "event_source_ids": event_source_ids,
+            "configured_source_ids": configured_sources,
+            "successful_scan_source_ids": successful_scan_ids,
+            "source_scans": [scan.model_dump(mode="json") for scan in source_scans],
+            "source_coverage_status": (
+                "COMPLETE"
+                if set(configured_sources).issubset(successful_scan_ids)
+                else "PARTIAL"
+            ),
+            "events": [event.model_dump(mode="json") for event in events],
+        }
+
+    @app.get("/api/market/xbrl-status")
+    def exchange_xbrl_status(market_date: date | None = None) -> dict[str, object]:
+        resolved_date = market_date
+        if resolved_date is None and research_warehouse is not None:
+            snapshot = research_warehouse.latest()
+            resolved_date = snapshot.market_date if snapshot is not None else None
+        if resolved_date is None and market_screen is not None:
+            resolved_date = market_screen.market_warehouse.latest_trade_date()
+        if resolved_date is None:
+            raise HTTPException(status_code=404, detail="MARKET_SNAPSHOT_NOT_FOUND")
+        zone = ZoneInfo("Asia/Shanghai")
+        scans = xbrl_discovery_repository.latest(
+            market_date=resolved_date,
+            known_at=datetime.now(zone),
+        )
+        source_ids = {scan.source_id for scan in scans}
+        if any(scan.status == "AVAILABLE" for scan in scans):
+            availability_status = "AVAILABLE"
+        elif source_ids == {"sse", "szse"} and all(
+            scan.status == "UNAVAILABLE" for scan in scans
+        ):
+            availability_status = "PDF_FALLBACK"
+        else:
+            availability_status = "PARTIAL"
+        return {
+            "market_date": resolved_date.isoformat(),
+            "configured_source_ids": ["sse", "szse"],
+            "availability_status": availability_status,
+            "scans": [scan.model_dump(mode="json") for scan in scans],
+        }
 
     @app.get("/api/market/evidence-status")
     def full_market_evidence_status(

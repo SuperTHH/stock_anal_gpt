@@ -432,7 +432,9 @@ test("five navigation destinations reuse one report and one latest research requ
     await user.click(screen.getByRole("button", { name: destination }));
     expect(screen.getByRole("heading", { name: destination })).toBeInTheDocument();
   }
-  expect(fetchSpy).toHaveBeenCalledTimes(2);
+  expect(fetchSpy).toHaveBeenCalledTimes(4);
+  expect(fetchSpy).toHaveBeenCalledWith("/api/market/events", expect.anything());
+  expect(fetchSpy).toHaveBeenCalledWith("/api/market/xbrl-status", expect.anything());
 });
 
 test("individual research offers all 24 unique securities and changes the active company", async () => {

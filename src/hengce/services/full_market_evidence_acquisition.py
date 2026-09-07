@@ -762,8 +762,43 @@ class FullMarketEvidenceAcquisitionService:
             "是否存在",
             "触及",
         )
-        for page_number, page in enumerate(PdfReader(pdf_path).pages, start=1):
-            text = page.extract_text() or ""
+        explicit_type_markers = (
+            "审计意见类型",
+            "审计报告意见类型",
+            "内部控制审计报告中的审计意见",
+        )
+        pages = [page.extract_text() or "" for page in PdfReader(pdf_path).pages]
+
+        def classify(window: str) -> bool | None:
+            compact = re.sub(r"\s+", "", window)
+            if any(marker in compact for marker in conditional_markers):
+                return None
+            without_unmodified = compact.replace("无保留意见", "")
+            if any(marker in compact for marker in negative_markers) or (
+                "保留意见" in without_unmodified
+            ):
+                return False
+            if "无保留意见" in compact and not any(
+                marker in compact for marker in modified_markers
+            ):
+                return True
+            return None
+
+        # Annual reports often repeat historical audit findings before the current
+        # financial statements.  Prefer the report's explicit current opinion-type
+        # field wherever it appears, rather than returning the first narrative hit.
+        for page_number, text in enumerate(pages, start=1):
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            for index, line in enumerate(lines):
+                compact_line = re.sub(r"\s+", "", line)
+                if not any(marker in compact_line for marker in explicit_type_markers):
+                    continue
+                window = " ".join(lines[index : index + 2])[:500]
+                result = classify(window)
+                if result is not None:
+                    return page_number, window or None, result
+
+        for page_number, text in enumerate(pages, start=1):
             if "审计意见" not in text and "无保留意见" not in text:
                 continue
             lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -771,18 +806,9 @@ class FullMarketEvidenceAcquisitionService:
                 if "审计意见" not in line and "审计报告意见" not in line and "保留意见" not in line:
                     continue
                 window = " ".join(lines[index : index + 2])[:500]
-                compact = re.sub(r"\s+", "", window)
-                if any(marker in compact for marker in conditional_markers):
-                    continue
-                without_unmodified = compact.replace("无保留意见", "")
-                if any(marker in compact for marker in negative_markers) or (
-                    "保留意见" in without_unmodified
-                ):
-                    return page_number, window or None, False
-                if "无保留意见" in compact and not any(
-                    marker in compact for marker in modified_markers
-                ):
-                    return page_number, window or None, True
+                result = classify(window)
+                if result is not None:
+                    return page_number, window or None, result
         return None, None, None
 
     @staticmethod

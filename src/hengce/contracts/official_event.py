@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
@@ -18,6 +19,36 @@ class OfficialEvent(FactBase):
     related_strategies: tuple[StrategyType, ...] = ()
     impact_horizon: str
     confidence: Decimal = Field(ge=0, le=1)
+
+
+class OfficialEventSourceScan(BaseModel):
+    """Auditable result of scanning one configured official event source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scan_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    market_date: date
+    listing_url: HttpUrl
+    status: Literal["SUCCESS", "FAILED"]
+    event_count: int = Field(ge=0)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scanned_at: datetime
+    error_code: str | None = None
+
+    @field_validator("scanned_at")
+    @classmethod
+    def scanned_at_must_be_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scan time must include a timezone")
+        return value
+
+    @field_validator("error_code")
+    @classmethod
+    def error_code_must_be_non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("error code must be non-blank")
+        return value
 
 
 class ReportSource(BaseModel):

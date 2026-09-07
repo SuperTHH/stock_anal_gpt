@@ -275,20 +275,23 @@ class FullMarketResearchService:
         return snapshot
 
     def _depth_exclusion_reasons(self, market_date: date) -> dict[str, tuple[str, ...]]:
-        """Return unresolved periodic-report blocks from each latest cohort run."""
+        """Return unresolved terminal failures for required depth evidence."""
         if not self.state.path.is_file():
             return {}
         with sqlite3.connect(self.state.path) as connection:
             rows = connection.execute(
                 """
-                SELECT task.ts_code, task.evidence_period,
+                SELECT task.ts_code, task.evidence_kind, task.evidence_period,
                        COALESCE(json_extract(task.payload_json, '$.error_code'),
-                                'OFFICIAL_PDF_PARSE_FAILED')
+                                'OFFICIAL_EVIDENCE_FAILED')
                 FROM full_market_evidence_tasks AS task
                 JOIN full_market_evidence_runs AS run ON run.run_id=task.run_id
                 WHERE run.market_date=?
-                  AND task.evidence_kind='PERIODIC_REPORT'
-                  AND task.status='BLOCKED'
+                  AND task.evidence_kind IN (
+                      'PERIODIC_REPORT', 'DIVIDEND_YEAR',
+                      'RISK_SCREEN', 'CORPORATE_ACTION'
+                  )
+                  AND task.status IN ('BLOCKED', 'RETRYABLE_FAILED')
                   AND NOT EXISTS (
                       SELECT 1
                       FROM full_market_evidence_tasks AS satisfied
@@ -300,13 +303,15 @@ class FullMarketResearchService:
                         AND satisfied.evidence_period=task.evidence_period
                         AND satisfied.status='SATISFIED'
                   )
-                ORDER BY task.ts_code, task.evidence_period
+                ORDER BY task.ts_code, task.evidence_kind, task.evidence_period
                 """,
                 (market_date.isoformat(),),
             ).fetchall()
         grouped: dict[str, list[str]] = {}
-        for code, period, error_code in rows:
-            grouped.setdefault(str(code), []).append(f"{period}:{error_code}")
+        for code, evidence_kind, period, error_code in rows:
+            grouped.setdefault(str(code), []).append(
+                f"{evidence_kind}:{period}:{error_code}"
+            )
         return {code: tuple(reasons) for code, reasons in grouped.items()}
 
     def _source_records(

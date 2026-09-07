@@ -59,6 +59,48 @@ export interface OfficialEvent {
   published_at?: string;
 }
 
+export interface LiveOfficialEventsPayload {
+  market_date: string;
+  event_cutoff_at: string;
+  event_source_ids: string[];
+  configured_source_ids: string[];
+  successful_scan_source_ids: string[];
+  source_scans: OfficialEventSourceScan[];
+  source_coverage_status: "COMPLETE" | "PARTIAL";
+  events: OfficialEvent[];
+}
+
+export interface OfficialEventSourceScan {
+  scan_id: string;
+  source_id: string;
+  market_date: string;
+  listing_url: string;
+  status: "SUCCESS" | "FAILED";
+  event_count: number;
+  content_hash: string;
+  scanned_at: string;
+  error_code?: string | null;
+}
+
+export interface ExchangeXbrlScan {
+  scan_id: string;
+  source_id: "sse" | "szse";
+  market_date: string;
+  listing_url: string;
+  status: "AVAILABLE" | "UNAVAILABLE" | "FAILED";
+  instance_count: number;
+  content_hash: string;
+  scanned_at: string;
+  reason_code?: string | null;
+}
+
+export interface ExchangeXbrlStatusPayload {
+  market_date: string;
+  configured_source_ids: string[];
+  availability_status: "AVAILABLE" | "PDF_FALLBACK" | "PARTIAL";
+  scans: ExchangeXbrlScan[];
+}
+
 export interface ReportSource {
   record_id: string;
   domain: string;
@@ -92,6 +134,8 @@ export interface ReportPayload {
   candidate_pools: Record<StrategyType, Candidate[]>;
   data_domain_statuses: Record<string, string>;
   official_events?: OfficialEvent[];
+  official_event_source_scans?: OfficialEventSourceScan[];
+  exchange_xbrl_status?: ExchangeXbrlStatusPayload;
   source_records?: ReportSource[];
   pool_readiness?: Partial<Record<StrategyType, PoolReadiness>>;
   universe_id?: string | null;
@@ -128,6 +172,7 @@ export interface FullMarketSecurity {
   industry_l1: string | null;
   market_data_status: "AVAILABLE" | "OFFICIAL_NO_TRADING" | "COLLECTION_FAILED";
   market_data_issue: string | null;
+  trading_status_source_url?: string | null;
   trade_date: string | null;
   close: string | null;
   amount: string | null;
