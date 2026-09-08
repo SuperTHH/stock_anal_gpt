@@ -77,6 +77,7 @@ class SecurityStrategyInput:
 class StrategyEvaluationResult:
     candidates: tuple[StrategyCandidate, ...]
     evidence: StrategyRunEvidence
+    factor_complete_count: int
 
 
 class StrategyEngine:
@@ -112,25 +113,28 @@ class StrategyEngine:
             raise ValueError("STRATEGY_CUTOFF_INVALID")
         if known_at.tzinfo is None or known_at.utcoffset() is None:
             raise ValueError("STRATEGY_KNOWN_AT_INVALID")
+        below_minimum = [item for item in inputs if self._below_candidate_minimum(item)]
+        minimum_eligible = [item for item in inputs if item not in below_minimum]
+        factor_incomplete = [
+            item
+            for item in minimum_eligible
+            if self._critical_data_insufficient(item, data_cutoff_at, known_at)
+        ]
+        factor_complete = [item for item in minimum_eligible if item not in factor_incomplete]
         excluded = [
             item
             for item in inputs
-            if self._excluded(item) or self._below_candidate_minimum(item)
+            if item in below_minimum or self._excluded(item)
         ]
-        remaining = [item for item in inputs if item not in excluded]
-        insufficient = [
-            item
-            for item in remaining
-            if self._critical_data_insufficient(item, data_cutoff_at, known_at)
-        ]
-        eligible = [item for item in remaining if item not in insufficient]
+        insufficient = [item for item in factor_incomplete if item not in excluded]
+        eligible = [item for item in factor_complete if item not in excluded]
         scored: list[tuple[SecurityStrategyInput, tuple[FactorDetail, ...], Decimal]] = []
         for item in eligible:
             details = tuple(
                 self._factor_detail(
                     item,
                     spec,
-                    eligible,
+                    factor_complete,
                     data_cutoff_at,
                     known_at,
                 )
@@ -195,7 +199,11 @@ class StrategyEngine:
             published_candidate_count=len(candidates),
             completed=True,
         )
-        return StrategyEvaluationResult(tuple(candidates), evidence)
+        return StrategyEvaluationResult(
+            tuple(candidates),
+            evidence,
+            factor_complete_count=len(factor_complete),
+        )
 
     def _excluded(self, item: SecurityStrategyInput) -> bool:
         if not item.hard_filter_passed:

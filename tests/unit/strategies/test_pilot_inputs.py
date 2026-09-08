@@ -87,6 +87,7 @@ def pilot_metrics(code: str, offset: int) -> PilotMetricResult:
             Decimal("0.02") + value / Decimal("100")
         ),
         "payout_ratio": "0.5",
+        "dividend_earnings_coverage": "2",
         "fcf_coverage": str(Decimal("1") + value / Decimal("10")),
         "dividend_cut_flag": "0",
     }
@@ -244,6 +245,65 @@ def test_stable_dividend_prefers_implemented_ttm_yield() -> None:
         f"{target}:implemented_dividend_yield_ttm",
     )
     assert dividend.announced_dividend_only is True
+
+
+def test_financial_industry_uses_earnings_dividend_coverage() -> None:
+    snapshot = universe()
+    first = snapshot.members[0].model_copy(update={"industry_l1": "金融业"})
+    snapshot = snapshot.model_copy(update={"members": (first, *snapshot.members[1:])})
+    results = {
+        member.ts_code: pilot_metrics(member.ts_code, index)
+        for index, member in enumerate(snapshot.members, start=1)
+    }
+    target = first.ts_code
+    results[target].metrics["fcf_coverage"] = metric("fcf_coverage", None, target)
+
+    built = PilotStrategyInputBuilder().build(
+        snapshot,
+        results,
+        filters(snapshot),
+        CUTOFF,
+        CUTOFF,
+    )
+
+    coverage = built[StrategyType.STABLE_DIVIDEND][0].factors["cashflow_coverage"]
+    assert coverage.value == Decimal("2")
+    assert coverage.source_record_ids == (
+        f"{target}:dividend_earnings_coverage",
+    )
+
+
+def test_loss_making_dividend_payer_gets_zero_sustainability_not_missing() -> None:
+    snapshot = universe()
+    results = {
+        member.ts_code: pilot_metrics(member.ts_code, index)
+        for index, member in enumerate(snapshot.members, start=1)
+    }
+    target = snapshot.members[0].ts_code
+    results[target].metrics["payout_ratio"] = MetricValue(
+        value=None,
+        quality_status=QualityStatus.MISSING,
+        input_fact_ids=(f"{target}:dividend", f"{target}:net-profit"),
+        algorithm_version="pilot-financial-metrics-v1",
+        reason="NON_POSITIVE_EARNINGS",
+    )
+
+    built = PilotStrategyInputBuilder().build(
+        snapshot,
+        results,
+        filters(snapshot),
+        CUTOFF,
+        CUTOFF,
+    )
+
+    sustainability = built[StrategyType.STABLE_DIVIDEND][0].factors[
+        "payout_sustainability"
+    ]
+    assert sustainability.value == Decimal("0")
+    assert sustainability.source_record_ids == (
+        f"{target}:dividend",
+        f"{target}:net-profit",
+    )
 
 
 def test_non_positive_earnings_receives_a_lineaged_valuation_penalty() -> None:

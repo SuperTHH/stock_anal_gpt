@@ -825,7 +825,7 @@ class FullMarketResearchService:
                     data_cutoff_at=report_cutoff,
                     known_at=known_at,
                 )
-                complete = evaluation.evidence.qualified_count
+                complete = evaluation.factor_complete_count
                 blocking = (
                     "NO_COMPLETE_STRATEGY_FACTORS"
                     if complete == 0

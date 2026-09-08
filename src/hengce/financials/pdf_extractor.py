@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -12,6 +15,7 @@ from pypdf import PdfReader
 
 from hengce.contracts.enums import QualityStatus, ReportType, StatementType
 from hengce.contracts.financial import FilingDescriptor
+from hengce.financials.pdf_cmaps import restore_declared_cmaps
 from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
 
 _GROUPED_INTEGER = r"(?:\d{1,3}(?:,\s*\d{3})+|\d+)"
@@ -22,16 +26,16 @@ _ACCOUNTING_NUMBER = (
 _NUMBER = re.compile(rf"^{_ACCOUNTING_NUMBER}$")
 _CHINESE_NUMERAL = r"[一二三四五六七八九十]+"
 _NOTE_REFERENCE = (
-    rf"(?:注释\s*\d+|{_CHINESE_NUMERAL}(?:、|[-－—])\d+"
+    rf"(?:注(?:释)?\s*\d+|{_CHINESE_NUMERAL}(?:、|[-－—])\d+"
     rf"(?:[（(]\d+[）)])?[A-Za-z]?|"
     rf"{_CHINESE_NUMERAL}、\s*[（(]{_CHINESE_NUMERAL}[）)]|"
     rf"{_CHINESE_NUMERAL}[（(]{_CHINESE_NUMERAL}[）)]\d+|"
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+(?:\.\d+)?|[A-Za-z])[）)])+|"
-    r"\d{1,3}[（(]\d+[）)])"
+    r"\d{1,3}[（(](?:\d+|[A-Za-z]+)[）)])"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
 _LABELED_CODE_DETAIL = re.compile(
-    r"(?:证券代码(?:（A/H）|\(A/H\))?|股票代码|公司代码)\s*[：:]?\s*"
+    r"(?:[证證]券代[码碼](?:（A/H）|\(A/H\))?|股票代[码碼]|公司代[码碼])\s*[：:]?\s*"
     r"((?:[0-9]\s*){6})(?:\.([A-Z]{2,4}))?"
 )
 _REPORT_PERIOD = re.compile(r"报告期\s*[：:]\s*(\d{4}-\d{2}-\d{2})")
@@ -64,7 +68,9 @@ _SPLIT_NUMERIC_NOTE_COLUMN_FACT = re.compile(
     rf"(?P<value>{_ACCOUNTING_NUMBER})\s+"
     rf"{_ACCOUNTING_NUMBER}(?:\s+.*)?$"
 )
-_INLINE_CNY_UNIT = re.compile(r"[（(](?:人民币)?(元|千元|万元|百万元|亿元)[）)]")
+_INLINE_CNY_UNIT = re.compile(
+    r"[（(](?:人民币)?(元|千元|万元|百万元|亿元)(?:[，,]\s*特别注明除外)?[）)]"
+)
 _BARE_CNY_UNIT = re.compile(r"(人民币(?:元|千元|万元|百万元|亿元))")
 _UNIT_DEFINITIONS = {
     "人民币元": ("CNY", Decimal(1)),
@@ -173,11 +179,13 @@ _ALIASES = {
     "营业支出": "operating_cost",
     "净利润": "net_profit",
     "扣除非经常性损益后的净利润": "adjusted_net_profit",
+    "扣除非经常性损益的净利润": "adjusted_net_profit",
     "归属于上市公司股东的扣除非经常性损益的净利润": ("adjusted_net_profit"),
     "归属于上市公司普通股股东的扣除非经常性损益的净利润": ("adjusted_net_profit"),
     "归属于母公司股东的扣除非经常性损益后的净利润": "adjusted_net_profit",
     "归属于母公司股东扣除非经常性损益后的净利润": "adjusted_net_profit",
     "归属于母公司股东的扣除非经常性损益的净利润": "adjusted_net_profit",
+    "归属于本公司股东的扣除非经常性损益的净利润": "adjusted_net_profit",
     "归属于母公司股东扣除非经常性损益的净利润": "adjusted_net_profit",
     "归属于本行股东的扣除非经常性损益的净利润": "adjusted_net_profit",
     "归属于上市公司股东的扣除非经常性损益的净利": "adjusted_net_profit",
@@ -229,6 +237,7 @@ _ALIASES = {
     "筹资活动（使用）/产生的现金流量净额": "financing_cash_flow",
     "汇率变动对现金及现金等价物的影响": "cash_exchange_effect",
     "汇率变动对现金及现金等价物的影响额": "cash_exchange_effect",
+    "汇率变动对现金的影响额": "cash_exchange_effect",
     "汇率变动对现金流量净额": "cash_exchange_effect",
     "现金及现金等价物净增加额": "net_cash_change",
     "现金及现金等价物净减少额": "net_cash_change",
@@ -357,11 +366,15 @@ class CninfoPdfExtractor:
         *,
         parser_version: str,
         reader_factory: Callable[[Path], _PdfDocument] = PdfReader,
+        ocr_page_text: Callable[[_PdfPage, int], str | None] | None = None,
+        ocr_cache_root: Path | None = None,
     ) -> None:
         if not parser_version.strip():
             raise ValueError("PDF_PARSER_VERSION_INVALID")
         self.parser_version = parser_version
         self.reader_factory = reader_factory
+        self.ocr_page_text = ocr_page_text or _rapidocr_page_text
+        self.ocr_cache_root = ocr_cache_root
 
     def extract(
         self,
@@ -378,6 +391,8 @@ class CninfoPdfExtractor:
             raise ValueError("PDF_CONTENT_HASH_MISMATCH")
         try:
             reader = self.reader_factory(pdf_path)
+            if isinstance(reader, PdfReader):
+                restore_declared_cmaps(reader)
             pages = [
                 (
                     _physical_page_number(page, index),
@@ -392,6 +407,43 @@ class CninfoPdfExtractor:
             descriptor=descriptor,
             pdf_content_hash=pdf_content_hash,
         )
+        if "PDF_IMAGE_ONLY" in primary.issues:
+            ocr_indexes = _image_only_statement_indexes(pages)
+            fully_scanned = not any(
+                text and text.strip() for _page_number, text in pages
+            )
+            if fully_scanned:
+                ocr_indexes = {
+                    index for index, (_page_number, text) in enumerate(pages) if not text
+                }
+                ordered_ocr_indexes = _fully_scanned_ocr_order(
+                    len(pages),
+                    descriptor.report_type,
+                )
+            else:
+                ordered_ocr_indexes = sorted(ocr_indexes)
+            ocr_pages = list(pages)
+            replacements = 0
+            for index in ordered_ocr_indexes:
+                if index not in ocr_indexes:
+                    continue
+                page_number = pages[index][0]
+                ocr_text = self._cached_ocr_page_text(
+                    reader.pages[index],
+                    page_number=page_number,
+                    pdf_content_hash=pdf_content_hash,
+                )
+                if ocr_text and ocr_text.strip():
+                    ocr_pages[index] = (page_number, ocr_text)
+                    replacements += 1
+            if replacements:
+                # Validate the complete selected scan, not an earlier valid prefix:
+                # a later statement can introduce a conflict or a correction.
+                return self._parse_pages(
+                    ocr_pages,
+                    descriptor=descriptor,
+                    pdf_content_hash=pdf_content_hash,
+                )
         if (
             primary.quality_status is QualityStatus.VALID
             or "PDF_CASH_FLOW_EQUATION_FAILED" not in primary.issues
@@ -433,17 +485,50 @@ class CninfoPdfExtractor:
             descriptor=descriptor,
             pdf_content_hash=pdf_content_hash,
         )
-        primary_score = (
-            primary.quality_status is QualityStatus.VALID,
-            -len(primary.issues),
-            len(primary.facts),
-        )
-        layout_score = (
-            layout.quality_status is QualityStatus.VALID,
-            -len(layout.issues),
-            len(layout.facts),
-        )
+        primary_score = _extraction_score(primary)
+        layout_score = _extraction_score(layout)
         return layout if layout_score > primary_score else primary
+
+    def _cached_ocr_page_text(
+        self,
+        page: _PdfPage,
+        *,
+        page_number: int,
+        pdf_content_hash: str,
+    ) -> str | None:
+        cache_path = (
+            self.ocr_cache_root
+            / pdf_content_hash
+            / f"rapidocr-v1-page-{page_number}.txt"
+            if self.ocr_cache_root is not None
+            else None
+        )
+        if cache_path is not None and cache_path.is_file():
+            try:
+                return cache_path.read_text(encoding="utf-8") or None
+            except OSError:
+                pass
+        text = self.ocr_page_text(page, page_number)
+        if not text or cache_path is None:
+            return text
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{cache_path.name}.",
+                dir=cache_path.parent,
+            )
+            temporary_path = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_path, cache_path)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return text
 
     def _parse_pages(
         self,
@@ -480,6 +565,7 @@ class CninfoPdfExtractor:
             front_matter_labeled_codes = {descriptor.ts_code}
         codes = (
             cover_codes
+            or _company_profile_codes(pages, exchange_suffix)
             or front_matter_labeled_codes
             or labeled_codes
             or set(_SUFFIXED_CODE.findall(joined))
@@ -562,7 +648,7 @@ class CninfoPdfExtractor:
             candidates.extend(flattened_candidates)
             if flattened_noncurrent_marker is not None:
                 noncurrent_liability_section_markers.append(flattened_noncurrent_marker)
-            if page_number <= 20:
+            if page_number <= 20 or not formal_statements_started:
                 candidates.extend(
                     _flattened_summary_candidates(raw_lines, page_number=page_number)
                 )
@@ -825,11 +911,15 @@ class CninfoPdfExtractor:
                     unit = None
                     pending_label = ""
                     continue
+                standalone_inline_unit = _INLINE_CNY_UNIT.fullmatch(line.strip())
+                if standalone_inline_unit is not None and _ALIASES.get(pending_label):
+                    unit = _UNIT_DEFINITIONS[standalone_inline_unit.group(1)]
+                    continue
                 unit_match = _UNIT.search(line)
                 bare_unit_match = (
                     _BARE_CNY_UNIT.search(line)
                     if unit_match is None and formal_statements_started
-                    else None
+                    else (_BARE_CNY_UNIT.match(line.strip()) if unit_match is None else None)
                 )
                 if unit_match is not None or bare_unit_match is not None:
                     unit_name = (
@@ -1341,7 +1431,7 @@ class CninfoPdfExtractor:
             issues.add("PDF_LAYOUT_UNSUPPORTED")
         required_facts = (
             _BANK_REQUIRED_FACTS
-            if _is_financial_institution_report(joined)
+            if _is_financial_institution_report(joined, issuer_name=descriptor.issuer_name)
             else (
                 _Q1_REQUIRED_FACTS
                 if descriptor.report_type is ReportType.Q1
@@ -1975,10 +2065,21 @@ def _is_bank_report(text: str) -> bool:
     )
 
 
-def _is_financial_institution_report(text: str) -> bool:
-    return _is_bank_report(text) or "保险（集团）" in text or "保险(集团)" in text or (
-        "保险合同负债" in text
-        and ("保险服务收入" in text or "保险业务收入" in text)
+def _is_financial_institution_report(text: str, *, issuer_name: str | None = None) -> bool:
+    normalized_name = (issuer_name or "").replace("銀", "银")
+    named_bank = (
+        re.fullmatch(r".+银行(?:股份有限公司)?", normalized_name) is not None
+        and _issuer_name_matches(text[:1000].replace("銀", "银"), normalized_name)
+        and "客户存款" in text
+        and "贷款和垫款" in text
+    )
+    return (
+        named_bank or _is_bank_report(text)
+        or "保险（集团）" in text or "保险(集团)" in text
+        or (
+            "保险合同负债" in text
+            and ("保险服务收入" in text or "保险业务收入" in text)
+        )
     )
 
 
@@ -2073,6 +2174,14 @@ def _has_image_only_statement_block(
     pages: list[tuple[int, str | None]],
 ) -> bool:
     """Detect image-only statements between a text audit report and its notes."""
+    return bool(_image_only_statement_indexes(pages))
+
+
+def _image_only_statement_indexes(
+    pages: list[tuple[int, str | None]],
+) -> set[int]:
+    """Return blank-page indexes for scanned statements bounded by audit/notes text."""
+    indexes: set[int] = set()
     run_start: int | None = None
     for index in range(len(pages) + 1):
         text = pages[index][1] if index < len(pages) else "end"
@@ -2094,9 +2203,102 @@ def _has_image_only_statement_block(
             and "审计报告" in before
             and "财务报表附注" in re.sub(r"\s+", "", after)
         ):
-            return True
+            indexes.update(range(run_start, index))
         run_start = None
-    return False
+    return indexes
+
+
+def _fully_scanned_ocr_order(
+    page_count: int,
+    report_type: ReportType,
+) -> tuple[int, ...]:
+    """Probe cover pages, then the likely financial-report tail, then the middle."""
+    front_end = min(12, page_count)
+    tail_start = (
+        max(front_end, int(page_count * 0.4))
+        if report_type is ReportType.ANNUAL
+        else front_end
+    )
+    return tuple(
+        [
+            *range(front_end),
+            *range(tail_start, page_count),
+            *range(front_end, tail_start),
+        ]
+    )
+
+
+@lru_cache(maxsize=1)
+def _rapidocr_engine() -> object:
+    from rapidocr_onnxruntime import RapidOCR
+
+    return RapidOCR()
+
+
+def _rapidocr_page_text(page: _PdfPage, _page_number: int) -> str | None:
+    """OCR the largest embedded scan and rebuild reading-order table rows."""
+    try:
+        rotation = int(page.get("/Rotate", 0)) % 360  # type: ignore[attr-defined]
+        images = list(page.images)  # type: ignore[attr-defined]
+        image = max(
+            (item.image for item in images),
+            key=lambda candidate: candidate.width * candidate.height,
+        )
+        if rotation:
+            image = image.rotate(-rotation, expand=True)
+        result, _elapsed = _rapidocr_engine()(image)  # type: ignore[operator]
+    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        return None
+    if not result:
+        return None
+    return _ocr_result_text(result)
+
+
+def _ocr_result_text(result: object) -> str | None:
+    """Normalize RapidOCR cells into deterministic top-to-bottom table rows."""
+    cells: list[tuple[float, float, float, str]] = []
+    for item in result:  # type: ignore[union-attr]
+        try:
+            box, text, confidence = item
+            if not str(text).strip() or float(confidence) < 0.5:
+                continue
+            xs = [float(point[0]) for point in box]
+            ys = [float(point[1]) for point in box]
+        except (IndexError, TypeError, ValueError):
+            continue
+        cells.append(
+            (
+                min(xs),
+                (min(ys) + max(ys)) / 2,
+                max(1.0, max(ys) - min(ys)),
+                str(text).strip(),
+            )
+        )
+    rows: list[list[tuple[float, float, float, str]]] = []
+    for candidate in sorted(cells, key=lambda entry: (entry[1], entry[0])):
+        _x, center_y, height, _text = candidate
+        if rows:
+            row_center = sum(entry[1] for entry in rows[-1]) / len(rows[-1])
+            row_height = max(entry[2] for entry in rows[-1])
+            if abs(center_y - row_center) <= max(height, row_height) * 0.55:
+                rows[-1].append(candidate)
+                continue
+        rows.append([candidate])
+    lines = [
+        " ".join(entry[3] for entry in sorted(row, key=lambda entry: entry[0]))
+        for row in rows
+    ]
+    text = "\n".join(line for line in lines if line)
+    return text or None
+
+
+def _extraction_score(result: PdfExtractionResult) -> tuple[bool, bool, int, int]:
+    return (
+        result.quality_status is QualityStatus.VALID,
+        "PDF_IMAGE_ONLY" not in result.issues,
+        len(result.facts),
+        -len(result.issues),
+    )
 
 
 def _formal_fact_priority(
@@ -2289,6 +2491,9 @@ def _page_unit(raw_lines: list[str]) -> tuple[str, Decimal] | None:
         inline_unit_match = _INLINE_CNY_UNIT.search(line)
         if inline_unit_match is not None:
             return _UNIT_DEFINITIONS[inline_unit_match.group(1)]
+        bare_unit_match = _BARE_CNY_UNIT.match(line.strip())
+        if bare_unit_match is not None:
+            return _UNIT_DEFINITIONS[bare_unit_match.group(1)]
     return None
 
 
@@ -2681,7 +2886,8 @@ def _statement_period_heading_matches(
     if descriptor.report_type is ReportType.ANNUAL:
         if (
             re.fullmatch(
-                rf"{period.year}年度(?:人民币(?:元|千元|万元|亿元))?",
+                rf"(?:{period.year}年度|(?:截至)?{period.year}年12月31日止年度)"
+                r"(?:人民币(?:元|千元|万元|百万元|亿元))?",
                 normalized,
             )
             is not None
@@ -2882,6 +3088,33 @@ def _period_matches(
             return True
     visible_date = re.compile(rf"{period.year}\s*年\s*0?{period.month}\s*月\s*0?{period.day}\s*日")
     return visible_date.search(text) is not None
+
+
+def _company_profile_codes(
+    pages: list[tuple[int, str | None]], default_suffix: str,
+) -> set[str]:
+    front = "\n".join(text for number, text in pages if number <= 20 and text)
+    explicit_a_codes = {
+        f"{symbol}.{default_suffix}"
+        for symbol in re.findall(r"(?m)^\s*A\s*股代[码碼]\s*[：:]\s*(\d{6})\b", front)
+    }
+    if explicit_a_codes:
+        return explicit_a_codes
+    # Match a real section heading, not a table-of-contents entry or a subsidiary
+    # definition. Only the explicit A-share abbreviation row supplies the code.
+    heading = re.search(
+        r"(?m)^\s*(?:第[一二三四五六七八九十]+节\s*)?"
+        r"公司简介(?:和主要财务指标|及主要财务指标)?\s*$", front,
+    )
+    if heading is None:
+        return set()
+    profile = front[heading.end():heading.end() + 5000]
+    return {
+        f"{symbol}.{default_suffix}"
+        for symbol in re.findall(
+            r"代[码碼]\s*[：:]\s*(\d{6})\s+A\s*股简[称稱]", profile,
+        )
+    }
 
 
 def _a_share_labeled_codes(text: str, default_suffix: str) -> set[str]:

@@ -4,9 +4,13 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pypdf.errors import PdfReadError
 
 from hengce.acquisition.discovery import PublicAttachment
-from hengce.acquisition.downloader import ApprovedAttachmentDownloader
+from hengce.acquisition.downloader import (
+    ApprovedAttachmentDownloader,
+    validate_attachment_payload,
+)
 from hengce.contracts.enums import (
     AcquisitionStatus,
     DocumentKind,
@@ -172,6 +176,28 @@ def test_transport_failure_retries_once_then_succeeds(tmp_path: Path) -> None:
 
     assert result.status is AcquisitionStatus.DOWNLOADED
     assert attempts == 2
+
+
+def test_official_pdf_with_recoverable_xref_is_accepted_in_tolerant_mode(
+    monkeypatch,
+) -> None:
+    class _RecoverablePdf:
+        def __init__(self, _payload, *, strict: bool) -> None:
+            if strict:
+                raise PdfReadError("Broken xref table")
+            self.pages = [object()]
+            self.trailer = {"/Root": object()}
+
+    monkeypatch.setattr(
+        "hengce.acquisition.downloader.PdfReader",
+        _RecoverablePdf,
+    )
+
+    assert validate_attachment_payload(
+        "official.pdf",
+        "application/pdf",
+        b"%PDF-1.7 recoverable official payload",
+    )
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 429])

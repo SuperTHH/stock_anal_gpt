@@ -39,7 +39,8 @@ data/normalized/full_market_research/market_date=YYYY-MM-DD/
   和该策略关键因子完整，该策略即可发布真实候选；覆盖率继续展示为数据质量指标。
 - 证据不完整的股票保留在研究漏斗并逐项显示缺口，不进入评分集合。
 - 一级行业有效样本不少于 20 时使用行业内分位；否则回退全市场并留痕。
-- 稳定高股息的 `CANDIDATE` 必须满足股息率不低于 5%；低于 5% 最多为 `WATCH`。
+- 稳定高股息正式发布列表（包括 `CANDIDATE` 和 `WATCH`）必须满足评分股息率不低于 5%；
+  不足 30 只时保留实际数量，不降低门槛。
 - 不生成买入、仓位、目标价或确定性收益指令。
 
 读取接口：
@@ -84,3 +85,21 @@ POST /api/market/evidence-reviews/{task_id}/decision
 
 确认风险证据时，审核决定、任务迁移与 `official_risk_screen_versions` 有效记录在同一个
 SQLite 事务内写入。退回只进入 `BLOCKED`，不会生成有效风险记录。
+
+## 定向修复与 PDF 解析
+
+使用股票代码和错误码限制重跑范围，避免反复处理未涉及本次修复的证据：
+
+```powershell
+.venv\Scripts\python.exe -m hengce.cli run-full-market-evidence --run-id RUN_ID --stage reparse-blocked --ts-code 600332.SH --error-code PDF_LAYOUT_UNSUPPORTED --max-items 1 --data-dir data
+```
+
+- v5 解析器首先按 PDF 明确声明的 Adobe 字体集合恢复缺失的 Unicode 映射，仅在内存中操作。
+  保留已有映射；未知字体不猜测。映射涵盖页面和嵌套表单中实际使用的字符。
+- 图片型财务报表使用本地 OCR，识别文本按内容哈希和物理页码缓存到
+  `data/normalized/ocr/`，重复解析复用缓存，不重复下载原始 PDF。
+- OCR 必须完成选定的全部扫描页后统一校验，不能因前缀页面已经提齐字段就提前通过。
+- 原始 PDF 仍在 `data/raw/objects/<content_hash>/payload.bin` 唯一保存；OCR 与字体修复
+  不替代来源、不修改原始文件，不跳过主体、报告期、关键事实和财务方程校验。
+- 错误从图片型转为字段缺失或方程冲突只代表定位深入，不代表证据完成；只有正式流水线
+  解析校验通过并写入 `SATISFIED` 才计入完成数。

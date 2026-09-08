@@ -76,6 +76,99 @@ def test_cninfo_discovery_excludes_summary_and_keeps_original_and_correction(
     assert len(tuple((tmp_path / "raw" / "provenance").glob("*.json"))) == 2
 
 
+def test_cninfo_periodic_report_discovery_reads_later_pages(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"stockList": [{"code": "600004", "orgId": "gssh0600004"}]},
+            )
+        form = parse_qs(request.content.decode(), keep_blank_values=True)
+        if form["pageNum"] == ["1"]:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "announcements": [],
+                    "hasMore": True,
+                    "totalpages": 2,
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "announcements": [
+                    {
+                        "announcementTitle": "白云机场2026年第一季度报告",
+                        "announcementTime": 1_777_478_400_000,
+                        "adjunctUrl": "q1-full.PDF",
+                        "announcementId": "later-page",
+                    }
+                ],
+                "hasMore": False,
+                "totalpages": 2,
+            },
+        )
+
+    guard = _Guard()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        reports = CninfoPeriodicReportCollector(
+            client=client,
+            guard=guard,  # type: ignore[arg-type]
+            raw_store=RawObjectStore(tmp_path / "raw"),
+            clock=lambda: NOW,
+        ).reports("600004.SH")
+
+    assert [item.announcement_id for item in reports] == ["later-page"]
+    assert len(guard.calls) == 3
+
+
+def test_cninfo_exact_period_fallback_excludes_summary(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"stockList": [{"code": "600050", "orgId": "gssh0600050"}]},
+            )
+        form = parse_qs(request.content.decode(), keep_blank_values=True)
+        assert form["searchkey"] == ["2025年年度报告"]
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "announcements": [
+                    {
+                        "announcementTitle": "中国联通2025年年度报告摘要",
+                        "announcementTime": 1_774_022_400_000,
+                        "adjunctUrl": "summary.PDF",
+                        "announcementId": "summary",
+                    },
+                    {
+                        "announcementTitle": "中国联通2025年年度报告",
+                        "announcementTime": 1_774_022_400_000,
+                        "adjunctUrl": "full.PDF",
+                        "announcementId": "full",
+                    },
+                ],
+                "hasMore": False,
+            },
+        )
+
+    guard = _Guard()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        reports = CninfoPeriodicReportCollector(
+            client=client,
+            guard=guard,  # type: ignore[arg-type]
+            raw_store=RawObjectStore(tmp_path / "raw"),
+            clock=lambda: NOW,
+        ).reports_for_period("600050.SH", "2025-12-31")
+
+    assert [item.announcement_id for item in reports] == ["full"]
+
+
 def test_cninfo_dividend_discovery_filters_year_implementation_and_b_share(
     tmp_path: Path,
 ) -> None:

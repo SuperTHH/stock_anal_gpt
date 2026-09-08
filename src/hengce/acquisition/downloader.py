@@ -221,12 +221,14 @@ def validate_attachment_payload(
     if normalized_type == "application/pdf":
         if not payload.startswith(b"%PDF-"):
             return False
-        try:
-            reader = PdfReader(BytesIO(payload), strict=True)
-            len(reader.pages)
-        except (OSError, PdfReadError, ValueError):
-            return False
-        return reader.trailer.get("/Root") is not None
+        for strict in (True, False):
+            try:
+                reader = PdfReader(BytesIO(payload), strict=strict)
+                if len(reader.pages) > 0 and reader.trailer.get("/Root") is not None:
+                    return True
+            except (OSError, PdfReadError, ValueError):
+                continue
+        return False
     suffix = Path(attachment_name).suffix.lower()
     if normalized_type in _XML_CONTENT_TYPES and suffix not in {".xml", ".xbrl"}:
         suffix = ".xbrl"

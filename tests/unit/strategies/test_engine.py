@@ -19,6 +19,7 @@ def security_input(
     values: dict[str, str | None],
     *,
     industry: str = "电子",
+    hard_filter_passed: bool = True,
 ) -> SecurityStrategyInput:
     return SecurityStrategyInput(
         ts_code=ts_code,
@@ -37,7 +38,7 @@ def security_input(
             )
             for name, value in values.items()
         },
-        hard_filter_passed=True,
+        hard_filter_passed=hard_filter_passed,
         selection_reasons=("结构化因子满足策略规则",),
         risk_flags=(),
         catalysts=("半年维度经营改善",),
@@ -134,6 +135,26 @@ def test_stable_dividend_below_five_percent_is_not_published() -> None:
         known_at=CUTOFF,
     )
 
+    assert [item.ts_code for item in evaluation.candidates] == ["600001.SH"]
+    assert evaluation.evidence.excluded_count == 1
+    assert evaluation.evidence.qualified_count == 1
+
+
+def test_complete_but_hard_filtered_security_still_counts_as_factor_complete() -> None:
+    values = {spec.name: "1" for spec in STABLE_DIVIDEND_FULL_MARKET_V1.factors}
+    values["dividend_yield"] = "0.06"
+
+    evaluation = StrategyEngine(STABLE_DIVIDEND_FULL_MARKET_V1).evaluate(
+        [
+            security_input("600000.SH", values, hard_filter_passed=False),
+            security_input("600001.SH", values),
+        ],
+        report_date=date(2026, 7, 29),
+        data_cutoff_at=CUTOFF,
+        known_at=CUTOFF,
+    )
+
+    assert evaluation.factor_complete_count == 2
     assert [item.ts_code for item in evaluation.candidates] == ["600001.SH"]
     assert evaluation.evidence.excluded_count == 1
     assert evaluation.evidence.qualified_count == 1

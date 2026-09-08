@@ -353,6 +353,7 @@ def test_annual_dividend_history_drives_strategy_metrics_without_action_dates() 
     assert result.metrics["consecutive_dividend_years"].value == Decimal("5")
     assert result.metrics["announced_dividend_yield"].value == Decimal("1") / Decimal("30")
     assert result.metrics["payout_ratio"].value == Decimal("2") / Decimal("3")
+    assert result.metrics["dividend_earnings_coverage"].value == Decimal("1.5")
     assert result.metrics["fcf_coverage"].value == Decimal("1.5")
     assert result.metrics["dividend_cut_flag"].value == Decimal("1")
     assert "annual-dividend-2025" in result.metrics["announced_dividend_yield"].input_fact_ids
@@ -395,6 +396,7 @@ def test_implemented_dividend_derives_ttm_yield_and_total_with_share_lineage() -
         Decimal("0.8") / Decimal("24")
     )
     assert result.metrics["payout_ratio"].value == Decimal("2") / Decimal("3")
+    assert result.metrics["dividend_earnings_coverage"].value == Decimal("1.5")
     assert result.metrics["fcf_coverage"].value == Decimal("1.5")
     assert "implemented-dividend-1" in result.metrics["payout_ratio"].input_fact_ids
     assert "shares-baseline" in result.metrics["payout_ratio"].input_fact_ids

@@ -169,9 +169,9 @@ class PilotStrategyInputBuilder:
                 "payout_sustainability": self._payout_sustainability(
                     metric_map
                 ),
-                "cashflow_coverage": self._direct(
+                "cashflow_coverage": self._dividend_coverage(
                     metric_map,
-                    "fcf_coverage",
+                    getattr(member, "industry_l1", None),
                 ),
                 "balance_sheet_quality": common_balance,
                 "dividend_cut_safety": self._dividend_cut_safety(metric_map),
@@ -445,6 +445,13 @@ class PilotStrategyInputBuilder:
         metric_map: Mapping[str, MetricValue],
     ) -> FactorInput:
         metric = metric_map.get("payout_ratio")
+        if (
+            metric is not None
+            and metric.value is None
+            and metric.reason == "NON_POSITIVE_EARNINGS"
+            and metric.input_fact_ids
+        ):
+            return self._factor(Decimal(0), metric.input_fact_ids)
         if not self._usable(metric):
             return self._missing(metric_map, ("payout_ratio",))
         assert metric is not None and metric.value is not None
@@ -452,6 +459,18 @@ class PilotStrategyInputBuilder:
             "0.5"
         )
         return self._factor(value, metric.input_fact_ids)
+
+    def _dividend_coverage(
+        self,
+        metric_map: Mapping[str, MetricValue],
+        industry_l1: str | None,
+    ) -> FactorInput:
+        metric_name = (
+            "dividend_earnings_coverage"
+            if industry_l1 is not None and "金融" in industry_l1
+            else "fcf_coverage"
+        )
+        return self._direct(metric_map, metric_name)
 
     def _dividend_cut_safety(
         self,

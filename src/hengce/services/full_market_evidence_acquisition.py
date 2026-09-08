@@ -55,7 +55,13 @@ class FullMarketEvidenceAcquisitionService:
         self.raw_store = raw_store
         self.clock = clock
 
-    def discover(self, run_id: str, *, max_securities: int) -> dict[str, int]:
+    def discover(
+        self,
+        run_id: str,
+        *,
+        max_securities: int,
+        ts_code: str | None = None,
+    ) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
             run_id=run_id,
@@ -64,7 +70,7 @@ class FullMarketEvidenceAcquisitionService:
         )
         by_code: dict[str, list[FullMarketEvidenceTask]] = defaultdict(list)
         for task in tasks:
-            if task.evidence_kind in {
+            if (ts_code is None or task.ts_code == ts_code) and task.evidence_kind in {
                 EvidenceKind.PERIODIC_REPORT,
                 EvidenceKind.DIVIDEND_YEAR,
             }:
@@ -82,6 +88,15 @@ class FullMarketEvidenceAcquisitionService:
                             periodic_reports,
                             task.market_date,
                         )
+                        if report is None:
+                            report = self._match(
+                                task.evidence_period,
+                                self.collector.reports_for_period(
+                                    ts_code,
+                                    task.evidence_period,
+                                ),
+                                task.market_date,
+                            )
                     else:
                         announcements = self.collector.dividend_announcements(
                             ts_code,
@@ -141,7 +156,13 @@ class FullMarketEvidenceAcquisitionService:
                 discovered += 1
         return {"discovered": discovered, "failed": failed}
 
-    def download(self, run_id: str, *, max_tasks: int) -> dict[str, int]:
+    def download(
+        self,
+        run_id: str,
+        *,
+        max_tasks: int,
+        ts_code: str | None = None,
+    ) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
             run_id=run_id,
@@ -149,7 +170,8 @@ class FullMarketEvidenceAcquisitionService:
             page_size=max(max_tasks, 1),
         )
         downloaded = failed = 0
-        for task in tasks[:max_tasks]:
+        selected = [task for task in tasks if ts_code is None or task.ts_code == ts_code]
+        for task in selected[:max_tasks]:
             assert task.source_url is not None
             try:
                 self.guard.authorize(
@@ -282,6 +304,7 @@ class FullMarketEvidenceAcquisitionService:
         max_tasks: int,
         include_blocked: bool = False,
         ts_code: str | None = None,
+        error_codes: frozenset[str] | None = None,
     ) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
@@ -296,7 +319,10 @@ class FullMarketEvidenceAcquisitionService:
         parsed = failed = 0
         documents = PdfFinancialDocumentRepository(self.repository.path)
         dividends = AnnualDividendRepository(self.repository.path)
-        extractor = CninfoPdfExtractor(parser_version="cninfo-pdf-full-market-v2")
+        extractor = CninfoPdfExtractor(
+            parser_version="cninfo-pdf-full-market-v5",
+            ocr_cache_root=self.raw_store.root.parent / "normalized" / "ocr",
+        )
         retryable_tasks = [
             task
             for task in tasks
@@ -306,6 +332,7 @@ class FullMarketEvidenceAcquisitionService:
                 EvidenceKind.DIVIDEND_YEAR,
             }
             and (ts_code is None or task.ts_code == ts_code)
+            and (error_codes is None or task.error_code in error_codes)
             and task.raw_object_hash is not None
             and (
                 task.status is EvidenceTaskStatus.DOWNLOADED
@@ -638,7 +665,14 @@ class FullMarketEvidenceAcquisitionService:
             raise ValueError("DIVIDEND_AMOUNT_INVALID")
         return amount_page, amount_excerpt, per_share, ex_date
 
-    def retry_failed(self, run_id: str, *, max_tasks: int) -> dict[str, int]:
+    def retry_failed(
+        self,
+        run_id: str,
+        *,
+        max_tasks: int,
+        error_codes: frozenset[str] | None = None,
+        ts_code: str | None = None,
+    ) -> dict[str, int]:
         self._assert_cohort_gate(run_id)
         _, tasks = self.repository.list_tasks(
             run_id=run_id,
@@ -650,13 +684,17 @@ class FullMarketEvidenceAcquisitionService:
                 (
                     task
                     for task in tasks
-                    if task.status is EvidenceTaskStatus.RETRYABLE_FAILED
-                    or task.error_code
-                    in {
-                        "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND",
-                        "OFFICIAL_DIVIDEND_TERMS_MISSING",
-                        "OFFICIAL_PERIODIC_REPORT_NOT_FOUND",
-                    }
+                    if (error_codes is None or task.error_code in error_codes)
+                    and (ts_code is None or task.ts_code == ts_code)
+                    and (
+                        task.status is EvidenceTaskStatus.RETRYABLE_FAILED
+                        or task.error_code
+                        in {
+                            "OFFICIAL_DIVIDEND_IMPLEMENTATION_NOT_FOUND",
+                            "OFFICIAL_DIVIDEND_TERMS_MISSING",
+                            "OFFICIAL_PERIODIC_REPORT_NOT_FOUND",
+                        }
+                    )
                 ),
                 key=lambda task: (
                     task.status is not EvidenceTaskStatus.RETRYABLE_FAILED,
@@ -818,19 +856,35 @@ class FullMarketEvidenceAcquisitionService:
         market_date: date,
     ) -> CninfoReport | None:
         period = date.fromisoformat(evidence_period)
+        def normalized_title(report: CninfoReport) -> str:
+            return re.sub(r"[\s_]", "", report.title)
+
         if period.month == 12:
             markers = (
                 f"{period.year}年年度报告",
                 f"{period.year}年度报告",
+                f"{period.year}年年报",
+                f"{period.year}年报",
             )
         else:
-            markers = (f"{period.year}年一季度报告", f"{period.year}年第一季度报告")
+            markers = (
+                f"{period.year}年一季度报告",
+                f"{period.year}一季度报告",
+                f"{period.year}年第一季度报告",
+            )
         cutoff = datetime.combine(market_date, time(21, 30), tzinfo=_SHANGHAI)
         matches = [
             report
             for report in reports
             if report.published_at <= cutoff
-            and any(marker in re.sub(r"\s+", "", report.title) for marker in markers)
+            and (
+                any(marker in normalized_title(report) for marker in markers)
+                or (
+                    period.month == 12
+                    and normalized_title(report) == "年报全文"
+                    and report.published_at.year == period.year + 1
+                )
+            )
         ]
         return (
             max(matches, key=lambda item: (item.published_at, item.announcement_id))

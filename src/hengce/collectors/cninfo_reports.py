@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -45,51 +45,127 @@ class CninfoPeriodicReportCollector:
         org_id = organizations.get(symbol)
         if org_id is None:
             raise ValueError("CNINFO_ORGANIZATION_NOT_FOUND")
-        self.guard.authorize("cninfo", _QUERY_URL, "filing", "cninfo.report_query")
         exchange = "szse" if ts_code.endswith(".SZ") else "sse"
-        response = self.client.post(
-            _QUERY_URL,
-            data={
-                "pageNum": "1",
-                "pageSize": "30",
-                "column": exchange,
-                "tabName": "fulltext",
-                "plate": "sz" if exchange == "szse" else "sh",
-                "stock": f"{symbol},{org_id}",
-                "category": "category_ndbg_szsh;category_yjdbg_szsh",
-                "seDate": "2023-01-01~2026-08-21",
-            },
-            headers={"Referer": "https://www.cninfo.com.cn/"},
-            timeout=httpx.Timeout(30, connect=10),
-        )
-        response.raise_for_status()
-        payload = response.json()
-        self.raw_store.put(
-            source_id="cninfo",
-            source_url=_QUERY_URL,
-            collected_at=self.clock(),
-            content_type="application/json",
-            payload=response.content,
-        )
         reports: list[CninfoReport] = []
-        for item in payload.get("announcements") or ():
-            title = str(item.get("announcementTitle") or "")
-            if not title or "摘要" in title or "英文" in title:
-                continue
-            if "年度报告" not in title and "季度报告" not in title:
-                continue
-            timestamp = int(item["announcementTime"]) / 1000
-            reports.append(
-                CninfoReport(
-                    ts_code=ts_code,
-                    title=title,
-                    published_at=datetime.fromtimestamp(timestamp, tz=_SHANGHAI),
-                    attachment_url=(
-                        "https://static.cninfo.com.cn/" + str(item["adjunctUrl"]).lstrip("/")
-                    ),
-                    announcement_id=str(item["announcementId"]),
-                )
+        page_num = 1
+        while page_num <= 20:
+            self.guard.authorize("cninfo", _QUERY_URL, "filing", "cninfo.report_query")
+            response = self.client.post(
+                _QUERY_URL,
+                data={
+                    "pageNum": str(page_num),
+                    "pageSize": "30",
+                    "column": exchange,
+                    "tabName": "fulltext",
+                    "plate": "sz" if exchange == "szse" else "sh",
+                    "stock": f"{symbol},{org_id}",
+                    "category": "category_ndbg_szsh;category_yjdbg_szsh",
+                    "seDate": "2023-01-01~2026-08-21",
+                },
+                headers={"Referer": "https://www.cninfo.com.cn/"},
+                timeout=httpx.Timeout(30, connect=10),
             )
+            response.raise_for_status()
+            payload = response.json()
+            self.raw_store.put(
+                source_id="cninfo",
+                source_url=_QUERY_URL,
+                collected_at=self.clock(),
+                content_type="application/json",
+                payload=response.content,
+            )
+            for item in payload.get("announcements") or ():
+                title = str(item.get("announcementTitle") or "")
+                if not title or "摘要" in title or "英文" in title:
+                    continue
+                if not any(marker in title for marker in ("年度报告", "季度报告", "年报")):
+                    continue
+                timestamp = int(item["announcementTime"]) / 1000
+                reports.append(
+                    CninfoReport(
+                        ts_code=ts_code,
+                        title=title,
+                        published_at=datetime.fromtimestamp(timestamp, tz=_SHANGHAI),
+                        attachment_url=(
+                            "https://static.cninfo.com.cn/"
+                            + str(item["adjunctUrl"]).lstrip("/")
+                        ),
+                        announcement_id=str(item["announcementId"]),
+                    )
+                )
+            if not payload.get("hasMore"):
+                break
+            page_num += 1
+        return tuple(sorted(reports, key=lambda item: (item.published_at, item.announcement_id)))
+
+    def reports_for_period(
+        self,
+        ts_code: str,
+        evidence_period: str,
+    ) -> tuple[CninfoReport, ...]:
+        """Use CNINFO's exact title search when the category query omits a full report."""
+        period = date.fromisoformat(evidence_period)
+        organizations = self._organization_map()
+        symbol = ts_code[:6]
+        org_id = organizations.get(symbol)
+        if org_id is None:
+            raise ValueError("CNINFO_ORGANIZATION_NOT_FOUND")
+        exchange = "szse" if ts_code.endswith(".SZ") else "sse"
+        searchkey = (
+            f"{period.year}年年度报告"
+            if period.month == 12
+            else f"{period.year}年一季度报告"
+        )
+        end_year = period.year + 1 if period.month == 12 else period.year
+        reports: list[CninfoReport] = []
+        page_num = 1
+        while page_num <= 20:
+            self.guard.authorize("cninfo", _QUERY_URL, "filing", "cninfo.report_query")
+            response = self.client.post(
+                _QUERY_URL,
+                data={
+                    "pageNum": str(page_num),
+                    "pageSize": "30",
+                    "column": exchange,
+                    "tabName": "fulltext",
+                    "plate": "sz" if exchange == "szse" else "sh",
+                    "stock": f"{symbol},{org_id}",
+                    "category": "",
+                    "seDate": f"{end_year}-01-01~{end_year}-12-31",
+                    "searchkey": searchkey,
+                },
+                headers={"Referer": "https://www.cninfo.com.cn/"},
+                timeout=httpx.Timeout(30, connect=10),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            self.raw_store.put(
+                source_id="cninfo",
+                source_url=_QUERY_URL,
+                collected_at=self.clock(),
+                content_type="application/json",
+                payload=response.content,
+            )
+            for item in payload.get("announcements") or ():
+                title = str(item.get("announcementTitle") or "")
+                if not title or "摘要" in title or "英文" in title:
+                    continue
+                timestamp = int(item["announcementTime"]) / 1000
+                reports.append(
+                    CninfoReport(
+                        ts_code=ts_code,
+                        title=title,
+                        published_at=datetime.fromtimestamp(timestamp, tz=_SHANGHAI),
+                        attachment_url=(
+                            "https://static.cninfo.com.cn/"
+                            + str(item["adjunctUrl"]).lstrip("/")
+                        ),
+                        announcement_id=str(item["announcementId"]),
+                    )
+                )
+            if not payload.get("hasMore"):
+                break
+            page_num += 1
         return tuple(sorted(reports, key=lambda item: (item.published_at, item.announcement_id)))
 
     def dividend_announcements(

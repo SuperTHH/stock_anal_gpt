@@ -900,6 +900,28 @@ class PilotMetricCalculator:
                 total_dividend / net_profit_2025.value,
                 payout_ids,
             )
+        if total_dividend == 0 and net_profit_2025 is not None:
+            metrics["dividend_earnings_coverage"] = derived(
+                Decimal(0),
+                payout_ids,
+            )
+        elif (
+            total_dividend is None
+            or total_dividend < 0
+            or net_profit_2025 is None
+            or net_profit_2025.value <= 0
+        ):
+            metrics["dividend_earnings_coverage"] = missing(
+                payout_ids,
+                "NON_POSITIVE_EARNINGS"
+                if net_profit_2025 is not None and net_profit_2025.value <= 0
+                else "INPUT_MISSING",
+            )
+        else:
+            metrics["dividend_earnings_coverage"] = derived(
+                net_profit_2025.value / total_dividend,
+                payout_ids,
+            )
         coverage_ids = tuple(
             sorted({*current_ids, *free_cash_flow.input_fact_ids, *share_capital_ids})
         )

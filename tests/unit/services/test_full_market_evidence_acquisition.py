@@ -279,6 +279,54 @@ def test_report_match_ignores_whitespace_inside_official_title() -> None:
     assert matched.announcement_id == "3"
 
 
+@pytest.mark.parametrize(
+    ("period", "title"),
+    (
+        ("2026-03-31", "600004_白云机场_2026年_一季度报告202604291115"),
+        ("2025-12-31", "600704_物产中大_2025年_年度报告20260427"),
+        ("2025-12-31", "中国石油天然气股份有限公司2025年年报"),
+        ("2024-12-31", "2024年年报报告"),
+    ),
+)
+def test_report_match_accepts_official_title_variants(
+    period: str,
+    title: str,
+) -> None:
+    report = CninfoReport(
+        ts_code="600004.SH",
+        title=title,
+        published_at=datetime(2026, 4, 29, tzinfo=UTC),
+        attachment_url="https://static.cninfo.com.cn/full.PDF",
+        announcement_id="variant",
+    )
+
+    matched = FullMarketEvidenceAcquisitionService._match(
+        period,
+        (report,),
+        date(2026, 8, 21),
+    )
+
+    assert matched is report
+
+
+def test_report_match_accepts_generic_annual_fulltext_by_publication_year() -> None:
+    report = CninfoReport(
+        ts_code="601225.SH",
+        title="年报全文",
+        published_at=datetime(2024, 4, 25, tzinfo=UTC),
+        attachment_url="https://static.cninfo.com.cn/full.PDF",
+        announcement_id="generic-fulltext",
+    )
+
+    matched = FullMarketEvidenceAcquisitionService._match(
+        "2023-12-31",
+        (report,),
+        date(2026, 8, 21),
+    )
+
+    assert matched is report
+
+
 def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
     tmp_path: Path,
 ) -> None:
@@ -299,7 +347,10 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
         expected_version=task.version,
         status=EvidenceTaskStatus.RETRYABLE_FAILED,
         observed_at=datetime(2026, 8, 22, tzinfo=UTC),
-        updates={"source_url": "https://static.cninfo.com.cn/report.PDF"},
+        updates={
+            "source_url": "https://static.cninfo.com.cn/report.PDF",
+            "error_code": "OFFICIAL_PDF_DOWNLOAD_FAILED",
+        },
     )
     blocked_source = next(
         item
@@ -340,7 +391,14 @@ def test_retry_resumes_from_last_durable_state_and_later_cohort_is_gated(
             raw_store=RawObjectStore(tmp_path / "raw"),
             clock=lambda: datetime(2026, 8, 22, tzinfo=UTC),
         )
-        assert service.retry_failed(high.run_id, max_tasks=1) == {"retried": 1}
+        assert service.retry_failed(
+            high.run_id,
+            max_tasks=10,
+            error_codes=frozenset({"OFFICIAL_PDF_DOWNLOAD_FAILED"}),
+        ) == {"retried": 1}
+        untouched = repository.get_task(blocked.task_id)
+        assert untouched is not None
+        assert untouched.status is EvidenceTaskStatus.BLOCKED
         assert service.retry_failed(high.run_id, max_tasks=10) == {"retried": 2}
         with pytest.raises(ValueError, match="^EVIDENCE_COHORT_GATE_BLOCKED$"):
             service.retry_failed(liquidity.run_id, max_tasks=1)

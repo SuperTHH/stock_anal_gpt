@@ -488,6 +488,7 @@ def run_full_market_evidence(
     stage: Annotated[str, typer.Option()] = "discover",
     max_items: Annotated[int, typer.Option(min=1, max=1000)] = 10,
     ts_code: Annotated[str | None, typer.Option()] = None,
+    error_code: Annotated[str | None, typer.Option()] = None,
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
 ) -> None:
     """Resume one policy-limited evidence acquisition stage."""
@@ -537,13 +538,26 @@ def run_full_market_evidence(
             clock=clock,
         )
         if stage == "discover":
-            result = service.discover(run_id, max_securities=max_items)
+            result = service.discover(
+                run_id,
+                max_securities=max_items,
+                ts_code=ts_code,
+            )
         elif stage == "download":
-            result = service.download(run_id, max_tasks=max_items)
+            result = service.download(
+                run_id,
+                max_tasks=max_items,
+                ts_code=ts_code,
+            )
         elif stage == "prefill-risk":
             result = service.prefill_risk(run_id, max_tasks=max_items)
         elif stage == "retry":
-            result = service.retry_failed(run_id, max_tasks=max_items)
+            result = service.retry_failed(
+                run_id,
+                max_tasks=max_items,
+                error_codes=(frozenset({error_code}) if error_code is not None else None),
+                ts_code=ts_code,
+            )
         elif stage == "reconcile":
             result = FullMarketEvidenceReconciliationService(
                 repository=repository,
@@ -556,9 +570,15 @@ def run_full_market_evidence(
                 max_tasks=max_items,
                 include_blocked=True,
                 ts_code=ts_code,
+                error_codes=(frozenset({error_code}) if error_code is not None else None),
             )
         else:
-            result = service.parse(run_id, max_tasks=max_items, ts_code=ts_code)
+            result = service.parse(
+                run_id,
+                max_tasks=max_items,
+                ts_code=ts_code,
+                error_codes=(frozenset({error_code}) if error_code is not None else None),
+            )
     typer.echo(json.dumps({"run_id": run_id, "stage": stage, **result}, sort_keys=True))
 
 
