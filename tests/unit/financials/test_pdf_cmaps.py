@@ -80,8 +80,12 @@ def test_restores_declared_adobe_cids_without_changing_original_bytes():
 @pytest.mark.parametrize(
     "kwargs", [{"registry": "Custom"}, {"ordering": "Identity"}, {"existing": True}]
 )
-def test_does_not_guess_unknown_mapping_or_replace_existing_mapping(kwargs):
+def test_does_not_guess_unknown_mapping_or_replace_existing_mapping(kwargs, monkeypatch):
     reader = PdfReader(BytesIO(make_pdf(**kwargs)))
+    monkeypatch.setattr(
+        "hengce.financials.pdf_cmaps._document_text_cids",
+        lambda _reader: pytest.fail("Unneeded content-stream scan"),
+    )
     assert restore_declared_cmaps(reader) == 0
 
 

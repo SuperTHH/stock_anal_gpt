@@ -48,10 +48,11 @@ def _unicode_cmap(collection: str, vertical: bool, cids: tuple[int, ...] | None)
 def restore_declared_cmaps(reader: PdfReader) -> int:
     visited: set[int] = set()
     repaired = 0
-    cids = _document_text_cids(reader)
+    cids: tuple[int, ...] | None = None
+    cids_collected = False
 
     def visit(resources: DictionaryObject) -> None:
-        nonlocal repaired
+        nonlocal repaired, cids, cids_collected
         if id(resources) in visited:
             return
         visited.add(id(resources))
@@ -85,6 +86,9 @@ def restore_declared_cmaps(reader: PdfReader) -> int:
                 "Korea1",
             ):
                 continue
+            if not cids_collected:
+                cids = _document_text_cids(reader)
+                cids_collected = True
             try:
                 payload = _unicode_cmap(f"Adobe-{ordering}", encoding == "/Identity-V", cids)
             except CMapDB.CMapNotFound:

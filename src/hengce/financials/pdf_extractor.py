@@ -499,7 +499,7 @@ class CninfoPdfExtractor:
         cache_path = (
             self.ocr_cache_root
             / pdf_content_hash
-            / f"rapidocr-v1-page-{page_number}.txt"
+            / f"rapidocr-v2-page-{page_number}.txt"
             if self.ocr_cache_root is not None
             else None
         )
@@ -804,6 +804,20 @@ class CninfoPdfExtractor:
                             if inline_unit_match is not None
                             else None
                         )
+                        heading_period = normalized_heading.partition(title[0])[0]
+                        if _statement_period_heading_matches(
+                            heading_period, descriptor=descriptor, statement_type=title[1],
+                        ):
+                            statement_title, statement_type = title
+                            formal_statements_started = True
+                            formal_cash_flow_started = (
+                                formal_cash_flow_started
+                                or statement_type is StatementType.CASH_FLOW
+                            )
+                            pending_statement = None
+                            pending_statement_lines = 0
+                            unit = pending_statement_unit
+                            pending_statement_unit = None
                     else:
                         statement_title = title[0]
                         statement_type = title[1]
@@ -911,6 +925,17 @@ class CninfoPdfExtractor:
                     unit = None
                     pending_label = ""
                     continue
+                if statement_type is StatementType.INCOME_STATEMENT:
+                    normalized_income_line = _normalize_interleaved_income_header(
+                        line, descriptor=descriptor,
+                    )
+                    if normalized_income_line is None:
+                        issues.add("PDF_LAYOUT_UNSUPPORTED")
+                        statement_title = None
+                        statement_type = None
+                        pending_label = ""
+                        continue
+                    line = normalized_income_line
                 standalone_inline_unit = _INLINE_CNY_UNIT.fullmatch(line.strip())
                 if standalone_inline_unit is not None and _ALIASES.get(pending_label):
                     unit = _UNIT_DEFINITIONS[standalone_inline_unit.group(1)]
@@ -1077,7 +1102,7 @@ class CninfoPdfExtractor:
                                 source_text_hash=hashlib.sha256(
                                     raw_line.strip().encode("utf-8")
                                 ).hexdigest(),
-                                source_priority=10,
+                                source_priority=30,
                             )
                         )
                         pending_label = ""
@@ -1180,6 +1205,8 @@ class CninfoPdfExtractor:
                 else:
                     currency, multiplier = unit
                 if canonical_name == "total_shares":
+                    if statement_type is not StatementType.BALANCE_SHEET:
+                        continue
                     currency, multiplier = "SHARES", multiplier
                 elif currency != "CNY":
                     fact_names_without_supported_unit.add(canonical_name)
@@ -1580,6 +1607,29 @@ class CninfoPdfExtractor:
         )
 
 
+def _normalize_interleaved_income_header(
+    line: str, *, descriptor: FilingDescriptor,
+) -> str | None:
+    """Separate a total-revenue row from OCR-interleaved column headings.
+
+    Both column years must match the filing. Never substitute the component
+    '其中：营业收入' for the consolidated total.
+    """
+    if descriptor.report_type is not ReportType.ANNUAL:
+        return line
+    year = descriptor.report_period.year
+    match = re.fullmatch(
+        rf"营业总收入\s+项目\s+(?:国\s+)?附注{_CHINESE_NUMERAL}\s+"
+        rf"(?P<current>{_ACCOUNTING_NUMBER})\s+(?P<year>\d{{4}})年度\s+"
+        rf"{_ACCOUNTING_NUMBER}\s+(?P<prior_year>\d{{4}})年度", line,
+    )
+    if match is not None and (
+        int(match.group("year")) != year or int(match.group("prior_year")) != year - 1
+    ):
+        return None
+    return f"营业总收入 | {match.group('current')}" if match is not None else line
+
+
 def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     label, separator, raw_value = line.partition("|")
     if not separator:
@@ -1603,13 +1653,8 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     canonical_name = _canonical_name(label)
     if canonical_name is None or not _NUMBER.fullmatch(raw_value):
         return None
-    normalized = re.sub(r"\s+", "", raw_value).replace(",", "")
-    if normalized.startswith("(") and normalized.endswith(")"):
-        normalized = f"-{normalized[1:-1]}"
-    try:
-        return canonical_name, Decimal(normalized)
-    except InvalidOperation:
-        return None
+    number = _accounting_decimal(raw_value)
+    return (canonical_name, number) if number is not None else None
 
 
 def _parse_combined_bank_group_fact(line: str) -> tuple[str, Decimal] | None:
@@ -2033,7 +2078,9 @@ def _flattened_alias_match(
         else ""
     )
     separator = r"\s*(?:[|｜]\s*)?"
-    note = rf"(?:(?:{_NOTE_REFERENCE})\s+)?"
+    # A bare 'note' marker is distinguishable from a numbered note when the
+    # following value is grouped in thousands; never consume that value as an ID.
+    note = rf"(?:(?:{_NOTE_REFERENCE})\s+|注\s+(?=\d{{1,3}},\d{{3}}))?"
     return re.search(
         rf"{prefix}{qualifier}{unit}{separator}{note}(?P<value>{_ACCOUNTING_NUMBER})",
         text,
@@ -2042,6 +2089,10 @@ def _flattened_alias_match(
 
 def _accounting_decimal(raw_value: str) -> Decimal | None:
     normalized = re.sub(r"\s+", "", raw_value).replace(",", "")
+    if "," in raw_value and re.match(r"^[(-]?0\d", normalized) is not None:
+        # A grouped integer cannot start with a zero-filled leading group.
+        # OCR commonly leaves this suffix after dropping the first digits.
+        return None
     if normalized.startswith("(") and normalized.endswith(")"):
         normalized = f"-{normalized[1:-1]}"
     try:
@@ -2232,7 +2283,7 @@ def _fully_scanned_ocr_order(
 def _rapidocr_engine() -> object:
     from rapidocr_onnxruntime import RapidOCR
 
-    return RapidOCR()
+    return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
 
 
 def _rapidocr_page_text(page: _PdfPage, _page_number: int) -> str | None:
@@ -2246,6 +2297,10 @@ def _rapidocr_page_text(page: _PdfPage, _page_number: int) -> str | None:
         )
         if rotation:
             image = image.rotate(-rotation, expand=True)
+        # Red seals can split a black amount into spurious note/value cells.
+        # The red channel attenuates the seal while retaining the printed text;
+        # only an in-memory OCR input is changed, never the source image/PDF.
+        image = image.convert("RGB").getchannel("R").convert("RGB")
         result, _elapsed = _rapidocr_engine()(image)  # type: ignore[operator]
     except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
         return None
@@ -2356,6 +2411,11 @@ def _is_extraction_boundary(normalized_heading: str) -> bool:
 
 
 def _period_prefixed_parent_statement(normalized_heading: str) -> bool:
+    if re.match(
+        r"^(?:\d{4}年度|\d{4}年\d{1,2}月\d{1,2}日)?公司"
+        r"(?:资产负债表|利润表|现金流量表)", normalized_heading,
+    ) is not None:
+        return True
     return any(
         _statement_heading_matches(normalized_heading, title)
         for title in ("母公司资产负债表", "母公司利润表", "母公司现金流量表")
@@ -2382,6 +2442,9 @@ def _embedded_consolidated_statement(
 ) -> tuple[str, StatementType] | None:
     """Recognize issuer PDFs whose visual heading is extracted after the table."""
     normalized_lines = [_normalized_heading(line) for line in raw_lines]
+    share_unit = _page_unit(raw_lines)
+    if "股本信息" in normalized_lines and share_unit is not None and share_unit[0] == "SHARES":
+        return "股本信息", StatementType.BALANCE_SHEET
     combined = next(
         (
             (title, statement_type)
@@ -3093,13 +3156,33 @@ def _period_matches(
 def _company_profile_codes(
     pages: list[tuple[int, str | None]], default_suffix: str,
 ) -> set[str]:
-    front = "\n".join(text for number, text in pages if number <= 20 and text)
+    front_pages: list[str] = []
+    for _number, text in pages:
+        if not text:
+            continue
+        lines = text.splitlines()
+        if _page_unit(lines) is not None and any(
+            _normalized_heading(line) in _CONSOLIDATED_STATEMENT_TITLES for line in lines
+        ):
+            break
+        front_pages.append(text)
+    front = "\n".join(front_pages)
     explicit_a_codes = {
         f"{symbol}.{default_suffix}"
         for symbol in re.findall(r"(?m)^\s*A\s*股代[码碼]\s*[：:]\s*(\d{6})\b", front)
     }
     if explicit_a_codes:
         return explicit_a_codes
+    stock_table_codes: set[str] = set()
+    for stock_table in re.finditer(
+        r"(?m)^[^\S\n]*股票种类[^\n]*股票上市交易所[^\n]*股票简称[^\n]*股票代码[^\n]*\n"
+        r"(?P<rows>(?:[^\S\n]*[AH]\s*股[^\n]*\n?)+)", front,
+    ):
+        stock_table_codes.update(
+            _a_share_labeled_codes(stock_table.group("rows"), default_suffix)
+        )
+    if stock_table_codes:
+        return stock_table_codes
     # Match a real section heading, not a table-of-contents entry or a subsidiary
     # definition. Only the explicit A-share abbreviation row supplies the code.
     heading = re.search(

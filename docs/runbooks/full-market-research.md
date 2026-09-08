@@ -94,11 +94,16 @@ SQLite 事务内写入。退回只进入 `BLOCKED`，不会生成有效风险记
 .venv\Scripts\python.exe -m hengce.cli run-full-market-evidence --run-id RUN_ID --stage reparse-blocked --ts-code 600332.SH --error-code PDF_LAYOUT_UNSUPPORTED --max-items 1 --data-dir data
 ```
 
-- v5 解析器首先按 PDF 明确声明的 Adobe 字体集合恢复缺失的 Unicode 映射，仅在内存中操作。
+- v6 解析器首先按 PDF 明确声明的 Adobe 字体集合恢复缺失的 Unicode 映射，仅在内存中操作。
   保留已有映射；未知字体不猜测。映射涵盖页面和嵌套表单中实际使用的字符。
+  仅在发现可修复字体时扫描内容流，不对已有完整映射的报告执行额外字符扫描。
 - 图片型财务报表使用本地 OCR，识别文本按内容哈希和物理页码缓存到
   `data/normalized/ocr/`，重复解析复用缓存，不重复下载原始 PDF。
 - OCR 必须完成选定的全部扫描页后统一校验，不能因前缀页面已经提齐字段就提前通过。
+- OCR v2 使用红色通道减弱印章干扰，保留原图与 v1 缓存；线程数固定为 1，避免多模型
+  争抢本地计算资源。可疑的前导零分组金额不作为有效事实接受。
+- 识别带报告期前缀的合并表标题及“公司报表”边界，避免混合合并口径与母公司口径。
+  OCR 交错的收入表头必须同时匹配当期与比较期，不用收入子项替代营业总收入。
 - 原始 PDF 仍在 `data/raw/objects/<content_hash>/payload.bin` 唯一保存；OCR 与字体修复
   不替代来源、不修改原始文件，不跳过主体、报告期、关键事实和财务方程校验。
 - 错误从图片型转为字段缺失或方程冲突只代表定位深入，不代表证据完成；只有正式流水线

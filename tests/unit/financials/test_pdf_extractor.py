@@ -16,6 +16,9 @@ from hengce.financials.pdf_extractor import (
     _garbled_two_column_cash_flow_candidates,
     _is_financial_institution_report,
     _ocr_result_text,
+    _parse_fact_line,
+    _rapidocr_engine,
+    _rapidocr_page_text,
     _statement_period_heading_matches,
 )
 
@@ -2656,6 +2659,27 @@ def test_explicit_share_change_total_overrides_accounting_share_capital(
     assert result.facts["total_shares"] == Decimal("14442199726")
 
 
+def test_exact_share_count_overrides_rounded_capital_not_rollforward_opening_value(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload.pop()
+    payload[1]["text"] += "\n股本 | 10,000"
+    payload[0]["text"] += (
+        "\n三、股份总数 105,000,000 100.00% 0 0 0 -4,999,999 "
+        "100,000,001 100.00%\n"
+    )
+    payload[3]["text"] += "\n股本 | 10,500"
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_shares"] == Decimal("100000001")
+    assert not any(
+        c.canonical_fact_name == "total_shares" and c.statement_type is StatementType.CASH_FLOW
+        for c in result.candidates
+    )
+
+
 def test_later_parent_capex_candidate_does_not_conflict_with_consolidated_value(
     tmp_path: Path,
 ) -> None:
@@ -3271,6 +3295,47 @@ def test_ocr_rows_are_sorted_top_to_bottom_and_left_to_right() -> None:
     ]
 
     assert _ocr_result_text(result) == "合并资产负债表\n资产总计 200"
+
+
+def test_scan_ocr_suppresses_red_seal_without_mutating_source(monkeypatch) -> None:
+    from PIL import Image
+
+    scan = Image.new("RGB", (2, 1))
+    scan.putdata([(240, 80, 90), (40, 40, 40)])
+    original = scan.tobytes()
+    received = []
+
+    def engine(image):
+        received.append(image)
+        return [([[0, 0], [20, 0], [20, 10], [0, 10]], "98,079,980", 0.99)], 0
+
+    monkeypatch.setattr("hengce.financials.pdf_extractor._rapidocr_engine", lambda: engine)
+    page = SimpleNamespace(images=[SimpleNamespace(image=scan)], get=lambda *_args: 0)
+    assert _rapidocr_page_text(page, 1) == "98,079,980"
+    assert received[0].convert("RGB").getpixel((0, 0)) == (240, 240, 240)
+    assert received[0].convert("RGB").getpixel((1, 0)) == (40, 40, 40)
+    assert scan.tobytes() == original
+
+
+def test_ocr_engine_bounds_worker_threads(monkeypatch) -> None:
+    received = []
+    monkeypatch.setattr(
+        "rapidocr_onnxruntime.RapidOCR", lambda **kwargs: received.append(kwargs) or object(),
+    )
+    _rapidocr_engine.cache_clear()
+    try:
+        assert _rapidocr_engine() is _rapidocr_engine()
+        assert received == [{"intra_op_num_threads": 1, "inter_op_num_threads": 1}]
+    finally:
+        _rapidocr_engine.cache_clear()
+
+
+def test_ocr_truncated_grouped_amount_is_not_an_accepted_fact() -> None:
+    assert _parse_fact_line("短期借款 98 079,980 100,674,419") is None
+    assert _parse_fact_line("短期借款 28 98,079,980 100,674,419") == (
+        "short_term_borrowings", Decimal("98079980"),
+    )
+    assert _parse_fact_line("利息费用 | 0.01") == ("interest_expense", Decimal("0.01"))
 
 
 def test_empty_layout_mode_never_reclassifies_garbled_text_as_image_only(
@@ -4113,11 +4178,14 @@ def test_company_profile_code_takes_precedence_over_subsidiary_definition(
     assert ("PDF_LAYOUT_UNSUPPORTED" not in result.issues) is valid
 
 
-def test_explicit_a_share_profile_label_precedes_counterparty_tickers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile_page", [19, 21])
+def test_explicit_a_share_profile_label_precedes_counterparty_tickers(
+    tmp_path: Path, profile_page: int,
+) -> None:
     path, content_hash = write_pdf(tmp_path)
     payload = pages()
     payload[0]["text"] = payload[0]["text"].replace("699998.SH", "")
-    payload.insert(1, {"page_number": 19, "text": (
+    payload.insert(1, {"page_number": profile_page, "text": (
         "法定中文名称：虚构公司\nA 股上市交易所：上海证券交易所\n"
         "A 股简称：虚构\nA 股代码：699998\nH 股代号：02601\n公司简介"
     )})
@@ -4221,6 +4289,89 @@ def test_summary_after_long_front_matter_with_note_number(tmp_path: Path) -> Non
     result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+def test_summary_bare_note_does_not_consume_current_thousands_amount(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    for page in payload:
+        if isinstance(page["text"], str):
+            page["text"] = page["text"].replace("扣除非经常性损益后的净利润 | 170", "")
+    payload.insert(1, {"page_number": 33, "text": (
+        "单位：人民币千元\n主要会计数据 2025 年 2024 年\n"
+        "扣除非经常性损\n益的净利润 注 1,700 1,500 13.3 1,400"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+def test_stock_profile_table_not_counterparty_code_identifies_issuer(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[0]["text"] = payload[0]["text"].replace("699998.SH", "")
+    payload.insert(1, {"page_number": 8, "text": (
+        "公司股票简况\n股票种类 股票上市交易所 股票简称 股票代码 变更前股票简称\n"
+        "A 股 上海证券交易所 虚构公司 699998 -\nH 股 香港联合交易所 虚构公司 00390 -\n"
+        "其他相关资料\n合作方证券代码600518"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+
+
+def test_balance_sheet_table_header_carries_currency_after_dates(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[1]["text"] = payload[1]["text"].replace(
+        "合并资产负债表\n2025 年 12 月 31 日\n单位：人民币万元",
+        "2025年12月31日合并资产负债表\n"
+        "资产 附五 2025年12月31日 2024年12月31日 人民币万元\n流动资产",
+    )
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["cash_and_equivalents"] == Decimal("3000000")
+
+
+@pytest.mark.parametrize("current_year, valid", [(2025, True), (2024, False)])
+def test_income_table_ocr_interleaves_header_and_total_revenue(
+    tmp_path: Path, current_year: int, valid: bool,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[2]["text"] = payload[2]["text"].replace(
+        "合并利润表\n2025 年 1—12 月\n单位：人民币万元\n营业收入 | 1,000",
+        "2025年度合并利润表\n人民币万元\n"
+        f"营业总收入 项目 国 附注五 1,000 {current_year}年度 900 {current_year - 1}年度\n"
+        "其中：营业收入 54 990 890",
+    )
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    if valid:
+        assert result.quality_status is QualityStatus.VALID, result.issues
+        assert result.facts["revenue"] == Decimal("10000000")
+    else:
+        assert result.quality_status is QualityStatus.UNVERIFIED
+        assert "revenue" not in result.facts
+
+
+@pytest.mark.parametrize("company_heading", [
+    "2025年12月31日公司资产负债表 流动资产 资产 附注 2025年12月31日",
+    "2025年度公司利润表",
+    "2025年度公司现金流量表",
+])
+def test_company_only_statements_end_consolidated_extraction(
+    tmp_path: Path, company_heading: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload.insert(-1, {"page_number": 45, "text": (
+        f"{company_heading}\n人民币万元\n资产总计 | 900\n营业收入 | 500\n"
+        "经营活动产生的现金流量净额 | 330"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
 
 
 def test_content_hash_mismatch_is_rejected_before_text_extraction(
