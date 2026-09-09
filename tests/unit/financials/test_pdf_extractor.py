@@ -17,6 +17,7 @@ from hengce.financials.pdf_extractor import (
     _is_financial_institution_report,
     _ocr_result_text,
     _parse_fact_line,
+    _pdfium_layout_pages,
     _rapidocr_engine,
     _rapidocr_page_text,
     _statement_period_heading_matches,
@@ -92,6 +93,84 @@ def test_extracts_identity_units_negative_values_pages_and_lineage(
     assert all(len(candidate.source_text_hash) == 64 for candidate in result.candidates)
     assert result.pdf_content_hash == content_hash
     assert result.parser_version == "cninfo-pdf-pilot-v1"
+
+
+def test_valid_coordinate_text_avoids_legacy_content_stream_parser(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    source = [(page["page_number"], page["text"]) for page in pages()]
+    configured = CninfoPdfExtractor(
+        parser_version="coordinate-test",
+        layout_reader=lambda _path: source,
+        reader_factory=lambda _path: pytest.fail("Unnecessary legacy stream parse"),
+    )
+    result = configured.extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID
+    assert result.pdf_content_hash == content_hash
+    assert result.facts["revenue"] == Decimal("10000000")
+
+
+def test_coordinate_text_cannot_bypass_equation_validation(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    source = [(page["page_number"], page["text"].replace(
+        "现金及现金等价物净增加额 | 150", "现金及现金等价物净增加额 | 999",
+    )) for page in pages()]
+    configured = CninfoPdfExtractor(
+        parser_version="coordinate-test",
+        layout_reader=lambda _path: source,
+        reader_factory=lambda _path: (_ for _ in ()).throw(ValueError("legacy unavailable")),
+    )
+    result = configured.extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.UNVERIFIED
+    assert "PDF_CASH_FLOW_EQUATION_FAILED" in result.issues
+
+
+def test_coordinate_reader_failure_keeps_legacy_reader_available(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    configured = extractor(pages())
+    configured.layout_reader = lambda _path: (_ for _ in ()).throw(ValueError("bad PDF layout"))
+    result = configured.extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID
+
+
+def test_coordinate_reader_is_not_called_for_content_hash_mismatch(tmp_path: Path) -> None:
+    path, _content_hash = write_pdf(tmp_path)
+    configured = CninfoPdfExtractor(
+        parser_version="coordinate-test",
+        layout_reader=lambda _path: pytest.fail("Unverified bytes reached text extractor"),
+    )
+    with pytest.raises(ValueError, match="PDF_CONTENT_HASH_MISMATCH"):
+        configured.extract(pdf_path=path, descriptor=descriptor("a" * 64))
+
+
+def test_pdfium_sorts_scrambled_text_and_keeps_empty_physical_pages(tmp_path: Path) -> None:
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=600, height=800)
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }),
+        }),
+    })
+    stream = DecodedStreamObject()
+    stream.set_data(
+        b"BT /F1 12 Tf 300 700 Td (100) Tj ET\n"
+        b"BT /F1 12 Tf 50 680 Td (Liabilities) Tj ET\n"
+        b"BT /F1 12 Tf 50 700 Td (Assets) Tj ET\n"
+        b"BT /F1 12 Tf 300 680 Td (60) Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.add_blank_page(width=600, height=800)
+    path = tmp_path / "scrambled.pdf"
+    writer.write(path)
+    original = path.read_bytes()
+    assert _pdfium_layout_pages(path) == [(1, "Assets 100\nLiabilities 60"), (2, None)]
+    assert path.read_bytes() == original
 
 
 def test_summary_and_audit_note_before_formal_statements_do_not_end_extraction(
@@ -297,6 +376,34 @@ def test_bank_counterparty_name_does_not_change_nonbank_required_fields():
     assert not _is_financial_institution_report(text, issuer_name="虚构公司")
 
 
+def test_blank_financial_template_rows_and_insurance_investment_are_not_issuer_type():
+    text = (
+        "虚构时尚股份有限公司\n2025年度报告\n"
+        "吸收存款\n发放贷款和垫款\n保险合同负债\n保险服务收入\n"
+        "长期股权投资：中国平安保险（集团）股份有限公司\n"
+    )
+    assert not _is_financial_institution_report(text, issuer_name="虚构时尚")
+
+
+@pytest.mark.parametrize("year, valid", [(2025, True), (2024, False)])
+def test_balance_period_header_with_inline_unit_and_currency(
+    tmp_path: Path, year: int, valid: bool,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[1]["text"] = payload[1]["text"].replace(
+        "2025 年 12 月 31 日\n单位：人民币万元",
+        f"{year}年12月31日 单位：万元 币种：人民币",
+    )
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    if valid:
+        assert result.quality_status is QualityStatus.VALID, result.issues
+        assert result.facts["total_assets"] == Decimal("20000000")
+    else:
+        assert result.quality_status is QualityStatus.UNVERIFIED
+        assert "total_assets" not in result.facts
+
+
 def test_q1_report_does_not_require_undisclosed_interest_expense(
     tmp_path: Path,
 ) -> None:
@@ -414,7 +521,8 @@ def test_adjusted_profit_summary_accepts_official_split_label_variants(
 def test_insurer_report_does_not_require_industrial_balance_fields(tmp_path: Path) -> None:
     path, content_hash = write_pdf(tmp_path)
     page_payload = pages()
-    page_payload[0]["text"] += "\n保险合同负债\n保险服务收入"
+    # The issuer's own title, not two generic template rows, establishes its type.
+    page_payload[0]["text"] += "\n虚构人寿保险股份有限公司\n保险合同负债\n保险服务收入"
     for unsupported in (
         "流动资产合计 | 1,200\n",
         "货币资金 | 300\n",
@@ -4289,6 +4397,29 @@ def test_summary_after_long_front_matter_with_note_number(tmp_path: Path) -> Non
     result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
     assert result.quality_status is QualityStatus.VALID, result.issues
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+@pytest.mark.parametrize("suffix, valid", [
+    ("常性损益的净利润", True), ("其他说明\n常性损益的净利润", False),
+])
+def test_summary_amount_interleaved_inside_wrapped_adjusted_profit_label(
+    tmp_path: Path, suffix: str, valid: bool,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[2]["text"] = payload[2]["text"].replace("扣除非经常性损益后的净利润 | 170", "")
+    payload.insert(1, {"page_number": 12, "text": (
+        "主要会计数据\n单位：人民币万元\n2025年 2024年 2023年\n"
+        "归属于上市公司\n股东的扣除非经 170 150 149 13.3 140 139\n"
+        f"{suffix}\n经营活动产生的现金流量净额 220 200 180"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    if valid:
+        assert result.quality_status is QualityStatus.VALID, result.issues
+        assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+    else:
+        assert "adjusted_net_profit" not in result.facts
+        assert result.quality_status is QualityStatus.UNVERIFIED
 
 
 def test_summary_bare_note_does_not_consume_current_thousands_amount(tmp_path: Path) -> None:

@@ -366,6 +366,7 @@ class CninfoPdfExtractor:
         *,
         parser_version: str,
         reader_factory: Callable[[Path], _PdfDocument] = PdfReader,
+        layout_reader: Callable[[Path], list[tuple[int, str | None]]] | None = None,
         ocr_page_text: Callable[[_PdfPage, int], str | None] | None = None,
         ocr_cache_root: Path | None = None,
     ) -> None:
@@ -373,6 +374,9 @@ class CninfoPdfExtractor:
             raise ValueError("PDF_PARSER_VERSION_INVALID")
         self.parser_version = parser_version
         self.reader_factory = reader_factory
+        self.layout_reader = layout_reader or (
+            _pdfium_layout_pages if reader_factory is PdfReader else None
+        )
         self.ocr_page_text = ocr_page_text or _rapidocr_page_text
         self.ocr_cache_root = ocr_cache_root
 
@@ -389,6 +393,26 @@ class CninfoPdfExtractor:
         pdf_content_hash = hashlib.sha256(payload).hexdigest()
         if pdf_content_hash != descriptor.raw_object_hash:
             raise ValueError("PDF_CONTENT_HASH_MISMATCH")
+        coordinate_result: PdfExtractionResult | None = None
+        if self.layout_reader is not None:
+            try:
+                coordinate_pages = self.layout_reader(pdf_path)
+            except Exception:
+                coordinate_pages = []
+            if coordinate_pages:
+                coordinate_result = self._parse_pages(
+                    coordinate_pages, descriptor=descriptor, pdf_content_hash=pdf_content_hash,
+                )
+                if coordinate_result.quality_status is QualityStatus.VALID:
+                    return coordinate_result
+
+        def prefer_coordinate(result: PdfExtractionResult) -> PdfExtractionResult:
+            if coordinate_result is not None and (
+                _extraction_score(coordinate_result) > _extraction_score(result)
+            ):
+                return coordinate_result
+            return result
+
         try:
             reader = self.reader_factory(pdf_path)
             if isinstance(reader, PdfReader):
@@ -401,6 +425,8 @@ class CninfoPdfExtractor:
                 for index, page in enumerate(reader.pages, start=1)
             ]
         except Exception as error:
+            if coordinate_result is not None:
+                return coordinate_result
             raise ValueError("CNINFO_PDF_PARSE_FAILED") from error
         primary = self._parse_pages(
             pages,
@@ -439,16 +465,16 @@ class CninfoPdfExtractor:
             if replacements:
                 # Validate the complete selected scan, not an earlier valid prefix:
                 # a later statement can introduce a conflict or a correction.
-                return self._parse_pages(
+                return prefer_coordinate(self._parse_pages(
                     ocr_pages,
                     descriptor=descriptor,
                     pdf_content_hash=pdf_content_hash,
-                )
+                ))
         if (
             primary.quality_status is QualityStatus.VALID
             or "PDF_CASH_FLOW_EQUATION_FAILED" not in primary.issues
         ):
-            return primary
+            return prefer_coordinate(primary)
         cash_markers = (
             "现金流量表",
             *(
@@ -467,7 +493,7 @@ class CninfoPdfExtractor:
                     if 0 <= candidate_index < len(pages)
                 )
         if not layout_indexes:
-            return primary
+            return prefer_coordinate(primary)
         try:
             layout_pages = list(pages)
             for index in sorted(layout_indexes):
@@ -477,9 +503,9 @@ class CninfoPdfExtractor:
                     page.extract_text(extraction_mode="layout"),
                 )
         except (AttributeError, TypeError, ValueError):
-            return primary
+            return prefer_coordinate(primary)
         if layout_pages == pages:
-            return primary
+            return prefer_coordinate(primary)
         layout = self._parse_pages(
             layout_pages,
             descriptor=descriptor,
@@ -487,7 +513,7 @@ class CninfoPdfExtractor:
         )
         primary_score = _extraction_score(primary)
         layout_score = _extraction_score(layout)
-        return layout if layout_score > primary_score else primary
+        return prefer_coordinate(layout if layout_score > primary_score else primary)
 
     def _cached_ocr_page_text(
         self,
@@ -1806,7 +1832,7 @@ def _flattened_summary_candidates(
 ) -> list[PdfFactCandidate]:
     if not raw_lines:
         return []
-    text = re.sub(r"\s+", " ", " ".join(raw_lines)).strip()
+    text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in raw_lines).strip()
     change_reason_boundaries = (
         "主要会计数据、财务指标发生变动的情况、原因",
         "主要会计数据、财务指标发生变动的情况及原因",
@@ -1839,6 +1865,8 @@ def _flattened_summary_candidates(
         }:
             continue
         match = _flattened_alias_match(text, alias, allow_inline_unit=True)
+        if match is None and has_summary_heading:
+            match = _interleaved_summary_alias_match(text, alias)
         if match is None:
             continue
         number = _accounting_decimal(match.group("value"))
@@ -2063,6 +2091,25 @@ def _cross_page_split_fact_candidates(
     return candidates
 
 
+def _interleaved_summary_alias_match(text: str, alias: str) -> re.Match[str] | None:
+    """Recover a vertically centered value inside a wrapped summary label."""
+    compact = re.sub(r"\s+", "", text)
+    for split in range(4, len(alias) - 3):
+        if alias[:split] not in compact:
+            continue
+        prefix = r"\s*".join(re.escape(char) for char in alias[:split])
+        suffix = r"\s*".join(re.escape(char) for char in alias[split:])
+        match = re.search(
+            rf"(?<![\u4e00-\u9fffA-Za-z]){prefix}[ \t]+"
+            rf"(?P<value>{_ACCOUNTING_NUMBER})"
+            rf"(?:[ \t]+(?:{_ACCOUNTING_NUMBER}%?|不适用))*[ \t]*\r?\n"
+            rf"{suffix}(?![\u4e00-\u9fffA-Za-z])", text,
+        )
+        if match is not None:
+            return match
+    return None
+
+
 def _flattened_alias_match(
     text: str,
     alias: str,
@@ -2111,9 +2158,7 @@ def _balance_reconciles(facts: dict[str, Decimal]) -> bool:
 
 
 def _is_bank_report(text: str) -> bool:
-    return "银行资产负债表" in text or (
-        "吸收存款" in text and "发放贷款和垫款" in text
-    )
+    return "银行资产负债表" in text
 
 
 def _is_financial_institution_report(text: str, *, issuer_name: str | None = None) -> bool:
@@ -2121,16 +2166,21 @@ def _is_financial_institution_report(text: str, *, issuer_name: str | None = Non
     named_bank = (
         re.fullmatch(r".+银行(?:股份有限公司)?", normalized_name) is not None
         and _issuer_name_matches(text[:1000].replace("銀", "银"), normalized_name)
-        and "客户存款" in text
-        and "贷款和垫款" in text
+        and (
+            ("客户存款" in text and "贷款和垫款" in text)
+            or ("吸收存款" in text and "发放贷款和垫款" in text)
+        )
+    )
+    insurance_title = any(
+        re.fullmatch(
+            r"[\u4e00-\u9fff]{2,24}保险(?:[（(]集团[）)])?股份有限公司"
+            r"(?:\d{4}年?(?:年度报告|年报))?", re.sub(r"\s+", "", line),
+        ) is not None
+        for line in text[:4000].splitlines()
     )
     return (
         named_bank or _is_bank_report(text)
-        or "保险（集团）" in text or "保险(集团)" in text
-        or (
-            "保险合同负债" in text
-            and ("保险服务收入" in text or "保险业务收入" in text)
-        )
+        or insurance_title
     )
 
 
@@ -2277,6 +2327,37 @@ def _fully_scanned_ocr_order(
             *range(front_end, tail_start),
         ]
     )
+
+
+def _pdfium_layout_pages(pdf_path: Path) -> list[tuple[int, str | None]]:
+    """Reconstruct native PDF text by coordinates, retaining physical page IDs."""
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(pdf_path)
+    pages: list[tuple[int, str | None]] = []
+    try:
+        for number in range(len(document)):
+            page = document[number]
+            try:
+                text_page = page.get_textpage()
+                try:
+                    cells = []
+                    for index in range(text_page.count_rects()):
+                        left, bottom, right, top = text_page.get_rect(index)
+                        text = text_page.get_text_bounded(left, bottom, right, top)
+                        # PDF canvas y runs upwards; reading-order rows run down.
+                        cells.append((
+                            [(left, -top), (right, -top), (right, -bottom), (left, -bottom)],
+                            text, 1,
+                        ))
+                    pages.append((number + 1, _ocr_result_text(cells)))
+                finally:
+                    text_page.close()
+            finally:
+                page.close()
+    finally:
+        document.close()
+    return pages
 
 
 @lru_cache(maxsize=1)
@@ -2938,6 +3019,12 @@ def _statement_period_heading_matches(
 ) -> bool:
     normalized = re.sub(r"\s+", "", line.strip())
     period = descriptor.report_period
+    # Coordinate extraction may put the entire unit/currency declaration beside
+    # the period heading. Remove only a complete, explicit CNY declaration.
+    normalized = re.sub(
+        r"单位[：:]?(?:人民币)?(?:元|千元|万元|百万元|亿元)"
+        r"(?:币种[：:]?人民币)?$", "", normalized,
+    )
     if statement_type is StatementType.BALANCE_SHEET:
         date_pattern = rf"{period.year}年0?{period.month}月0?{period.day}日"
         return re.fullmatch(
