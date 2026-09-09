@@ -2618,7 +2618,11 @@ def _embedded_consolidated_statement(
     if (
         qualified_plain is not None
         and "银行股份有限公司" in normalized_page
-        and any(len(re.findall(_ACCOUNTING_NUMBER, line)) >= 4 for line in raw_lines)
+        and any(
+            _parse_fact_line(line) is not None
+            and len(re.findall(_ACCOUNTING_NUMBER, line)) >= 4
+            for line in raw_lines
+        )
     ):
         plain_title, statement_type = _EMBEDDED_CONSOLIDATED_TITLES[qualified_plain]
         return plain_title.replace("合并", "合并及银行"), statement_type

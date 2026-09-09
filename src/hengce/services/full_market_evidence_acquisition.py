@@ -320,7 +320,7 @@ class FullMarketEvidenceAcquisitionService:
         documents = PdfFinancialDocumentRepository(self.repository.path)
         dividends = AnnualDividendRepository(self.repository.path)
         extractor = CninfoPdfExtractor(
-            parser_version="cninfo-pdf-full-market-v9",
+            parser_version="cninfo-pdf-full-market-v10",
             ocr_cache_root=self.raw_store.root.parent / "normalized" / "ocr",
         )
         retryable_tasks = [

@@ -990,6 +990,34 @@ def test_plain_qualified_bank_cash_flow_is_treated_as_group_bank_table(
     assert result.facts["operating_cash_flow"] == Decimal("2200000")
 
 
+@pytest.mark.parametrize("title, row", [
+    ("资产负债表", "资产总计 9999 8888"),
+    ("利润表", "营业收入合计 9999 8888"),
+    ("现金流量表", "经营活动产生的现金流量净额 9999 8888"),
+])
+def test_two_column_parent_bank_table_dates_do_not_imply_group_columns(
+    tmp_path: Path, title: str, row: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.insert(4, {
+        "page_number": 45,
+        "text": "\n".join([
+            "测试银行股份有限公司", f"未经审计{title}", "单位：人民币万元",
+            "项目 2025年12月31日 2024年12月31日", row,
+        ]),
+    })
+
+    result = extractor(page_payload).extract(
+        pdf_path=path, descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
 def test_side_by_side_balance_table_extracts_trailing_liabilities_and_shares(
     tmp_path: Path,
 ) -> None:
