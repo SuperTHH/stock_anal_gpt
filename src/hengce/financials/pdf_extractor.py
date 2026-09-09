@@ -18,7 +18,7 @@ from hengce.contracts.financial import FilingDescriptor
 from hengce.financials.pdf_cmaps import restore_declared_cmaps
 from hengce.financials.registry_loader import CANONICAL_PILOT_FACTS
 
-_GROUPED_INTEGER = r"(?:\d{1,3}(?:,\s*\d{3})+|\d+)"
+_GROUPED_INTEGER = r"(?:\d{1,3}(?:[ \t]*,[ \t]*\d{3})+|\d+)"
 _ACCOUNTING_NUMBER = (
     rf"(?:[-+]?{_GROUPED_INTEGER}(?:\.\d+)?|"
     rf"\(\s*{_GROUPED_INTEGER}(?:\.\d+)?\s*\))"
@@ -32,7 +32,7 @@ _NOTE_REFERENCE = (
     rf"{_CHINESE_NUMERAL}[（(]{_CHINESE_NUMERAL}[）)]\d+|"
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+(?:\.\d+)?|[A-Za-z])[）)])+|"
     r"\d{1,2}\s+\d[（(]\d+[）)]|"
-    r"\d{1,3}[（(](?:\d+|[A-Za-z]+)[）)])"
+    r"\d{1,3}\s*[（(]\s*(?:\d+|[A-Za-z]+)\s*[）)])"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
 _LABELED_CODE_DETAIL = re.compile(
@@ -760,13 +760,13 @@ class CninfoPdfExtractor:
                 )
                 if (
                     any(
-                        stripped_heading.endswith(boundary)
+                        _statement_heading_matches(stripped_heading, boundary)
                         for boundary in _FORMAL_STATEMENT_END_BOUNDARIES
                     )
                     or (
                         formal_cash_flow_started
                         and any(
-                            stripped_heading.endswith(boundary)
+                            _statement_heading_matches(stripped_heading, boundary)
                             for boundary in _POST_CASH_FLOW_END_BOUNDARIES
                         )
                     )
@@ -1118,10 +1118,10 @@ class CninfoPdfExtractor:
                             else "股本"
                         ) :]
                 if (
-                    parsed_line is None
-                    and descriptor.report_type is ReportType.ANNUAL
+                    descriptor.report_type is ReportType.ANNUAL
                     and page_number <= 100
                     and "股份总数" in line
+                    and _parse_share_change_total(line) is not None
                 ):
                     parsed_line = _parse_share_change_total(line)
                     if parsed_line is not None:
@@ -1669,15 +1669,17 @@ def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
     if not separator:
         label, separator, raw_value = line.partition("｜")
     if not separator:
-        match = _NOTE_COLUMN_FACT.fullmatch(line.strip())
-        if match is None:
-            match = _SLASH_NOTE_COLUMN_FACT.fullmatch(line.strip())
-        if match is None:
-            match = _SPLIT_NUMERIC_NOTE_COLUMN_FACT.fullmatch(line.strip())
-        if match is None:
-            match = _NUMERIC_NOTE_COLUMN_FACT.fullmatch(line.strip())
-        if match is None:
-            match = _WHITESPACE_FACT.fullmatch(line.strip())
+        match = None
+        for pattern in (
+            _NOTE_COLUMN_FACT, _SLASH_NOTE_COLUMN_FACT, _SPLIT_NUMERIC_NOTE_COLUMN_FACT,
+            _NUMERIC_NOTE_COLUMN_FACT, _WHITESPACE_FACT,
+        ):
+            candidate_match = pattern.fullmatch(line.strip())
+            if candidate_match is not None and _canonical_name(
+                _normalize_label(candidate_match.group("label")),
+            ) is not None:
+                match = candidate_match
+                break
         if match is None:
             return None
         label = match.group("label")
@@ -2213,9 +2215,22 @@ def _is_financial_institution_report(text: str, *, issuer_name: str | None = Non
         ) is not None
         for line in text[:4000].splitlines()
     )
+    insurance_self_definition = False
+    for line in text[:4000].splitlines():
+        aliases, separator, company = re.sub(r"\s+", "", line).partition("指")
+        names = set(re.split(r"[、,，]", aliases))
+        if (
+            separator and normalized_name and normalized_name in names
+            and names.intersection({"公司", "本公司"})
+            and re.fullmatch(
+                r"[\u4e00-\u9fff]{2,24}保险(?:[（(]集团[）)])?股份有限公司", company,
+            ) is not None
+        ):
+            insurance_self_definition = True
+            break
     return (
         named_bank or _is_bank_report(text)
-        or insurance_title
+        or insurance_title or insurance_self_definition
     )
 
 

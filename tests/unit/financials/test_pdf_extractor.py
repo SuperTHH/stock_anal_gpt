@@ -1169,6 +1169,32 @@ def test_complex_letter_note_reference_precedes_cash_value(tmp_path: Path) -> No
     assert result.facts["operating_cash_flow"] == Decimal("2200000")
 
 
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "有关进一步详情，请参阅财务报表附注",
+        "有关进一步详情，请参阅合并股东权益变动表",
+    ],
+)
+def test_prose_reference_does_not_end_formal_statements(
+    tmp_path: Path, reference: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[1]["text"] += "\n" + reference
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "投资活动产生", reference + "\n投资活动产生", 1,
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path, descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["net_profit"] == Decimal("1800000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
 def test_equity_statement_boundary_prevents_note_fact_conflicts(tmp_path: Path) -> None:
     path, content_hash = write_pdf(tmp_path)
     page_payload = pages()
@@ -4471,6 +4497,37 @@ def test_split_note_before_parenthesized_operating_cash_outflow() -> None:
     assert _parse_fact_line(
         "经营活动 ( 使用 ) 产生 的现金流量净额 6 5(1) (31,423,832) 20,412,048"
     ) == ("operating_cash_flow", Decimal("-31423832"))
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("资产总计 11 , 583 , 417 11 , 009 , 940", ("total_assets", "11583417")),
+    ("资产总计 11 , 583 , 417 11 , 009 , 940 9 , 994 , 079",
+     ("total_assets", "11583417")),
+    ("货币资金 1 577 , 212 613 , 737", ("cash_and_equivalents", "577212")),
+    ("经营活动产生的现金流量净额 59 ( 1 ) 360 , 403 476 , 776",
+     ("operating_cash_flow", "360403")),
+    ("投资活动使用的现金流量净额 ( 104 , 001 ) ( 215 , 760 )",
+     ("investing_cash_flow", "-104001")),
+])
+def test_grouped_amounts_with_spaces_around_commas_and_notes(
+    line: str, expected: tuple[str, str],
+) -> None:
+    assert _parse_fact_line(line) == (expected[0], Decimal(expected[1]))
+
+
+@pytest.mark.parametrize("definition, expected", [
+    ("平安、中国平安、公司、 指 中国平安保险（集团）股份有限公司", True),
+    ("平安、中国平安 指 中国平安保险（集团）股份有限公司", False),
+    ("平安寿险、公司 指 中国平安人寿保险股份有限公司", False),
+    ("平安、中国平安、公司 指 中国平安保险（集团）股份有限公司，是本公司的子公司", False),
+])
+def test_insurance_issuer_identified_by_exact_self_definition(
+    definition: str, expected: bool,
+) -> None:
+    assert _is_financial_institution_report(
+        "释义\n" + definition + "\n保险合同负债 123\n保险服务收入 456",
+        issuer_name="中国平安",
+    ) is expected
 
 
 def test_split_note_cannot_become_operating_cost_with_broken_comparative() -> None:
