@@ -4437,6 +4437,79 @@ def test_summary_bare_note_does_not_consume_current_thousands_amount(tmp_path: P
     assert result.facts["adjusted_net_profit"] == Decimal("1700000")
 
 
+def test_summary_value_on_separate_line_inside_wrapped_label(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[2]["text"] = payload[2]["text"].replace("扣除非经常性损益后的净利润 | 170", "")
+    payload.insert(1, {"page_number": 10, "text": (
+        "主要会计数据\n单位：人民币万元\n2025年 2024年 2023年\n"
+        "归属于上市公司股东的扣除非经常性损益的净\n"
+        "170 150 149 13.3 140 139\n利润\n"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+@pytest.mark.parametrize("gap, first, expected", [
+    (0.7, "1,245,899,80", "1,245,899,805"),
+    (15, "1,245,899,80", "1,245,899,80 5"),
+    (0.7, "1,245,899,800", "1,245,899,800 5"),
+])
+def test_native_coordinate_join_only_adjacent_incomplete_thousands_group(
+    gap: float, first: str, expected: str,
+) -> None:
+    cells = [
+        ([(0, 0), (50, 0), (50, 10), (0, 10)], first, 1),
+        ([(50 + gap, 0), (55 + gap, 0), (55 + gap, 10), (50 + gap, 10)], "5", 1),
+    ]
+    assert _ocr_result_text(cells, join_numeric_fragments=True) == expected
+    assert _ocr_result_text(cells) == first + " 5"
+
+
+def test_split_note_before_parenthesized_operating_cash_outflow() -> None:
+    assert _parse_fact_line(
+        "经营活动 ( 使用 ) 产生 的现金流量净额 6 5(1) (31,423,832) 20,412,048"
+    ) == ("operating_cash_flow", Decimal("-31423832"))
+
+
+def test_split_note_cannot_become_operating_cost_with_broken_comparative() -> None:
+    assert _parse_fact_line(
+        "减：营业成本 4 8 957,601,788 1,019,749,05 1"
+    ) == ("operating_cost", Decimal("957601788"))
+
+
+def test_wrapped_summary_allows_spaced_comparative_minus(tmp_path: Path) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[2]["text"] = payload[2]["text"].replace("扣除非经常性损益后的净利润 | 170", "")
+    payload.insert(1, {"page_number": 9, "text": (
+        "主要会计数据\n单位：人民币万元\n2025年 2024年 2023年\n"
+        "归属于上市公司股\n东的扣除非经常性 170 190 - 13.2 4 180 179\n"
+        "损益的净利润\n"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["adjusted_net_profit"] == Decimal("1700000")
+
+
+@pytest.mark.parametrize("year, expected", [(2025, "100000123"), (2024, "100000000")])
+def test_front_matter_exact_dated_total_shares_overrides_rounded_capital(
+    tmp_path: Path, year: int, expected: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[-1]["text"] = ""
+    payload[1]["text"] += "\n股本 | 10,000"
+    payload.insert(1, {"page_number": 3, "text": (
+        f"利润分配预案：以 {year} 年 12 月 31 日公司总股本 100,000,123 股为基数，"
+        "每10股派送现金红利3.50元。"
+    )})
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_shares"] == Decimal(expected)
+
+
 def test_stock_profile_table_not_counterparty_code_identifies_issuer(tmp_path: Path) -> None:
     path, content_hash = write_pdf(tmp_path)
     payload = pages()
@@ -4503,6 +4576,31 @@ def test_company_only_statements_end_consolidated_extraction(
     assert result.facts["total_assets"] == Decimal("20000000")
     assert result.facts["revenue"] == Decimal("10000000")
     assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
+@pytest.mark.parametrize("year, valid", [(2025, True), (2024, False)])
+def test_exact_period_immediately_before_consolidated_title(
+    tmp_path: Path, year: int, valid: bool,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    payload = pages()
+    payload[1]["text"] = payload[1]["text"].replace(
+        "合并资产负债表\n2025 年 12 月 31 日",
+        f"虚构公司股份有限公司\n{year} 年 12 月 31 日\n合并资产负债表",
+    )
+    payload[2]["text"] = payload[2]["text"].replace(
+        "合并利润表\n2025 年 1—12 月",
+        f"虚构公司股份有限公司\n{year} 年度\n合并利润表",
+    )
+    result = extractor(payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    if valid:
+        assert result.quality_status is QualityStatus.VALID, result.issues
+        assert result.facts["total_assets"] == Decimal("20000000")
+        assert result.facts["revenue"] == Decimal("10000000")
+    else:
+        assert result.quality_status is QualityStatus.UNVERIFIED
+        assert "total_assets" not in result.facts
+        assert "revenue" not in result.facts
 
 
 def test_content_hash_mismatch_is_rejected_before_text_extraction(

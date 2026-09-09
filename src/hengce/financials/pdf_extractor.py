@@ -31,6 +31,7 @@ _NOTE_REFERENCE = (
     rf"{_CHINESE_NUMERAL}、\s*[（(]{_CHINESE_NUMERAL}[）)]|"
     rf"{_CHINESE_NUMERAL}[（(]{_CHINESE_NUMERAL}[）)]\d+|"
     rf"{_CHINESE_NUMERAL}(?:[（(](?:\d+(?:\.\d+)?|[A-Za-z])[）)])+|"
+    r"\d{1,2}\s+\d[（(]\d+[）)]|"
     r"\d{1,3}[（(](?:\d+|[A-Za-z]+)[）)])"
 )
 _SUFFIXED_CODE = re.compile(r"\b[0-9]{6}\.(?:SH|SZ)\b")
@@ -65,8 +66,8 @@ _UNIT = re.compile(
 )
 _SPLIT_NUMERIC_NOTE_COLUMN_FACT = re.compile(
     r"^(?P<label>.+?)\s+\d{1,2}\s+\d\s+"
-    rf"(?P<value>{_ACCOUNTING_NUMBER})\s+"
-    rf"{_ACCOUNTING_NUMBER}(?:\s+.*)?$"
+    rf"(?P<value>{_ACCOUNTING_NUMBER})"
+    r"\s+[-+(\d][\d,.\s()+-]*$"
 )
 _INLINE_CNY_UNIT = re.compile(
     r"[（(](?:人民币)?(元|千元|万元|百万元|亿元)(?:[，,]\s*特别注明除外)?[）)]"
@@ -200,6 +201,8 @@ _ALIASES = {
     "经营活动所用的现金流量净额": "operating_cash_flow",
     "经营活动(使用)/产生的现金流量净额": "operating_cash_flow",
     "经营活动（使用）/产生的现金流量净额": "operating_cash_flow",
+    "经营活动(使用)产生的现金流量净额": "operating_cash_flow",
+    "经营活动（使用）产生的现金流量净额": "operating_cash_flow",
     "经营活动(所用)/产生的现金流量净额": "operating_cash_flow",
     "经营活动（所用）/产生的现金流量净额": "operating_cash_flow",
     "经营活动产生/(所用)的现金流量净额": "operating_cash_flow",
@@ -614,6 +617,7 @@ class CninfoPdfExtractor:
 
         candidates: list[PdfFactCandidate] = []
         candidates.extend(_cross_page_split_fact_candidates(pages))
+        candidates.extend(_dated_front_matter_share_candidates(pages, descriptor=descriptor))
         if descriptor.report_type is ReportType.ANNUAL:
             candidates.extend(_finance_note_interest_expense_candidates(pages))
         fact_names_without_supported_unit: set[str] = set()
@@ -748,7 +752,7 @@ class CninfoPdfExtractor:
                             source_text_hash=hashlib.sha256(raw_value.encode("utf-8")).hexdigest(),
                         )
                     )
-            for raw_line in raw_lines:
+            for line_index, raw_line in enumerate(raw_lines):
                 line = raw_line.strip()
                 normalized_heading = _normalized_heading(line)
                 stripped_heading = normalized_heading.removesuffix("（续）").removesuffix(
@@ -831,6 +835,10 @@ class CninfoPdfExtractor:
                             else None
                         )
                         heading_period = normalized_heading.partition(title[0])[0]
+                        if not heading_period and line_index > 0:
+                            # Some audited reports place the exact period directly
+                            # above the title, before the comparative column header.
+                            heading_period = raw_lines[line_index - 1]
                         if _statement_period_heading_matches(
                             heading_period, descriptor=descriptor, statement_type=title[1],
                         ):
@@ -2091,18 +2099,45 @@ def _cross_page_split_fact_candidates(
     return candidates
 
 
+def _dated_front_matter_share_candidates(
+    pages: list[tuple[int, str | None]], *, descriptor: FilingDescriptor,
+) -> list[PdfFactCandidate]:
+    """Use explicitly dated issuer total shares, never an undated dividend base."""
+    period = descriptor.report_period
+    pattern = re.compile(
+        rf"{period.year}年0?{period.month}月0?{period.day}日"
+        rf"(?:本)?公司(?:的)?总股本(?:为)?[（(]?(?P<value>{_GROUPED_INTEGER})股"
+    )
+    candidates = []
+    for page_number, text in pages:
+        if page_number > 20 or not text:
+            continue
+        for match in pattern.finditer(re.sub(r"\s+", "", text)):
+            value = _accounting_decimal(match.group("value"))
+            if value is None or value <= 0:
+                continue
+            candidates.append(PdfFactCandidate(
+                canonical_fact_name="total_shares", value=value,
+                unit_multiplier=Decimal(1), currency="SHARES", page_number=page_number,
+                statement_type=StatementType.BALANCE_SHEET,
+                source_text_hash=hashlib.sha256(match.group(0).encode("utf-8")).hexdigest(),
+                source_priority=30,
+            ))
+    return candidates
+
+
 def _interleaved_summary_alias_match(text: str, alias: str) -> re.Match[str] | None:
     """Recover a vertically centered value inside a wrapped summary label."""
     compact = re.sub(r"\s+", "", text)
-    for split in range(4, len(alias) - 3):
+    for split in range(4, len(alias) - 1):
         if alias[:split] not in compact:
             continue
         prefix = r"\s*".join(re.escape(char) for char in alias[:split])
         suffix = r"\s*".join(re.escape(char) for char in alias[split:])
         match = re.search(
-            rf"(?<![\u4e00-\u9fffA-Za-z]){prefix}[ \t]+"
+            rf"(?<![\u4e00-\u9fffA-Za-z]){prefix}(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
             rf"(?P<value>{_ACCOUNTING_NUMBER})"
-            rf"(?:[ \t]+(?:{_ACCOUNTING_NUMBER}%?|不适用))*[ \t]*\r?\n"
+            rf"(?:[ \t]+(?:[-+]?[ \t]*{_ACCOUNTING_NUMBER}%?|不适用))*[ \t]*\r?\n"
             rf"{suffix}(?![\u4e00-\u9fffA-Za-z])", text,
         )
         if match is not None:
@@ -2350,7 +2385,9 @@ def _pdfium_layout_pages(pdf_path: Path) -> list[tuple[int, str | None]]:
                             [(left, -top), (right, -top), (right, -bottom), (left, -bottom)],
                             text, 1,
                         ))
-                    pages.append((number + 1, _ocr_result_text(cells)))
+                    pages.append((number + 1, _ocr_result_text(
+                        cells, join_numeric_fragments=True,
+                    )))
                 finally:
                     text_page.close()
             finally:
@@ -2390,9 +2427,9 @@ def _rapidocr_page_text(page: _PdfPage, _page_number: int) -> str | None:
     return _ocr_result_text(result)
 
 
-def _ocr_result_text(result: object) -> str | None:
+def _ocr_result_text(result: object, *, join_numeric_fragments: bool = False) -> str | None:
     """Normalize RapidOCR cells into deterministic top-to-bottom table rows."""
-    cells: list[tuple[float, float, float, str]] = []
+    cells: list[tuple[float, float, float, str, float]] = []
     for item in result:  # type: ignore[union-attr]
         try:
             box, text, confidence = item
@@ -2408,11 +2445,12 @@ def _ocr_result_text(result: object) -> str | None:
                 (min(ys) + max(ys)) / 2,
                 max(1.0, max(ys) - min(ys)),
                 str(text).strip(),
+                max(xs),
             )
         )
-    rows: list[list[tuple[float, float, float, str]]] = []
+    rows: list[list[tuple[float, float, float, str, float]]] = []
     for candidate in sorted(cells, key=lambda entry: (entry[1], entry[0])):
-        _x, center_y, height, _text = candidate
+        _x, center_y, height, _text, _right = candidate
         if rows:
             row_center = sum(entry[1] for entry in rows[-1]) / len(rows[-1])
             row_height = max(entry[2] for entry in rows[-1])
@@ -2420,10 +2458,26 @@ def _ocr_result_text(result: object) -> str | None:
                 rows[-1].append(candidate)
                 continue
         rows.append([candidate])
-    lines = [
-        " ".join(entry[3] for entry in sorted(row, key=lambda entry: entry[0]))
-        for row in rows
-    ]
+    lines = []
+    for row in rows:
+        ordered = sorted(row, key=lambda entry: entry[0])
+        parts: list[str] = []
+        for index, entry in enumerate(ordered):
+            join = False
+            if join_numeric_fragments and index:
+                previous = ordered[index - 1]
+                incomplete = re.search(r"(?:^|\s)(-?\d{1,3}(?:,\d{3})*,\d{1,2})$", parts[-1])
+                join = (
+                    incomplete is not None
+                    and re.fullmatch(r"\d{1,2}(?:\.\d+)?", entry[3]) is not None
+                    and _NUMBER.fullmatch(incomplete.group(1) + entry[3]) is not None
+                    and 0 <= entry[0] - previous[4] <= min(entry[2], previous[2]) * 0.25
+                )
+            if join:
+                parts[-1] += entry[3]
+            else:
+                parts.append(entry[3])
+        lines.append(" ".join(parts))
     text = "\n".join(line for line in lines if line)
     return text or None
 
