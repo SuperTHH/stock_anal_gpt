@@ -183,6 +183,89 @@ def create_app(
             "events": [event.model_dump(mode="json") for event in events],
         }
 
+    @app.get("/api/market/events/{ts_code}/coverage")
+    def security_event_coverage(
+        ts_code: str,
+        start_date: date,
+        market_date: date | None = None,
+    ) -> dict[str, object]:
+        resolved_date = market_date
+        if resolved_date is None and research_warehouse is not None:
+            snapshot = research_warehouse.latest()
+            resolved_date = snapshot.market_date if snapshot is not None else None
+        if resolved_date is None or start_date > resolved_date:
+            raise HTTPException(status_code=404, detail="MARKET_SNAPSHOT_NOT_FOUND")
+        zone = ZoneInfo("Asia/Shanghai")
+        known_at = datetime.now(zone)
+        scans = event_repository.latest_security_source_scans(
+            ts_code=ts_code,
+            market_date=resolved_date,
+            known_at=known_at,
+        )
+        exchange_source = "sse" if ts_code.endswith(".SH") else "szse"
+        required_sources = {"cninfo", "csrc", exchange_source}
+        coverage: list[dict[str, object]] = []
+        complete_sources: set[str] = set()
+        for scan in scans:
+            if scan.status != "SUCCESS":
+                coverage_status = "FAILED"
+                coverage_reason = scan.error_code or "SCAN_FAILED"
+            elif not scan.pagination_complete or scan.page_count <= 0:
+                coverage_status = "PAGINATION_INCOMPLETE"
+                coverage_reason = "PAGINATION_INCOMPLETE"
+            elif (
+                scan.scan_start_date is None
+                or scan.scan_end_date is None
+                or scan.scan_start_date > start_date
+                or scan.scan_end_date != resolved_date
+            ):
+                coverage_status = "DATE_RANGE_INSUFFICIENT"
+                coverage_reason = "DATE_RANGE_INSUFFICIENT"
+            else:
+                coverage_status = "COMPLETE"
+                coverage_reason = None
+                complete_sources.add(scan.source_id)
+            coverage.append(
+                {
+                    "source_id": scan.source_id,
+                    "coverage_status": coverage_status,
+                    "coverage_reason": coverage_reason,
+                    "scan_start_date": (
+                        scan.scan_start_date.isoformat()
+                        if scan.scan_start_date is not None
+                        else None
+                    ),
+                    "scan_end_date": (
+                        scan.scan_end_date.isoformat()
+                        if scan.scan_end_date is not None
+                        else None
+                    ),
+                    "pagination_complete": scan.pagination_complete,
+                    "page_count": scan.page_count,
+                    "event_count": scan.event_count,
+                    "error_code": scan.error_code,
+                }
+            )
+        complete = required_sources.issubset(complete_sources)
+        required_scans = {
+            scan.source_id: scan
+            for scan in scans
+            if scan.source_id in required_sources
+        }
+        return {
+            "ts_code": ts_code,
+            "scan_start_date": start_date.isoformat(),
+            "scan_end_date": resolved_date.isoformat(),
+            "configured_source_ids": sorted(required_sources),
+            "successful_scan_source_ids": sorted(complete_sources),
+            "missing_source_ids": sorted(required_sources - complete_sources),
+            "source_coverage_status": "COMPLETE" if complete else "PARTIAL",
+            "valid_empty_result": complete
+            and all(scan.event_count == 0 for scan in required_scans.values()),
+            "source_coverage": coverage,
+            "source_scans": [scan.model_dump(mode="json") for scan in scans],
+        }
+
     @app.get("/api/market/xbrl-status")
     def exchange_xbrl_status(market_date: date | None = None) -> dict[str, object]:
         resolved_date = market_date

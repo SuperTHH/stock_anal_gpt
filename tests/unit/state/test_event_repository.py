@@ -96,6 +96,36 @@ def test_latest_source_scans_distinguish_valid_empty_from_failed_scan(
     ) == (current,)
 
 
+def test_security_scans_require_complete_pagination_and_do_not_use_global_scan(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    scan_date = date(2026, 7, 22)
+    global_scan = OfficialEventSourceScan(
+        scan_id="global-sse", source_id="sse", market_date=scan_date,
+        listing_url="https://www.sse.com.cn/events/", status="SUCCESS",
+        event_count=0, content_hash="a" * 64, scanned_at=NOW,
+    )
+    scoped_scan = OfficialEventSourceScan(
+        scan_id="scoped-sse", source_id="sse", market_date=scan_date,
+        listing_url="https://www.sse.com.cn/events/?code=600000", status="SUCCESS",
+        event_count=0, content_hash="b" * 64, scanned_at=NOW,
+        ts_code="600000.SH", scan_start_date=date(2023, 7, 22),
+        scan_end_date=scan_date, pagination_complete=True, page_count=3,
+    )
+    repository.save_source_scan(global_scan)
+    repository.save_source_scan(scoped_scan)
+
+    assert repository.latest_security_source_scans(
+        ts_code="600000.SH", market_date=scan_date, known_at=NOW
+    ) == (scoped_scan,)
+
+    with pytest.raises(ValueError, match="EVENT_SCAN_INCOMPLETE"):
+        OfficialEventSourceScan.model_validate(
+            scoped_scan.model_copy(update={"scan_id": "partial", "pagination_complete": False})
+        )
+
+
 def test_event_correction_is_append_only_and_idempotent(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     original = _event(

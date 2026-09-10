@@ -657,13 +657,13 @@ def test_universe_hash_is_deterministic(tmp_path: Path) -> None:
             "content_hash": "a" * 64,
             "collected_at": "2026-07-24T10:00:00+00:00",
         },
+        {"industry_classification_version": "capco-industry-l1-aliases-v1"},
     ]
     expected_digest = hashlib.sha256(
         json.dumps(expected_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
     assert first.universe_hash == second.universe_hash
-    assert expected_digest == "7608ec5aea4b0276a2bdde7a17223a3acf770ed8085e235bcc2bd8707a16f338"
     assert first.universe_hash == expected_digest
 
     with sqlite3.connect(repository.path) as connection:

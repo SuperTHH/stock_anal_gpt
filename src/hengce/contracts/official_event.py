@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from .base import FactBase
 from .enums import QualityStatus, StrategyType
@@ -35,6 +35,33 @@ class OfficialEventSourceScan(BaseModel):
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     scanned_at: datetime
     error_code: str | None = None
+    ts_code: str | None = Field(default=None, pattern=r"^\d{6}\.(SH|SZ)$")
+    scan_start_date: date | None = None
+    scan_end_date: date | None = None
+    pagination_complete: bool = False
+    page_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def security_scan_scope_must_be_complete(self) -> "OfficialEventSourceScan":
+        scoped_values = (self.scan_start_date, self.scan_end_date)
+        if self.ts_code is None:
+            if any(value is not None for value in scoped_values):
+                raise ValueError("EVENT_SCAN_SECURITY_REQUIRED")
+            return self
+        if (
+            any(value is None for value in scoped_values)
+            or self.scan_start_date > self.scan_end_date
+            or self.scan_end_date != self.market_date
+            or self.scan_end_date > self.scanned_at.date()
+        ):
+            raise ValueError("EVENT_SCAN_DATE_SCOPE_INVALID")
+        if self.status == "SUCCESS" and (
+            not self.pagination_complete
+            or self.page_count == 0
+            or self.error_code is not None
+        ):
+            raise ValueError("EVENT_SCAN_INCOMPLETE")
+        return self
 
     @field_validator("scanned_at")
     @classmethod

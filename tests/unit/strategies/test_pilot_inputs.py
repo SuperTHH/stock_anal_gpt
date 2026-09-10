@@ -82,6 +82,10 @@ def pilot_metrics(code: str, offset: int) -> PilotMetricResult:
         "pb": str(Decimal("3") - value / Decimal("10")),
         "fcf_yield": str(Decimal("0.03") + value / Decimal("100")),
         "current_asset_ratio": str(Decimal("0.4") + value / Decimal("100")),
+        "equity_asset_ratio": str(Decimal("0.1") + value / Decimal("100")),
+        "financial_roe_stability": str(Decimal("0.04") - value / Decimal("1000")),
+        "net_cash_to_assets": str(Decimal("0.05") + value / Decimal("100")),
+        "net_margin_stability": str(Decimal("0.03") - value / Decimal("1000")),
         "consecutive_dividend_years": str(min(5, 2 + offset)),
         "announced_dividend_yield": str(
             Decimal("0.02") + value / Decimal("100")
@@ -271,6 +275,39 @@ def test_financial_industry_uses_earnings_dividend_coverage() -> None:
     assert coverage.source_record_ids == (
         f"{target}:dividend_earnings_coverage",
     )
+
+
+def test_financial_industry_uses_financial_balance_and_return_factors() -> None:
+    snapshot = universe()
+    first = snapshot.members[0].model_copy(update={"industry_l1": "金融业"})
+    snapshot = snapshot.model_copy(update={"members": (first, *snapshot.members[1:])})
+    results = {
+        member.ts_code: pilot_metrics(member.ts_code, index)
+        for index, member in enumerate(snapshot.members, start=1)
+    }
+    target = first.ts_code
+    for name in (
+        "roic_2025", "gross_margin_stability", "debt_ratio",
+        "cash_debt_coverage", "net_cash_to_assets", "current_asset_ratio",
+        "cash_flow_quality", "fcf_yield",
+    ):
+        results[target].metrics[name] = metric(name, None, target)
+
+    built = PilotStrategyInputBuilder().build(
+        snapshot, results, filters(snapshot), CUTOFF, CUTOFF
+    )
+
+    for strategy, names in {
+        StrategyType.QUALITY_GROWTH: (
+            "capital_return", "profitability_stability", "balance_sheet_quality",
+        ),
+        StrategyType.DEEP_VALUE: (
+            "absolute_valuation", "asset_quality", "cash_debt_quality",
+        ),
+        StrategyType.STABLE_DIVIDEND: ("balance_sheet_quality",),
+    }.items():
+        item = built[strategy][0]
+        assert all(item.factors[name].value is not None for name in names)
 
 
 def test_loss_making_dividend_payer_gets_zero_sustainability_not_missing() -> None:

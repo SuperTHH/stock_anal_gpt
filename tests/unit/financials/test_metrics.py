@@ -465,6 +465,32 @@ def test_pilot_metrics_follow_approved_formulas_and_preserve_lineage() -> None:
     }
 
 
+def test_financial_and_zero_debt_safe_metrics_use_observed_balance_sheet_facts() -> None:
+    result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(
+        series=financial_series(
+            updates={
+                date(2023, 12, 31): {"net_profit": "70", "equity": "550"},
+                date(2024, 12, 31): {"net_profit": "90"},
+                date(2025, 12, 31): {"interest_bearing_debt": "0"},
+            }
+        ),
+        closing_price=Decimal("24"),
+        share_capital=share_capital(),
+        dividends=[],
+        report_cutoff_at=AS_OF,
+        known_at=AS_OF,
+    )
+
+    assert result.metrics["equity_asset_ratio"].value == Decimal("2") / Decimal("3")
+    assert result.metrics["net_cash_to_assets"].value == Decimal("0.1")
+    assert result.metrics["cash_debt_coverage"].value is None
+    assert result.metrics["financial_roe_stability"].value is not None
+    assert result.metrics["net_margin_stability"].value is not None
+    assert "2025-12-31:total_assets" in result.metrics[
+        "net_cash_to_assets"
+    ].input_fact_ids
+
+
 def test_pilot_metrics_return_missing_for_invalid_denominators_and_inputs() -> None:
     """Catches infinity, negative-value PE/PB, zero-debt ratios, and estimated FCF."""
     result = PilotMetricCalculator("pilot-financial-metrics-v1").calculate(

@@ -436,6 +436,37 @@ def test_q1_report_does_not_require_undisclosed_interest_expense(
     assert "interest_expense" not in result.facts
 
 
+def test_q1_generic_period_headers_activate_consolidated_statements(
+    tmp_path: Path,
+) -> None:
+    """Some official Q1 templates identify periods as 期末/年初 and 本期/上期."""
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[0]["text"] = page_payload[0]["text"].replace(
+        "2025年年度报告", "2025年第一季度报告"
+    ).replace("报告期：2025-12-31", "报告期：2025-03-31")
+    page_payload[1]["text"] = page_payload[1]["text"].replace(
+        "2025 年 12 月 31 日\n单位：人民币万元",
+        "编制单位：虚构公司 金额单位：人民币万元\n项目 期末数 年初数",
+    )
+    for page in page_payload[2:4]:
+        page["text"] = page["text"].replace(
+            "2025 年 1—12 月\n单位：人民币万元",
+            "编制单位：虚构公司 金额单位：人民币万元\n项目 本期数 上期数",
+        )
+    page_payload[2]["text"] = page_payload[2]["text"].replace("利息费用 | (20)", "")
+    filing = descriptor(content_hash).model_copy(
+        update={"report_period": date(2025, 3, 31), "report_type": ReportType.Q1}
+    )
+
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=filing)
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_assets"] == Decimal("20000000")
+    assert result.facts["revenue"] == Decimal("10000000")
+    assert result.facts["operating_cash_flow"] == Decimal("2200000")
+
+
 def test_annual_interest_expense_can_come_from_audited_finance_cost_note(
     tmp_path: Path,
 ) -> None:
@@ -817,6 +848,25 @@ def test_garbled_bank_total_rows_are_recovered_with_equation_checks() -> None:
         + recovered["cash_exchange_effect"]
         == recovered["net_cash_change"]
     )
+
+
+def test_garbled_bank_cash_flow_skips_numeric_note_reference() -> None:
+    lines = [
+        "2024年度",
+        "（除特别注明外，金额单位为人民币千元）",
+        "支付利息、手续费及佣金的现金 (125) (140) (119) (134)",
+        "支付的各项税费 (14) (19) (13) (16)",
+        "经营活动产生的现金流量净额 五、42(1) 39,166,570 125,030,843 "
+        "30,589,996 80,439,677",
+        "后附财务报表附注为本财务报表的组成部分。",
+    ]
+
+    candidates, statement = _garbled_bank_statement_candidates(lines, page_number=1)
+
+    assert statement is not None
+    assert {
+        item.canonical_fact_name: item.value for item in candidates
+    } == {"operating_cash_flow": Decimal("39166570000")}
 
 
 def test_garbled_two_column_cash_flow_is_recovered_across_pages() -> None:
@@ -3255,6 +3305,25 @@ def test_capital_expenditure_accepts_cash_paid_wording(
     page_payload[3]["text"] = page_payload[3]["text"].replace(
         "购建固定资产、无形资产和其他长期资产支付的现金 | 50",
         "购建固定资产、无形资产和其他长期资产所支付的现金 | 50",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["capital_expenditure"] == Decimal("500000")
+
+
+def test_capital_expenditure_accepts_official_purchase_wording(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "购建固定资产、无形资产和其他长期资产支付的现金 | 50",
+        "购置固定资产、无形资产和其他长期资产支付的现金 | 50",
     )
 
     result = extractor(page_payload).extract(

@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from hengce.collectors.tushare import TushareDailyCollector
+from hengce.collectors.tushare import TushareDailyCollector, TushareTradeCalendarCollector
 from hengce.contracts.enums import ReviewStatus
 from hengce.contracts.policy import SourcePolicy
 from hengce.policy.guard import PolicyDenied, PolicyGuard
@@ -22,7 +22,7 @@ def _repository(tmp_path: Path, *, enabled: bool = True) -> StateRepository:
             source_name="Tushare",
             allowed_domains=["api.tushare.pro"],
             allowed_schemes=["http"],
-            allowed_purposes=["market_daily"],
+            allowed_purposes=["market_daily", "market_calendar"],
             fetch_frequency="trading_day",
             full_text_rule="structured_only",
             attachment_rule="none",
@@ -84,6 +84,35 @@ def test_fetch_daily_makes_one_full_market_request(tmp_path: Path) -> None:
     assert b'"ts_code"' not in calls[0].content
     assert result.bars[0].ts_code == "600000.SH"
     assert result.bars[0].open.as_tuple().exponent == 0
+
+
+def test_fetch_trade_calendar_returns_only_valid_open_dates(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "fields": ["is_open", "cal_date"],
+                    "items": [[1, "20260722"], ["1", "20260721"]],
+                },
+            },
+        )
+
+    collector = TushareTradeCalendarCollector(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        guard=PolicyGuard(_repository(tmp_path)),
+        token=SecretStr("test-token"),
+        clock=lambda: datetime(2026, 7, 24, 21, 31, tzinfo=UTC),
+    )
+    result = collector.fetch(date(2026, 7, 21), date(2026, 7, 22))
+
+    assert result.trade_dates == [date(2026, 7, 21), date(2026, 7, 22)]
+    assert b'"api_name":"trade_cal"' in requests[0].content
+    assert b'"is_open":"1"' in requests[0].content
 
 
 def test_fetch_daily_accepts_reordered_unique_fields(tmp_path: Path) -> None:

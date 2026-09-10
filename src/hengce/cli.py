@@ -23,7 +23,7 @@ from hengce.collectors.exchange_dividends import (
     SzseImplementedDividendCollector,
 )
 from hengce.collectors.security_master import OfficialSecurityMasterCsvImporter
-from hengce.collectors.tushare import TushareDailyCollector
+from hengce.collectors.tushare import TushareDailyCollector, TushareTradeCalendarCollector
 from hengce.config import Settings
 from hengce.contracts.enums import DiscoveryMethod, EvidenceCohort, ReportType
 from hengce.contracts.financial import FilingDescriptor, TaxonomyPackageRef
@@ -211,7 +211,11 @@ def is_safe_relative_entrypoint(entrypoint: str) -> bool:
 
 
 def build_market_ingestion(
-    settings: Settings, client: httpx.Client, policy_file: Path | None = None
+    settings: Settings,
+    client: httpx.Client,
+    policy_file: Path | None = None,
+    *,
+    filter_out_of_scope: bool = False,
 ) -> MarketIngestionService:
     """Compose M1 ingestion without making a request; caller owns ``client`` lifecycle."""
     state = bootstrap_state(settings, policy_file)
@@ -228,6 +232,7 @@ def build_market_ingestion(
         raw_store=RawObjectStore(settings.data_dir / "raw"),
         warehouse=MarketWarehouse(settings.data_dir / "normalized"),
         state=state,
+        filter_out_of_scope=filter_out_of_scope,
     )
 
 
@@ -592,10 +597,63 @@ def initialize_history(
     trade_dates = load_trade_dates(calendar_file)
     settings = Settings(data_dir=data_dir)
     with httpx.Client() as client:
-        ingestion = build_market_ingestion(settings, client, policy_file)
+        ingestion = build_market_ingestion(
+            settings, client, policy_file, filter_out_of_scope=True
+        )
         state = StateRepository(settings.data_dir / "state" / "hengce.sqlite3")
         result = HistoricalInitializer(ingestion=ingestion, state=state).run(trade_dates)
     typer.echo(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+@app.command("initialize-history-range")
+def initialize_history_range(
+    start_date: Annotated[str, typer.Option()],
+    end_date: Annotated[str, typer.Option()],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    policy_file: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    """Fetch the official open-day calendar and resume daily ingestion for a range."""
+    parsed_start = parse_trade_date(start_date)
+    parsed_end = parse_trade_date(end_date)
+    if parsed_start > parsed_end:
+        raise typer.BadParameter("start-date must not be after end-date")
+    settings = Settings(data_dir=data_dir)
+    state = bootstrap_state(settings, policy_file)
+    if settings.tushare_token is None:
+        raise typer.BadParameter("HENGCE_TUSHARE_TOKEN is required")
+    with httpx.Client() as client:
+        calendar = TushareTradeCalendarCollector(
+            client=client,
+            guard=PolicyGuard(state),
+            token=SecretStr(settings.tushare_token.get_secret_value()),
+            clock=lambda: datetime.now(ZoneInfo(settings.timezone)),
+        ).fetch(parsed_start, parsed_end)
+        calendar_raw = RawObjectStore(settings.data_dir / "raw").put(
+            source_id="tushare",
+            source_url=TushareTradeCalendarCollector.endpoint,
+            collected_at=calendar.collected_at,
+            content_type=calendar.content_type,
+            payload=calendar.raw_payload,
+        )
+        ingestion = build_market_ingestion(
+            settings, client, policy_file, filter_out_of_scope=True
+        )
+        result = HistoricalInitializer(ingestion=ingestion, state=state).run(
+            calendar.trade_dates
+        )
+    typer.echo(
+        json.dumps(
+            {
+                **asdict(result),
+                "calendar_content_hash": calendar_raw.content_hash,
+                "calendar_trade_date_count": len(calendar.trade_dates),
+                "start_date": parsed_start.isoformat(),
+                "end_date": parsed_end.isoformat(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("import-security-master")
@@ -940,11 +998,16 @@ def record_official_event_scan(
     status: Annotated[str, typer.Option()] = "SUCCESS",
     error_code: Annotated[str | None, typer.Option()] = None,
     scanned_at: Annotated[str | None, typer.Option()] = None,
+    ts_code: Annotated[str | None, typer.Option()] = None,
+    scan_start_date: Annotated[str | None, typer.Option()] = None,
+    scan_end_date: Annotated[str | None, typer.Option()] = None,
+    pagination_complete: Annotated[bool, typer.Option()] = False,
+    page_count: Annotated[int, typer.Option(min=0)] = 0,
     data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
     policy_file: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
     """Record an auditable official-source scan, including a valid empty result."""
-    if source_id not in {"csrc", "sse", "stats", "szse"}:
+    if source_id not in {"cninfo", "csrc", "sse", "stats", "szse"}:
         raise typer.BadParameter("unsupported official event scan source")
     normalized_status = status.upper()
     if normalized_status not in {"SUCCESS", "FAILED"}:
@@ -986,6 +1049,11 @@ def record_official_event_scan(
             listing_url,
             resolved_hash,
             parsed_scanned_at.isoformat(),
+            ts_code or "",
+            scan_start_date or "",
+            scan_end_date or "",
+            str(pagination_complete),
+            str(page_count),
         )
     )
     scan = OfficialEventSourceScan(
@@ -998,6 +1066,11 @@ def record_official_event_scan(
         content_hash=resolved_hash,
         scanned_at=parsed_scanned_at,
         error_code=error_code,
+        ts_code=ts_code,
+        scan_start_date=(parse_trade_date(scan_start_date) if scan_start_date else None),
+        scan_end_date=(parse_trade_date(scan_end_date) if scan_end_date else None),
+        pagination_complete=pagination_complete,
+        page_count=page_count,
     )
     OfficialEventRepository(state.path).save_source_scan(scan)
     typer.echo(scan.model_dump_json())
@@ -1132,3 +1205,4 @@ def _aggregate_pilot_summary(
 
 if __name__ == "__main__":
     app()
+

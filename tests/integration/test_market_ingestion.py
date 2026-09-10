@@ -172,6 +172,7 @@ def _service(
     collector: FakeCollector | None = None,
     raw_store: CountingRawStore | None = None,
     warehouse: CountingWarehouse | None = None,
+    filter_out_of_scope: bool = False,
 ):
     from hengce.services.market_ingestion import MarketIngestionService
 
@@ -184,6 +185,7 @@ def _service(
             raw_store=raw_store or CountingRawStore(tmp_path / "raw"),
             warehouse=warehouse or CountingWarehouse(tmp_path / "normalized"),
             state=repository,
+            filter_out_of_scope=filter_out_of_scope,
         ),
         repository,
     )
@@ -342,6 +344,30 @@ def test_out_of_scope_bar_fails_before_parquet_publication(
     assert raw_store.calls == 1
     assert warehouse.calls == 0
     assert repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}") is None
+
+
+def test_history_mode_excludes_out_of_scope_bars_and_records_count(tmp_path: Path) -> None:
+    out_of_scope = _bar().model_copy(
+        update={"record_id": "000002.SZ-20260724-fixture", "ts_code": "000002.SZ"}
+    )
+    raw_payload = b'{"codes":["600000.SH","000002.SZ"]}'
+    collector = FakeCollector(bars=[_bar(), out_of_scope], raw_payload=raw_payload)
+    warehouse = CountingWarehouse(tmp_path / "normalized")
+    service, repository = _service(
+        tmp_path,
+        collector=collector,
+        warehouse=warehouse,
+        filter_out_of_scope=True,
+    )
+
+    result = service.run(TRADE_DATE)
+
+    assert result.bar_count == 1
+    assert result.excluded_bar_count == 1
+    assert [row["ts_code"] for row in warehouse.read_bars(TRADE_DATE)] == ["600000.SH"]
+    checkpoint = repository.get_checkpoint(f"market_daily:{TRADE_DATE.isoformat()}")
+    assert checkpoint is not None
+    assert json.loads(checkpoint)["excluded_bar_count"] == 1
 
 
 def test_market_wide_bj_bars_are_excluded_from_normalized_artifact(tmp_path: Path) -> None:

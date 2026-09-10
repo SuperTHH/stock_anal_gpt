@@ -21,6 +21,90 @@ class DailyFetchResult:
     bars: list[MarketBar]
 
 
+@dataclass(frozen=True)
+class TradeCalendarFetchResult:
+    raw_payload: bytes
+    content_type: str
+    collected_at: datetime
+    trade_dates: list[date]
+
+
+class TushareTradeCalendarCollector:
+    endpoint = "http://api.tushare.pro/"
+    fields = ("cal_date", "is_open")
+
+    def __init__(
+        self,
+        *,
+        client: httpx.Client,
+        guard: PolicyGuard,
+        token: SecretStr,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.client = client
+        self.guard = guard
+        self._token = token
+        self.clock = clock
+
+    def fetch(self, start_date: date, end_date: date) -> TradeCalendarFetchResult:
+        if start_date > end_date:
+            raise ValueError("TUSHARE_CALENDAR_RANGE_INVALID")
+        self.guard.authorize(
+            "tushare", self.endpoint, "market_calendar", "collectors.tushare"
+        )
+        response = self.client.post(
+            self.endpoint,
+            json={
+                "api_name": "trade_cal",
+                "token": self._token.get_secret_value(),
+                "params": {
+                    "exchange": "SSE",
+                    "start_date": start_date.strftime("%Y%m%d"),
+                    "end_date": end_date.strftime("%Y%m%d"),
+                    "is_open": "1",
+                },
+                "fields": ",".join(self.fields),
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        body = TushareDailyCollector._parse_body(response)
+        if body.get("code") != 0:
+            raise RuntimeError(f"TUSHARE_API_ERROR_{body.get('code')}")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("TUSHARE_CALENDAR_FIELDS_INVALID")
+        fields, items = data.get("fields"), data.get("items")
+        if (
+            not isinstance(fields, list)
+            or len(fields) != 2
+            or set(fields) != set(self.fields)
+            or not isinstance(items, list)
+        ):
+            raise ValueError("TUSHARE_CALENDAR_FIELDS_INVALID")
+        dates: set[date] = set()
+        for item in items:
+            if not isinstance(item, list) or len(item) != len(fields):
+                raise ValueError("TUSHARE_CALENDAR_ROW_INVALID")
+            row = dict(zip(fields, item, strict=True))
+            try:
+                current = datetime.strptime(str(row["cal_date"]), "%Y%m%d").date()
+            except (KeyError, ValueError) as error:
+                raise ValueError("TUSHARE_CALENDAR_ROW_INVALID") from error
+            if row.get("is_open") not in (1, "1") or not start_date <= current <= end_date:
+                raise ValueError("TUSHARE_CALENDAR_ROW_INVALID")
+            dates.add(current)
+        collected_at = self.clock()
+        if collected_at.tzinfo is None or collected_at.utcoffset() is None:
+            raise ValueError("TUSHARE_COLLECTED_AT_NOT_TIMEZONE_AWARE")
+        return TradeCalendarFetchResult(
+            raw_payload=response.content,
+            content_type=response.headers.get("content-type", "application/json"),
+            collected_at=collected_at,
+            trade_dates=sorted(dates),
+        )
+
+
 class TushareDailyCollector:
     endpoint = "http://api.tushare.pro/"
     fields = (

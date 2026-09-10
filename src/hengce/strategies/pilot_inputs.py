@@ -67,6 +67,10 @@ class PilotStrategyInputBuilder:
                 "pb",
                 "fcf_yield",
                 "current_asset_ratio",
+                "equity_asset_ratio",
+                "financial_roe_stability",
+                "net_cash_to_assets",
+                "net_margin_stability",
             }
         }
         result = {strategy: [] for strategy in StrategyType}
@@ -82,18 +86,25 @@ class PilotStrategyInputBuilder:
                 ),
             )
             metric_map = metric_result.metrics if metric_result is not None else {}
-            common_balance = self._percentile_average(
-                code,
-                metric_map,
-                percentiles,
-                (("debt_ratio", False), ("cash_debt_coverage", True)),
+            financial_industry = bool(
+                getattr(member, "industry_l1", None)
+                and "金融" in member.industry_l1
             )
-            quality_factors = {
-                "capital_return": self._percentile_average(
+            common_balance = (
+                self._percentile_average(
+                    code, metric_map, percentiles, (("equity_asset_ratio", True),)
+                )
+                if financial_industry
+                else self._percentile_average(
                     code,
                     metric_map,
                     percentiles,
-                    (("roe_2025", True), ("roic_2025", True)),
+                    (("debt_ratio", False), ("net_cash_to_assets", True)),
+                )
+            )
+            quality_factors = {
+                "capital_return": self._capital_return(
+                    code, metric_map, percentiles, financial_industry
                 ),
                 "growth_quality": self._percentile_average(
                     code,
@@ -110,9 +121,13 @@ class PilotStrategyInputBuilder:
                     metric_map,
                     "cash_flow_quality",
                 ),
-                "profitability_stability": self._direct(
-                    metric_map,
-                    "gross_margin_stability",
+                "profitability_stability": (
+                    self._direct(metric_map, "financial_roe_stability")
+                    if financial_industry
+                    else self._preferred_direct(
+                        metric_map,
+                        ("gross_margin_stability", "net_margin_stability"),
+                    )
                 ),
                 "balance_sheet_quality": common_balance,
                 "valuation_attractiveness": self._valuation_percentile_average(
@@ -128,9 +143,13 @@ class PilotStrategyInputBuilder:
                     metric_map,
                     percentiles,
                     (
-                        ("pe", False),
-                        ("pb", False),
-                        ("fcf_yield", True),
+                        (("pe", False), ("pb", False))
+                        if financial_industry
+                        else (
+                            ("pe", False),
+                            ("pb", False),
+                            ("fcf_yield", True),
+                        )
                     ),
                 ),
                 "relative_valuation": self._valuation_percentile_average(
@@ -139,14 +158,20 @@ class PilotStrategyInputBuilder:
                     percentiles,
                     (("pe", False), ("pb", False)),
                 ),
-                "asset_quality": self._percentile_average(
-                    code,
-                    metric_map,
-                    percentiles,
-                    (
-                        ("current_asset_ratio", True),
-                        ("cash_flow_quality", True),
-                    ),
+                "asset_quality": (
+                    self._percentile_average(
+                        code, metric_map, percentiles, (("equity_asset_ratio", True),)
+                    )
+                    if financial_industry
+                    else self._percentile_average(
+                        code,
+                        metric_map,
+                        percentiles,
+                        (
+                            ("current_asset_ratio", True),
+                            ("cash_flow_quality", True),
+                        ),
+                    )
                 ),
                 "cash_debt_quality": common_balance,
                 "cycle_position": self._cycle_position(metric_map),
@@ -304,6 +329,27 @@ class PilotStrategyInputBuilder:
         return self._factor(
             sum(values, Decimal(0)) / Decimal(len(values)),
             tuple(sorted(set(source_ids))),
+        )
+
+    def _capital_return(
+        self,
+        code: str,
+        metric_map: Mapping[str, MetricValue],
+        percentiles: Mapping[str, Mapping[str, Decimal]],
+        financial_industry: bool,
+    ) -> FactorInput:
+        roic = metric_map.get("roic_2025")
+        if financial_industry or (
+            roic is not None and roic.reason == "DENOMINATOR_MISSING_OR_ZERO"
+        ):
+            return self._percentile_average(
+                code, metric_map, percentiles, (("roe_2025", True),)
+            )
+        return self._percentile_average(
+            code,
+            metric_map,
+            percentiles,
+            (("roe_2025", True), ("roic_2025", True)),
         )
 
     def _valuation_percentile_average(

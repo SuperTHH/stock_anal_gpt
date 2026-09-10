@@ -212,6 +212,10 @@ _ALIASES = {
     "购建固定资产、无形资产和其他长期资产所支付的现金": ("capital_expenditure"),
     "购建固定资产、无形资产及其他长期资产支付的现金": ("capital_expenditure"),
     "购建固定资产、无形资产及其他长期资产所支付的现金": ("capital_expenditure"),
+    "购置固定资产、无形资产和其他长期资产支付的现金": ("capital_expenditure"),
+    "购置固定资产、无形资产和其他长期资产所支付的现金": ("capital_expenditure"),
+    "购置固定资产、无形资产及其他长期资产支付的现金": ("capital_expenditure"),
+    "购置固定资产、无形资产及其他长期资产所支付的现金": ("capital_expenditure"),
     "期末总股本": "total_shares",
     "实收资本（或股本）": "total_shares",
     "实收资本(或股本)": "total_shares",
@@ -1783,19 +1787,9 @@ def _parse_combined_bank_group_fact(line: str) -> tuple[str, Decimal] | None:
         canonical_name = _canonical_name(label)
     if canonical_name is None:
         return None
-    value_index = (
-        1
-        if len(value_matches) >= 5
-        and (
-            note_prefix_stripped
-            or re.fullmatch(
-                r"\d{1,3}(?:\.\d+)?",
-                value_matches[0].group(0).strip(),
-            )
-            is not None
-        )
-        else 0
-    )
+    value_index = _bank_group_value_index(line, value_matches)
+    if note_prefix_stripped and value_index == 0:
+        value_index = 1
     value = _accounting_decimal(value_matches[value_index].group(0))
     return (canonical_name, value) if value is not None else None
 
@@ -2900,7 +2894,12 @@ def _two_column_current_value(line: str) -> Decimal | None:
     if len(matches) >= 3 and re.fullmatch(
         r"\d{1,3}(?:\.\d+)?", matches[0].group(0).strip()
     ):
-        value_index = 1
+        value_index = (
+            2
+            if _has_numeric_note_prefix(line, matches)
+            and _is_parenthesized_note(matches[1].group(0))
+            else 1
+        )
     selected = matches[value_index]
     value = _accounting_decimal(selected.group(0))
     if (
@@ -3123,11 +3122,7 @@ def _bank_group_current_value(line: str) -> Decimal | None:
     matches = list(re.finditer(_ACCOUNTING_NUMBER, line))
     if len(matches) < 4:
         return None
-    value_index = 0
-    if len(matches) >= 5 and re.fullmatch(
-        r"\d{1,3}(?:\.\d+)?", matches[0].group(0).strip()
-    ):
-        value_index = 1
+    value_index = _bank_group_value_index(line, matches)
     selected = matches[value_index]
     value = _accounting_decimal(selected.group(0))
     if (
@@ -3137,6 +3132,28 @@ def _bank_group_current_value(line: str) -> Decimal | None:
     ):
         return -abs(value)
     return value
+
+
+def _is_parenthesized_note(raw_value: str) -> bool:
+    return re.fullmatch(r"\(\s*\d{1,3}(?:\.\d+)?\s*\)", raw_value.strip()) is not None
+
+
+def _has_numeric_note_prefix(line: str, matches: list[re.Match[str]]) -> bool:
+    prefix = line[: matches[0].start()]
+    return "注" in prefix or "、" in prefix
+
+
+def _bank_group_value_index(line: str, matches: list[re.Match[str]]) -> int:
+    """Skip a numeric note such as ``五、42(1)`` before the first amount."""
+    if len(matches) < 5 or re.fullmatch(
+        r"\d{1,3}(?:\.\d+)?", matches[0].group(0).strip()
+    ) is None:
+        return 0
+    if _has_numeric_note_prefix(line, matches) and _is_parenthesized_note(
+        matches[1].group(0)
+    ):
+        return 2
+    return 1
 
 
 def _reordered_capital_expenditure(
@@ -3235,6 +3252,12 @@ def _statement_table_header_matches(
             rf"{period.year - 1}年0?12月0?31日)"
         )
         return (
+            normalized in {
+                "项目期末数年初数",
+                "资产期末数年初数",
+                "负债和所有者权益期末数年初数",
+            }
+            or
             re.fullmatch(
                 r"(?:项目|资产|负债和所有者权益)"
                 rf"(?:附注(?:{_CHINESE_NUMERAL})?)?"
@@ -3266,6 +3289,7 @@ def _statement_table_header_matches(
         )
     if descriptor.report_type is ReportType.Q1:
         return normalized in {
+            "项目本期数上期数",
             "项目本期发生额上期发生额",
             "项目本期发生额上年同期发生额",
             "项目本期金额上期金额",

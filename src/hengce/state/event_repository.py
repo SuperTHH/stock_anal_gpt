@@ -179,6 +179,31 @@ class OfficialEventRepository:
             for row in rows
         )
 
+    def latest_security_source_scans(
+        self,
+        *,
+        ts_code: str,
+        market_date: date,
+        known_at: datetime,
+    ) -> tuple[OfficialEventSourceScan, ...]:
+        """Return latest issuer-scoped scan per source; global homepage scans do not count."""
+        self._require_aware(known_at)
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM official_event_source_scans
+                WHERE market_date=? AND scanned_at <= ?
+                ORDER BY scanned_at DESC, scan_id DESC
+                """,
+                (market_date.isoformat(), known_at.isoformat()),
+            ).fetchall()
+        latest: dict[str, OfficialEventSourceScan] = {}
+        for row in rows:
+            scan = OfficialEventSourceScan.model_validate_json(str(row["payload_json"]))
+            if scan.ts_code == ts_code and scan.source_id not in latest:
+                latest[scan.source_id] = scan
+        return tuple(latest[source] for source in sorted(latest))
+
     @classmethod
     def _validate_times(cls, event: OfficialEvent) -> None:
         if event.published_at is None:

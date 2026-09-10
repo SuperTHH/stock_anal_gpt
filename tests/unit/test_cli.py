@@ -700,7 +700,7 @@ def test_check_security_universe_reports_composed_local_universe_without_network
             {"source_id": "szse", "version": "2026-07-24-szse"},
         ],
         "security_count": 4,
-        "universe_hash": "9c96ba030d69ebfd0102ff98da4c0f3995ba056518f0763de2a4d9d519409afa",
+            "universe_hash": "e94c0fa39209a617dd5aeec34baf1f1d64d25aa9729d4c73061570975a2eb224",
     }
     assert json.loads(second.stdout) == output
     assert bootstrap.call_count == 2

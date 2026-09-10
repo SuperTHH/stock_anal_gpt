@@ -12,6 +12,7 @@ from hengce.contracts.enums import QualityStatus, RunStatus
 from hengce.contracts.market import SecurityMaster
 from hengce.contracts.policy import SourcePolicy
 from hengce.contracts.run import RefusalRecord, RunRecord
+from hengce.industry import INDUSTRY_CLASSIFICATION_VERSION, canonical_industry_l1
 
 from .db import connect
 
@@ -396,7 +397,13 @@ class StateRepository:
         components = (resolved_components[0], resolved_components[1])
         securities = sorted(
             (
-                security
+                security.model_copy(
+                    update={
+                        "industry_l1": canonical_industry_l1(security.industry_l1),
+                        "industry_l1_raw": security.industry_l1_raw or security.industry_l1,
+                        "industry_classification_version": INDUSTRY_CLASSIFICATION_VERSION,
+                    }
+                )
                 for component in components
                 for security in component.securities
             ),
@@ -414,6 +421,7 @@ class StateRepository:
             }
             for component in components
         ]
+        identity.append({"industry_classification_version": INDUSTRY_CLASSIFICATION_VERSION})
         universe_hash = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

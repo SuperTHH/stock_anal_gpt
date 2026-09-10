@@ -584,7 +584,24 @@ class PilotMetricCalculator:
                 fact(annual_2025, "total_assets"),
             ),
             "cash_debt_coverage": ratio(cash_2025, debt_2025),
+            "equity_asset_ratio": ratio(
+                equity_2025,
+                fact(annual_2025, "total_assets"),
+            ),
         }
+        total_assets_2025 = fact(annual_2025, "total_assets")
+        net_cash_ids = ids(cash_2025, debt_2025, total_assets_2025)
+        if cash_2025 is None or debt_2025 is None or total_assets_2025 is None:
+            metrics["net_cash_to_assets"] = missing(net_cash_ids, "INPUT_MISSING")
+        elif total_assets_2025.value <= 0:
+            metrics["net_cash_to_assets"] = missing(
+                net_cash_ids, "DENOMINATOR_MISSING_OR_ZERO"
+            )
+        else:
+            metrics["net_cash_to_assets"] = derived(
+                (cash_2025.value - debt_2025.value) / total_assets_2025.value,
+                net_cash_ids,
+            )
 
         gross_margins: list[Decimal] = []
         gross_margin_ids: list[str] = []
@@ -610,6 +627,53 @@ class PilotMetricCalculator:
             metrics["gross_margin_stability"] = missing(
                 tuple(sorted(gross_margin_ids)),
                 "INPUT_MISSING",
+            )
+
+        net_margins: list[Decimal] = []
+        net_margin_ids: list[str] = []
+        for snapshot in (annual_2023, annual_2024, annual_2025):
+            revenue = fact(snapshot, "revenue")
+            profit = fact(snapshot, "net_profit")
+            net_margin_ids.extend(ids(revenue, profit))
+            if revenue is None or profit is None or revenue.value <= 0:
+                net_margins = []
+                break
+            net_margins.append(profit.value / revenue.value)
+        if len(net_margins) == 3:
+            mean_margin = sum(net_margins, Decimal(0)) / Decimal(3)
+            margin_variance = sum(
+                ((value - mean_margin) ** 2 for value in net_margins), Decimal(0)
+            ) / Decimal(3)
+            metrics["net_margin_stability"] = derived(
+                margin_variance.sqrt(), tuple(sorted(net_margin_ids))
+            )
+        else:
+            metrics["net_margin_stability"] = missing(
+                tuple(sorted(net_margin_ids)), "INPUT_MISSING"
+            )
+
+        annual_roe_proxies: list[Decimal] = []
+        annual_roe_ids: list[str] = []
+        for snapshot in (annual_2023, annual_2024, annual_2025):
+            profit = fact(snapshot, "net_profit")
+            equity = fact(snapshot, "equity")
+            annual_roe_ids.extend(ids(profit, equity))
+            if profit is None or equity is None or equity.value <= 0:
+                annual_roe_proxies = []
+                break
+            annual_roe_proxies.append(profit.value / equity.value)
+        if len(annual_roe_proxies) == 3:
+            mean_roe = sum(annual_roe_proxies, Decimal(0)) / Decimal(3)
+            roe_variance = sum(
+                ((value - mean_roe) ** 2 for value in annual_roe_proxies),
+                Decimal(0),
+            ) / Decimal(3)
+            metrics["financial_roe_stability"] = derived(
+                roe_variance.sqrt(), tuple(sorted(annual_roe_ids))
+            )
+        else:
+            metrics["financial_roe_stability"] = missing(
+                tuple(sorted(annual_roe_ids)), "INPUT_MISSING"
             )
 
         operating_cash_flow = fact(annual_2025, "operating_cash_flow")

@@ -171,6 +171,104 @@ def test_full_market_events_use_the_live_repository_and_frozen_market_cutoff(
     assert payload["successful_scan_source_ids"] == ["csrc", "sse", "stats", "szse"]
 
 
+def test_security_event_coverage_requires_scoped_complete_sources(tmp_path: Path) -> None:
+    repository, report_root, normalized = seed(tmp_path)
+    event_repository = OfficialEventRepository(repository.path)
+    scan_date = date(2026, 7, 22)
+    for source_id in ("cninfo", "csrc", "sse"):
+        event_repository.save_source_scan(
+            OfficialEventSourceScan(
+                scan_id=f"issuer-{source_id}", source_id=source_id,
+                market_date=scan_date,
+                listing_url=(
+                    "https://www.cninfo.com.cn/events/?code=600000"
+                    if source_id == "cninfo"
+                    else f"https://www.{source_id}.gov.cn/events/?code=600000"
+                    if source_id == "csrc"
+                    else "https://www.sse.com.cn/events/?code=600000"
+                ),
+                status="SUCCESS", event_count=0, content_hash="d" * 64,
+                scanned_at=NOW, ts_code="600000.SH",
+                scan_start_date=date(2023, 7, 22), scan_end_date=scan_date,
+                pagination_complete=True, page_count=2,
+            )
+        )
+    client = TestClient(create_app(repository, report_root, normalized))
+
+    complete = client.get(
+        "/api/market/events/600000.SH/coverage",
+        params={"start_date": "2023-07-22", "market_date": "2026-07-22"},
+    ).json()
+    missing = client.get(
+        "/api/market/events/000001.SZ/coverage",
+        params={"start_date": "2023-07-22", "market_date": "2026-07-22"},
+    ).json()
+
+    assert complete["source_coverage_status"] == "COMPLETE"
+    assert complete["valid_empty_result"] is True
+    assert {
+        item["source_id"]: item["coverage_status"]
+        for item in complete["source_coverage"]
+    } == {"cninfo": "COMPLETE", "csrc": "COMPLETE", "sse": "COMPLETE"}
+    assert missing["source_coverage_status"] == "PARTIAL"
+    assert missing["valid_empty_result"] is False
+    assert missing["missing_source_ids"] == ["cninfo", "csrc", "szse"]
+
+
+def test_security_event_coverage_explains_failed_and_short_scans(
+    tmp_path: Path,
+) -> None:
+    repository, report_root, normalized = seed(tmp_path)
+    event_repository = OfficialEventRepository(repository.path)
+    scan_date = date(2026, 7, 22)
+    event_repository.save_source_scan(
+        OfficialEventSourceScan(
+            scan_id="issuer-cninfo-failed",
+            source_id="cninfo",
+            market_date=scan_date,
+            listing_url="https://www.cninfo.com.cn/events/?code=600000",
+            status="FAILED",
+            event_count=0,
+            content_hash="e" * 64,
+            scanned_at=NOW,
+            error_code="TIMEOUT",
+            ts_code="600000.SH",
+            scan_start_date=date(2025, 1, 1),
+            scan_end_date=scan_date,
+        )
+    )
+    event_repository.save_source_scan(
+        OfficialEventSourceScan(
+            scan_id="issuer-csrc-short",
+            source_id="csrc",
+            market_date=scan_date,
+            listing_url="https://www.csrc.gov.cn/events/?code=600000",
+            status="SUCCESS",
+            event_count=0,
+            content_hash="f" * 64,
+            scanned_at=NOW,
+            ts_code="600000.SH",
+            scan_start_date=date(2025, 1, 1),
+            scan_end_date=scan_date,
+            pagination_complete=True,
+            page_count=1,
+        )
+    )
+    client = TestClient(create_app(repository, report_root, normalized))
+
+    payload = client.get(
+        "/api/market/events/600000.SH/coverage",
+        params={"start_date": "2023-07-22", "market_date": "2026-07-22"},
+    ).json()
+
+    by_source = {item["source_id"]: item for item in payload["source_coverage"]}
+    assert by_source["cninfo"]["coverage_status"] == "FAILED"
+    assert by_source["cninfo"]["coverage_reason"] == "TIMEOUT"
+    assert by_source["csrc"]["coverage_status"] == "DATE_RANGE_INSUFFICIENT"
+    assert payload["source_coverage_status"] == "PARTIAL"
+    assert payload["valid_empty_result"] is False
+
+
 def test_xbrl_status_reports_valid_pdf_fallback_only_after_both_exchange_scans(
     tmp_path: Path,
 ) -> None:

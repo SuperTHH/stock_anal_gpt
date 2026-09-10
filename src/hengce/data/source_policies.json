@@ -4,7 +4,7 @@
     "source_name": "Tushare",
     "allowed_domains": ["api.tushare.pro"],
     "allowed_schemes": ["http"],
-    "allowed_purposes": ["market_daily"],
+    "allowed_purposes": ["market_daily", "market_calendar"],
     "fetch_frequency": "trading_day",
     "full_text_rule": "structured_only",
     "attachment_rule": "none",

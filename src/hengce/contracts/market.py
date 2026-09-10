@@ -19,6 +19,8 @@ class SecurityMaster(BaseModel):
     list_date: date
     delist_date: date | None = None
     industry_l1: str | None = None
+    industry_l1_raw: str | None = None
+    industry_classification_version: str | None = None
     security_type: str = "A_SHARE"
     is_in_scope: bool
 

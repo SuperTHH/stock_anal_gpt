@@ -30,6 +30,7 @@ class MarketIngestionResult:
     raw_content_hash: str
     parquet_path: str
     parquet_content_hash: str | None = None
+    excluded_bar_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class MarketIngestionService:
         before_nonlease_terminal_recorded: Callable[[], None] | None = None,
         lease_seconds: float = 300,
         lease_renewal_interval_seconds: float | None = None,
+        filter_out_of_scope: bool = False,
     ) -> None:
         self.collector = collector
         self.raw_store = raw_store
@@ -75,6 +77,7 @@ class MarketIngestionService:
         self.after_ingestion_finalized = after_ingestion_finalized
         self.after_lease_acquired = after_lease_acquired
         self.before_nonlease_terminal_recorded = before_nonlease_terminal_recorded
+        self.filter_out_of_scope = filter_out_of_scope
         if lease_seconds <= 0:
             raise ValueError("INGESTION_LEASE_INVALID")
         self.lease_seconds = lease_seconds
@@ -216,6 +219,8 @@ class MarketIngestionService:
                 raise ValueError("MARKET_DAILY_EMPTY")
             self._validate_unique_codes(fetched.bars)
             market_bars = [bar for bar in fetched.bars if not bar.ts_code.endswith(".BJ")]
+            if self.filter_out_of_scope:
+                market_bars = [bar for bar in market_bars if bar.ts_code in approved_codes]
             if not market_bars:
                 raise ValueError("MARKET_DAILY_EMPTY")
             self._validate_bars_in_scope(market_bars, approved_codes)
@@ -226,6 +231,7 @@ class MarketIngestionService:
                 raw_content_hash=raw.content_hash,
                 parquet_path=str(parquet_path),
                 parquet_content_hash=parquet_content_hash,
+                excluded_bar_count=len(fetched.bars) - len(market_bars),
             )
             staged = StagedMarketArtifact(result=result, raw_payload_path=raw.payload_path)
             if not self.state.stage_ingestion_artifact(
@@ -446,10 +452,10 @@ class MarketIngestionService:
         except json.JSONDecodeError as error:
             raise ValueError("MARKET_CHECKPOINT_INVALID: invalid JSON") from error
         required_fields = {"trade_date", "bar_count", "raw_content_hash", "parquet_path"}
-        optional_fields = required_fields | {"parquet_content_hash"}
-        if not isinstance(payload, dict) or (
-            set(payload) != required_fields and set(payload) != optional_fields
-        ):
+        optional_fields = {"parquet_content_hash", "excluded_bar_count"}
+        if not isinstance(payload, dict) or not required_fields.issubset(payload) or not set(
+            payload
+        ).issubset(required_fields | optional_fields):
             raise ValueError("MARKET_CHECKPOINT_INVALID: required fields")
         if (
             not isinstance(payload["trade_date"], str)
@@ -459,12 +465,19 @@ class MarketIngestionService:
             or not isinstance(payload["parquet_path"], str)
             or "parquet_content_hash" in payload
             and not isinstance(payload["parquet_content_hash"], str)
+            or "excluded_bar_count" in payload
+            and (
+                not isinstance(payload["excluded_bar_count"], int)
+                or isinstance(payload["excluded_bar_count"], bool)
+            )
         ):
             raise ValueError("MARKET_CHECKPOINT_INVALID: field types")
         if payload["trade_date"] != trade_date.isoformat():
             raise ValueError("MARKET_CHECKPOINT_INVALID: stale trade_date")
         if payload["bar_count"] <= 0:
             raise ValueError("MARKET_CHECKPOINT_INVALID: bar_count")
+        if payload.get("excluded_bar_count", 0) < 0:
+            raise ValueError("MARKET_CHECKPOINT_INVALID: excluded_bar_count")
         if not re.fullmatch(r"[0-9a-f]{64}", payload["raw_content_hash"]):
             raise ValueError("MARKET_CHECKPOINT_INVALID: raw_content_hash")
         if not payload["parquet_path"]:
