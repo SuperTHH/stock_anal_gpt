@@ -3492,6 +3492,97 @@ def test_ocr_engine_bounds_worker_threads(monkeypatch) -> None:
         _rapidocr_engine.cache_clear()
 
 
+def test_ocr_renders_page_content_outside_embedded_images(monkeypatch) -> None:
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=400)
+    stream = DecodedStreamObject()
+    stream.set_data(b"0 0 0 rg 20 350 180 20 re f 20 50 240 250 re f")
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    received = []
+
+    def engine(image):
+        received.append(image)
+        return [[[ [0, 0], [20, 0], [20, 10], [0, 10] ], "合并现金流量表", 0.99]], 0
+
+    monkeypatch.setattr("hengce.financials.pdf_extractor._rapidocr_engine", lambda: engine)
+    assert _rapidocr_page_text(page, 1) == "合并现金流量表"
+    assert received[0].getpixel((60, 80)) == (0, 0, 0)
+    assert received[0].getpixel((60, 400)) == (0, 0, 0)
+    assert received[0].getpixel((0, 0)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize("inflow, outflow, valid", [
+    ("30", "80", True), ("30", "81", False), ("80", "30", False),
+])
+def test_damaged_cash_parenthesis_requires_independent_subtotal_agreement(
+    tmp_path: Path, inflow: str, outflow: str, valid: bool,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "投资活动产生的现金流量净额 | (50)",
+        f"投资活动现金流入小计 {inflow} 40\n"
+        f"投资活动现金流出小计 {outflow} 60\n"
+        "投资活动使用的现金流量净额 50) 20)",
+    )
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert (result.quality_status is QualityStatus.VALID) is valid
+    if valid:
+        assert result.facts["investing_cash_flow"] == Decimal("-500000")
+        assert "investing_cash_flow" in dict(result.derivations)
+        document = extractor(page_payload).build_document(
+            filing_id="subtotal-fixture", descriptor=descriptor(content_hash),
+            extracted=result, supersedes_id=None,
+        )
+        assert document.normalization_metadata["investing_cash_flow_derivation_version"] == (
+            "cash-subtotals-v1"
+        )
+    else:
+        assert "PDF_CASH_FLOW_EQUATION_FAILED" in result.issues
+        assert "investing_cash_flow" not in result.facts
+
+
+@pytest.mark.parametrize("interruption", [
+    "单位：人民币元", "母公司现金流量表", "合并现金流量表",
+    "投资活动现金流入小计 31 40",
+])
+def test_cash_subtotal_recovery_rejects_changed_scope_or_ambiguous_inputs(
+    tmp_path: Path, interruption: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "投资活动产生的现金流量净额 | (50)",
+        "投资活动现金流入小计 30 40\n投资活动现金流出小计 80 60\n"
+        + interruption + "\n投资活动使用的现金流量净额 50) 20)",
+    )
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is not QualityStatus.VALID
+    assert "investing_cash_flow" not in result.facts
+
+
+@pytest.mark.parametrize("year, share_unit, expected", [
+    (2025, "股", "100000004"), (2024, "股", "100000000"),
+    (2025, "万元", "100000000"),
+])
+def test_late_share_change_table_requires_current_report_and_share_unit(
+    tmp_path: Path, year: int, share_unit: str, expected: str,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload.append({"page_number": 127, "text": "\n".join([
+        f"{year}年年度报告", "股份变动情况表", "截至报告期末，公司股本结构发生如下变化：",
+        f"单位：{share_unit}", "本次变动前 本次变动后", "数量 比例(%) 数量 比例(%)",
+        "三、ﾠ股份总数 110,000,004 100 -10,000,000 -10,000,000 100,000,004 100",
+    ])})
+    result = extractor(page_payload).extract(pdf_path=path, descriptor=descriptor(content_hash))
+    assert result.quality_status is QualityStatus.VALID, result.issues
+    assert result.facts["total_shares"] == Decimal(expected)
+
+
 def test_ocr_truncated_grouped_amount_is_not_an_accepted_fact() -> None:
     assert _parse_fact_line("短期借款 98 079,980 100,674,419") is None
     assert _parse_fact_line("短期借款 28 98,079,980 100,674,419") == (

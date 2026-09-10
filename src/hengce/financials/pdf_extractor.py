@@ -8,10 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol
 
-from pypdf import PdfReader
+from pypdf import PageObject, PdfReader, PdfWriter
 
 from hengce.contracts.enums import QualityStatus, ReportType, StatementType
 from hengce.contracts.financial import FilingDescriptor
@@ -528,7 +529,7 @@ class CninfoPdfExtractor:
         cache_path = (
             self.ocr_cache_root
             / pdf_content_hash
-            / f"rapidocr-v2-page-{page_number}.txt"
+            / f"rapidocr-v3-page-{page_number}.txt"
             if self.ocr_cache_root is not None
             else None
         )
@@ -639,10 +640,21 @@ class CninfoPdfExtractor:
         formal_statements_complete = False
         formal_statements_started = False
         formal_cash_flow_started = False
+        recovered_cash_names: set[str] = set()
         for page_number, text in pages:
             if not text:
                 continue
             raw_lines = text.splitlines()
+            cash_subtotals: dict[tuple[str, str], list[tuple[Decimal, str]]] = {}
+            normalized_page_text = re.sub(r"\s+", "", text)
+            explicit_current_share_table = (
+                f"{descriptor.report_period.year}年年度报告" in normalized_page_text
+                and "股份变动情况表" in normalized_page_text
+                and "截至报告期末" in normalized_page_text
+                and "本次变动前" in normalized_page_text
+                and "本次变动后" in normalized_page_text
+                and re.search(r"单位[：:]股(?:\b|本次)", normalized_page_text) is not None
+            )
             split_value_statement = next(
                 (
                     title
@@ -817,6 +829,7 @@ class CninfoPdfExtractor:
                     continue
                 title = _formal_statement_title(normalized_heading)
                 if title is not None:
+                    cash_subtotals.clear()
                     if statement_title == title[0] and statement_type is title[1]:
                         pending_label = ""
                         continue
@@ -972,6 +985,7 @@ class CninfoPdfExtractor:
                     line = normalized_income_line
                 standalone_inline_unit = _INLINE_CNY_UNIT.fullmatch(line.strip())
                 if standalone_inline_unit is not None and _ALIASES.get(pending_label):
+                    cash_subtotals.clear()
                     unit = _UNIT_DEFINITIONS[standalone_inline_unit.group(1)]
                     continue
                 unit_match = _UNIT.search(line)
@@ -986,6 +1000,8 @@ class CninfoPdfExtractor:
                         if unit_match is not None
                         else bare_unit_match.group(1)
                     )
+                    if unit != _UNIT_DEFINITIONS[unit_name]:
+                        cash_subtotals.clear()
                     unit = _UNIT_DEFINITIONS[unit_name]
                     if formal_statements_started:
                         last_formal_unit = unit
@@ -1084,6 +1100,16 @@ class CninfoPdfExtractor:
                     _NEGATIVE_VALUE_SENTINEL
                 )
                 fact_source_line = line
+                recovered_cash_evidence = None
+                recovered_cash = None
+                if (
+                    statement_type is StatementType.CASH_FLOW
+                    and unit is not None and unit[0] == "CNY"
+                    and statement_title not in _COMBINED_STATEMENT_TITLES
+                ):
+                    recovered_cash = _cash_net_from_visible_subtotals(line, cash_subtotals)
+                else:
+                    cash_subtotals.clear()
                 parsed_line = (
                     _parse_combined_bank_group_fact(line)
                     if statement_title in _COMBINED_STATEMENT_TITLES
@@ -1103,6 +1129,10 @@ class CninfoPdfExtractor:
                 if parsed_line is None:
                     fact_source_line = line
                     parsed_line = _parse_fact_line(line)
+                if parsed_line is None and recovered_cash is not None:
+                    name, value, recovered_cash_evidence = recovered_cash
+                    parsed_line = name, value
+                    recovered_cash_names.add(name)
                 if parsed_line is None and statement_type is StatementType.CASH_FLOW:
                     parsed_line = _parse_truncated_cash_exchange(line)
                     if parsed_line is None:
@@ -1119,7 +1149,7 @@ class CninfoPdfExtractor:
                         ) :]
                 if (
                     descriptor.report_type is ReportType.ANNUAL
-                    and page_number <= 100
+                    and (page_number <= 100 or explicit_current_share_table)
                     and "股份总数" in line
                     and _parse_share_change_total(line) is not None
                 ):
@@ -1253,7 +1283,7 @@ class CninfoPdfExtractor:
                         page_number=page_number,
                         statement_type=statement_type,
                         source_text_hash=hashlib.sha256(
-                            raw_line.strip().encode("utf-8")
+                            (recovered_cash_evidence or raw_line.strip()).encode("utf-8")
                         ).hexdigest(),
                         source_priority=_formal_fact_priority(
                             canonical_name,
@@ -1305,7 +1335,11 @@ class CninfoPdfExtractor:
                 continue
             facts[name] = name_candidates[0].value
 
-        derivations: list[tuple[str, tuple[str, ...]]] = []
+        derivations: list[tuple[str, tuple[str, ...]]] = [
+            (name, ("visible_cash_inflow_subtotal", "visible_cash_outflow_subtotal",
+                    "matching_printed_net_magnitude"))
+            for name in sorted(recovered_cash_names & facts.keys())
+        ]
         if "equity" not in facts and {"total_assets", "total_liabilities"}.issubset(facts):
             component_names = ("total_assets", "total_liabilities")
             component_candidates = [grouped[name][0] for name in component_names]
@@ -1548,6 +1582,12 @@ class CninfoPdfExtractor:
             "report_type": descriptor.report_type.value,
         }
         derivations = dict(extracted.derivations)
+        for name in sorted(set(_CASH_FLOW_RECONCILIATION) & derivations.keys()):
+            if "matching_printed_net_magnitude" in derivations[name]:
+                normalization_metadata[f"{name}_derivation_version"] = "cash-subtotals-v1"
+                normalization_metadata[f"{name}_derivation_inputs"] = ",".join(
+                    derivations[name]
+                )
         for component_name in sorted(_INTEREST_BEARING_DEBT_COMPONENTS & derivations.keys()):
             normalization_metadata[f"{component_name}_derivation_version"] = (
                 _OMITTED_DEBT_COMPONENT_DERIVATION_VERSION
@@ -1662,6 +1702,37 @@ def _normalize_interleaved_income_header(
     ):
         return None
     return f"营业总收入 | {match.group('current')}" if match is not None else line
+
+
+def _cash_net_from_visible_subtotals(
+    line: str,
+    subtotals: dict[tuple[str, str], list[tuple[Decimal, str]]],
+) -> tuple[str, Decimal, str] | None:
+    """Recover a damaged negative only with same-page independent arithmetic."""
+    subtotal = re.fullmatch(r"(经营|投资|筹资)活动现金流(入|出)小计\s+(.+)", line)
+    if subtotal is not None:
+        parsed = _parse_fact_line("经营活动产生的现金流量净额 " + subtotal[3])
+        if parsed is not None and parsed[1] >= 0:
+            subtotals.setdefault((subtotal[1], subtotal[2]), []).append((parsed[1], line))
+        return None
+    damaged = re.fullmatch(
+        rf"(经营|投资|筹资)活动使用的现金流量净额\s+"
+        rf"({_GROUPED_INTEGER}(?:\.\d+)?)\)\s+"
+        rf"(?:{_ACCOUNTING_NUMBER}|{_GROUPED_INTEGER}\))", line,
+    )
+    if damaged is None:
+        return None
+    inflows = subtotals.get((damaged[1], "入"), [])
+    outflows = subtotals.get((damaged[1], "出"), [])
+    if len(inflows) != 1 or len(outflows) != 1:
+        return None
+    value = inflows[0][0] - outflows[0][0]
+    magnitude = Decimal(re.sub(r"[,\s]", "", damaged[2]))
+    if value >= 0 or -value != magnitude:
+        return None
+    name = {"经营": "operating_cash_flow", "投资": "investing_cash_flow",
+            "筹资": "financing_cash_flow"}[damaged[1]]
+    return name, value, "\n".join((inflows[0][1], outflows[0][1], line))
 
 
 def _parse_fact_line(line: str) -> tuple[str, Decimal] | None:
@@ -2420,16 +2491,38 @@ def _rapidocr_engine() -> object:
 
 
 def _rapidocr_page_text(page: _PdfPage, _page_number: int) -> str | None:
-    """OCR the largest embedded scan and rebuild reading-order table rows."""
+    """OCR the complete rendered page and rebuild reading-order table rows."""
     try:
-        rotation = int(page.get("/Rotate", 0)) % 360  # type: ignore[attr-defined]
-        images = list(page.images)  # type: ignore[attr-defined]
-        image = max(
-            (item.image for item in images),
-            key=lambda candidate: candidate.width * candidate.height,
-        )
-        if rotation:
-            image = image.rotate(-rotation, expand=True)
+        if isinstance(page, PageObject):
+            import pypdfium2 as pdfium
+
+            # Images may cover only part of a page. Preserve vector text, masks,
+            # all image tiles and rotation instead of selecting a single image.
+            with PdfWriter() as writer, BytesIO() as buffer:
+                writer.add_page(page)
+                writer.write(buffer)
+                document = pdfium.PdfDocument(buffer.getvalue())
+                try:
+                    rendered_page = document[0]
+                    try:
+                        bitmap = rendered_page.render(scale=2)
+                        try:
+                            image = bitmap.to_pil().copy()
+                        finally:
+                            bitmap.close()
+                    finally:
+                        rendered_page.close()
+                finally:
+                    document.close()
+        else:
+            rotation = int(page.get("/Rotate", 0)) % 360  # type: ignore[attr-defined]
+            images = list(page.images)  # type: ignore[attr-defined]
+            image = max(
+                (item.image for item in images),
+                key=lambda candidate: candidate.width * candidate.height,
+            )
+            if rotation:
+                image = image.rotate(-rotation, expand=True)
         # Red seals can split a black amount into spurious note/value cells.
         # The red channel attenuates the seal while retaining the printed text;
         # only an in-memory OCR input is changed, never the source image/PDF.
@@ -3071,7 +3164,7 @@ def _reordered_capital_expenditure(
 
 
 def _parse_share_change_total(line: str) -> tuple[str, Decimal] | None:
-    normalized = _normalize_label(line)
+    normalized = _normalize_label(line.replace("\uffa0", ""))
     if re.match(rf"^(?:{_CHINESE_NUMERAL}、)?股份总数", normalized) is None:
         return None
     raw_values = re.findall(_ACCOUNTING_NUMBER, line)
