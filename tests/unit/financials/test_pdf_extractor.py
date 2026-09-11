@@ -3708,6 +3708,25 @@ def test_empty_layout_mode_never_reclassifies_garbled_text_as_image_only(
     assert "PDF_CASH_FLOW_EQUATION_FAILED" in result.issues
 
 
+def test_missing_cash_flow_component_gets_specific_diagnostic(
+    tmp_path: Path,
+) -> None:
+    path, content_hash = write_pdf(tmp_path)
+    page_payload = pages()
+    page_payload[3]["text"] = page_payload[3]["text"].replace(
+        "投资活动产生的现金流量净额 | (50)\n",
+        "",
+    )
+
+    result = extractor(page_payload).extract(
+        pdf_path=path,
+        descriptor=descriptor(content_hash),
+    )
+
+    assert "PDF_CASH_FLOW_FACTS_MISSING" in result.issues
+    assert "PDF_CASH_FLOW_EQUATION_FAILED" in result.issues
+
+
 def test_fully_scanned_annual_report_probes_front_then_financial_tail(
     tmp_path: Path,
 ) -> None:

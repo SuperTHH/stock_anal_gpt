@@ -1638,6 +1638,7 @@ class CninfoPdfExtractor:
         issues: set[str],
     ) -> None:
         if not set(_CASH_FLOW_RECONCILIATION).issubset(facts):
+            issues.add("PDF_CASH_FLOW_FACTS_MISSING")
             issues.add("PDF_CASH_FLOW_EQUATION_FAILED")
             return
         calculated = sum(
